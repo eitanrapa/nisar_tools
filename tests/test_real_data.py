@@ -73,15 +73,26 @@ def test_real_crop_and_self_interferogram(tmp_path):
 
 @pytest.mark.skipif(not PATH2, reason="set NISAR_TEST_GSLC2 for a real pair")
 def test_real_two_date_pipeline(tmp_path):
+    from nisar_tools import geo
+
     g1, g2 = GSLC(PATH), GSLC(PATH2)
     try:
         assert g1.epsg == g2.epsg
+        # Full frames are ~38 GB each; crop a modest (~0.05 deg) real box near
+        # the granule centre so the test exercises multiple chunks without
+        # materialising the whole image.
+        cx = float(np.median(g1.x_coords))
+        cy = float(np.median(g1.y_coords))
+        half = 1000 * abs(g1.x_spacing)  # ~2000-pixel box
+        bbox = geo.native_bbox_to_lonlat(cx - half, cx + half, cy - half, cy + half, g1.epsg)
+
         ws = Workspace(tmp_path / "ws")
-        stack = GSLCStack.from_gslcs([g1, g2]).persist(ws, "slc_stack")
+        stack = GSLCStack.from_gslcs([g1, g2], bbox=bbox).persist(ws, "slc_stack")
     finally:
         g1.close()
         g2.close()
 
+    assert stack.sizes["time"] == 2
     igrams = stack.form_interferograms(looks=5, downsample=True).persist(ws, "igrams")
     assert igrams.sizes["pair"] == 1
     unw = igrams.unwrap(ws, nproc=4)
