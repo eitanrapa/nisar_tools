@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nisar-tools"
+version = "0.1.0"
+description = "Out-of-core, object-oriented tools for cropping, merging, and processing NISAR GSLC products into interferograms."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Eitan Rapaport" }]
+dependencies = [
+    "numpy",
+    "scipy",
+    "h5py",
+    "xarray",
+    "dask[array]",
+    "zarr>=2.18,<3",
+    "rioxarray",
+    "pyproj",
+    "snaphu",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+# pygmt pulls in the GMT native library; keep it optional so the package
+# imports cleanly on machines without GMT.
+mask = ["pygmt"]
+dev = ["pytest", "dask[diagnostics]"]
+
+[tool.setuptools.packages.find]
+include = ["nisar_tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -621,8 +621,12 @@ def download_files(download_dir, files):
         if not isinstance(file, str):
             raise ValueError("Files need to be strings")
 
-    # Setup a signal trap for SIGINT (Ctrl+C)
-    signal.signal(signal.SIGINT, signal_handler)
+    # Setup a signal trap for SIGINT (Ctrl+C). signal.signal only works on the
+    # main thread, so skip it when called from a worker thread.
+    import threading
+
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, signal_handler)
 
     downloader = bulk_downloader(download_dir=download_dir, files=files)
     downloader.download_files()
