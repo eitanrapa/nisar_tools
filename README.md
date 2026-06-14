@@ -17,6 +17,30 @@ conda install -c conda-forge h5py "zarr<3" dask rioxarray pyproj snaphu pygmt
 pip install -e .            # add [dev] for tests, [mask] to pull pygmt via pip
 ```
 
+## Setup on a new machine
+
+The conda environment is **not** part of the repository — `git clone` brings the
+code, not the env. To get running on a fresh machine, recreate the environment
+from `environment.yml` (which also installs `nisar_tools` editable and
+`ipykernel`), then register a Jupyter kernel:
+
+```bash
+git clone https://github.com/eitanrapa/nisar_tools.git
+cd nisar_tools
+
+# Build the env (named "remote_sensing") + install the package + ipykernel.
+conda env create -f environment.yml
+conda activate remote_sensing
+
+# Register the kernel, then select "Python (remote_sensing)" in VS Code / Jupyter.
+python -m ipykernel install --user --name remote_sensing \
+    --display-name "Python (remote_sensing)"
+```
+
+`pip install -e .` means the cloned folder *is* the installation — keep it in
+place. A `ModuleNotFoundError: No module named 'nisar_tools'` in the notebook
+almost always means a different kernel is selected than the env above.
+
 ## Pipeline
 
 ```python

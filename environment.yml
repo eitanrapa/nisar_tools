@@ -1,0 +1,21 @@
+name: remote_sensing
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - h5py
+  - xarray
+  - dask
+  - "zarr<3"          # complex64 needs the zarr v2 format
+  - rioxarray
+  - pyproj
+  - snaphu
+  - pygmt             # optional; only needed for water masking
+  - matplotlib
+  - ipykernel         # so this env can be a Jupyter kernel
+  - pytest
+  - pip
+  - pip:
+      - -e .          # install nisar_tools (editable) from this repo
