@@ -124,9 +124,12 @@ class InterferogramStack(RasterStackMixin):
             self.x, self.y, self.epsg, workspace=workspace,
             resolution=resolution, spacing=spacing,
         )
+        # The mask is land=1 / water=NaN; ``where`` needs a boolean condition
+        # (NaN is truthy, so passing the raw mask would keep water pixels).
+        keep = mask.notnull()
         ds = self.ds.copy()
-        ds["igram"] = self.ds["igram"].where(mask)
-        ds["coherence"] = self.ds["coherence"].where(mask)
+        ds["igram"] = self.ds["igram"].where(keep)
+        ds["coherence"] = self.ds["coherence"].where(keep)
         ds.attrs.update(self.ds.attrs)
         return InterferogramStack(ds)
 

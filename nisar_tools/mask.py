@@ -67,7 +67,12 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
         coords={"y": y_coords, "x": x_coords},
         dims=["y", "x"],
     )
-    return mask_xy.interp_like(grid, method="nearest")
+    mask = mask_xy.interp_like(grid, method="nearest")
+    # Drop rio's CRS bookkeeping (the scalar ``spatial_ref`` coordinate):
+    # applying the mask via ``.where`` would propagate it onto the result,
+    # where it collides with the ``spatial_ref`` variable already in the
+    # zarr-backed stacks and makes xarray's merge fail as ambiguous.
+    return mask.reset_coords(drop=True)
 
 
 def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
@@ -90,7 +95,9 @@ def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
         "spacing": spacing,
     }
     if workspace is not None and workspace.has(name, params):
-        return workspace.load(name)["mask"]
+        # ``reset_coords`` also cleans masks cached before ``make_water_mask``
+        # stripped the ``spatial_ref`` coordinate.
+        return workspace.load(name)["mask"].reset_coords(drop=True)
 
     mask = make_water_mask(
         x_coords, y_coords, epsg_code, resolution=resolution, spacing=spacing

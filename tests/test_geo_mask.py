@@ -64,6 +64,44 @@ def test_water_mask_cache_keyed_on_grid(tmp_path, monkeypatch):
     assert len(calls) == 3
 
 
+def test_mask_water_applies_to_zarr_style_stack(monkeypatch):
+    # Regression test for two bugs in mask_water:
+    #  - the mask's rio ``spatial_ref`` coordinate collided with the
+    #    ``spatial_ref`` data variable in zarr-backed stacks (MergeError);
+    #  - ``.where(mask)`` on a 1/NaN mask was a no-op because NaN is truthy,
+    #    so water pixels were silently kept.
+    pytest.importorskip("rioxarray")
+    from nisar_tools import mask as mask_mod
+    from nisar_tools.unwrap import UnwrappedStack
+
+    x = 470_000.0 + 500.0 * np.arange(40)
+    y = 3_630_000.0 - 500.0 * np.arange(40)
+
+    def fake_grdlandmask(region, spacing, maskvalues, resolution, registration):
+        lon = np.linspace(region[0], region[1], 60)
+        lat = np.linspace(region[2], region[3], 50)
+        data = np.ones((50, 60))
+        data[:, :20] = np.nan  # western third is water
+        return xr.DataArray(data, coords={"y": lat, "x": lon}, dims=("y", "x"))
+
+    pygmt = pytest.importorskip("pygmt")
+    monkeypatch.setattr(pygmt, "grdlandmask", fake_grdlandmask)
+
+    ds = xr.Dataset(
+        {
+            "unw": (("pair", "y", "x"), np.ones((2, 40, 40), np.float32)),
+            "spatial_ref": ((), 0),  # as it comes back from zarr
+        },
+        coords={"y": y, "x": x, "pair": [0, 1]},
+        attrs={"epsg": 32611},
+    )
+    masked = UnwrappedStack(ds).mask_water(resolution="i")
+
+    frac = float(np.isfinite(masked.ds["unw"].isel(pair=0)).mean())
+    assert 0.0 < frac < 1.0  # some water blanked, some land kept
+    assert "spatial_ref" in masked.ds.data_vars
+
+
 def test_water_mask_if_gmt_available():
     pytest.importorskip("pygmt")
     from nisar_tools import mask

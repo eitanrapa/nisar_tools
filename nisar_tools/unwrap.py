@@ -105,7 +105,9 @@ class UnwrappedStack(RasterStackMixin):
             resolution=resolution, spacing=spacing,
         )
         ds = self.ds.copy()
-        ds["unw"] = self.ds["unw"].where(mask)
+        # The mask is land=1 / water=NaN; ``where`` needs a boolean condition
+        # (NaN is truthy, so passing the raw mask would keep water pixels).
+        ds["unw"] = self.ds["unw"].where(mask.notnull())
         ds.attrs.update(self.ds.attrs)
         return UnwrappedStack(ds)
 
