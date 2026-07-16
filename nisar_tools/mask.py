@@ -15,10 +15,19 @@ import xarray as xr
 from . import geo
 
 
-def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05):
+def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
+                    resolution="f", spacing="5e"):
     """Build a land=1 / water=NaN mask aligned to the given native grid.
 
     Returns a 2D :class:`xarray.DataArray` on ``(y, x)``.
+
+    ``resolution`` is the GMT/GSHHG coastline resolution
+    (``"f"``/``"h"``/``"i"``/``"l"``/``"c"``, full→crude). ``"f"`` is the most
+    accurate but needs the large full-resolution GSHHG dataset downloaded; if
+    that download is unavailable or its cache is corrupt, pass a coarser
+    resolution such as ``"i"`` (intermediate), which is more than adequate for
+    masking geocoded SAR and downloads reliably. ``spacing`` is the mask grid
+    spacing in lon/lat (GMT units, e.g. ``"5e"`` = 5 arc-seconds).
     """
     import pygmt
 
@@ -37,11 +46,15 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05):
         lat_max + buffer,
     ]
 
+    # maskvalues=[wet, dry]: ocean -> NaN, land -> 1, so multiplying a raster
+    # by this mask keeps land and blanks water. (pygmt >= 0.12 renamed
+    # mask_values -> maskvalues and split border handling into bordervalues;
+    # the default bordervalues treats coastline nodes as land.)
     mask_latlon = pygmt.grdlandmask(
         region=region_latlon,
-        spacing="5e",
-        mask_values=[np.nan, 1, np.nan, 1, np.nan],
-        resolution="f",
+        spacing=spacing,
+        maskvalues=[np.nan, 1],
+        resolution=resolution,
         registration="p",
     )
     mask_latlon = mask_latlon.rio.write_crs("EPSG:4326")
@@ -58,24 +71,32 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05):
 
 
 def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
-                        name="water_mask"):
-    """Return a water mask, computing and caching it in the workspace if given."""
-    if workspace is not None and workspace.exists(name):
-        cached = workspace.load(name)["mask"]
-        if (
-            cached.sizes.get("x") == len(x_coords)
-            and cached.sizes.get("y") == len(y_coords)
-        ):
-            return cached
+                        name="water_mask", resolution="f", spacing="5e"):
+    """Return a water mask, computing and caching it in the workspace if given.
 
-    mask = make_water_mask(x_coords, y_coords, epsg_code)
+    ``resolution``/``spacing`` are forwarded to :func:`make_water_mask`. The
+    cache is keyed on the full grid identity (EPSG, shape, origin) and the
+    mask parameters, so a different crop or resolution never reuses a stale
+    mask; a parameter change recomputes and overwrites.
+    """
+    params = {
+        "stage": name,
+        "epsg": int(epsg_code),
+        "nx": len(x_coords),
+        "ny": len(y_coords),
+        "x0": float(x_coords[0]),
+        "y0": float(y_coords[0]),
+        "resolution": resolution,
+        "spacing": spacing,
+    }
+    if workspace is not None and workspace.has(name, params):
+        return workspace.load(name)["mask"]
+
+    mask = make_water_mask(
+        x_coords, y_coords, epsg_code, resolution=resolution, spacing=spacing
+    )
 
     if workspace is not None:
         ds = mask.to_dataset(name="mask")
-        workspace.store(
-            name,
-            ds,
-            {"stage": name, "epsg": epsg_code, "nx": len(x_coords), "ny": len(y_coords)},
-            overwrite=True,
-        )
+        workspace.store(name, ds, params, overwrite=True)
     return mask

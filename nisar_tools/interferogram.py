@@ -112,12 +112,17 @@ class InterferogramStack(RasterStackMixin):
         return cls(xr.open_zarr(path))
 
     # -- operations --------------------------------------------------------
-    def mask_water(self, workspace=None):
-        """Lazily mask water on both igram and coherence. Returns a new stack."""
+    def mask_water(self, workspace=None, resolution="f", spacing="5e"):
+        """Lazily mask water on both igram and coherence. Returns a new stack.
+
+        ``resolution`` is the GMT coastline resolution; use a coarser value
+        (e.g. ``"i"``) if the full-resolution GSHHG dataset is unavailable.
+        """
         from .mask import water_mask_for_grid
 
         mask = water_mask_for_grid(
-            self.x, self.y, self.epsg, workspace=workspace
+            self.x, self.y, self.epsg, workspace=workspace,
+            resolution=resolution, spacing=spacing,
         )
         ds = self.ds.copy()
         ds["igram"] = self.ds["igram"].where(mask)
