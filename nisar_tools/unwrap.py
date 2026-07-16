@@ -39,8 +39,10 @@ class UnwrappedStack(RasterStackMixin):
         npair = ds.sizes["pair"]
         ny, nx = ds.sizes["y"], ds.sizes["x"]
         looks = int(ds.attrs.get("looks", 1))
-        spacing_az = float(ds.attrs.get("x_spacing", 1.0))
-        spacing_rg = float(ds.attrs.get("y_spacing", 1.0))
+        # On a geocoded near-polar-orbit grid, azimuth (along-track) runs
+        # closest to y and range to x.
+        spacing_az = float(ds.attrs.get("y_spacing", 1.0))
+        spacing_rg = float(ds.attrs.get("x_spacing", 1.0))
 
         nlooks = _kernels.snaphu_nlooks(
             looks, looks, spacing_az, spacing_rg, res_az, res_rg

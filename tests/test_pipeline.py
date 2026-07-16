@@ -1,6 +1,7 @@
 """End-to-end pipeline tests against the legacy module on synthetic data."""
 
 import numpy as np
+import pyproj
 import pytest
 
 import legacy_reference as legacy
@@ -68,6 +69,117 @@ def test_merge_union_grid(gslc_factory):
     assert merged.sizes["y"] == 64
     g1.close()
     g2.close()
+
+
+def test_merge_across_epsg(gslc_factory):
+    # Two frames on one track straddling the UTM zone 10/11 boundary
+    # (lon -120): frame 1 gridded in EPSG:32610, frame 2 in EPSG:32611,
+    # acquired seconds apart on the same pass.
+    ny = nx = 64
+    dx = dy = 10.0
+    to10 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32610", always_xy=True)
+    to11 = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32611", always_xy=True)
+    x10, y10 = to10.transform(-120.0, 34.0)
+    x11, y11 = to11.transform(-120.0, 34.0)
+
+    p1 = gslc_factory(
+        ny=ny, nx=nx, epsg=32610, dx=dx, dy=dy, seed=6,
+        x0=round(x10) - nx * dx, y0=round(y10),
+        datetime_str="2025-11-28T02:32:50.000000000",
+    )
+    # Constant-valued second frame: bilinear resampling must return the
+    # constant wherever the warped frame has coverage.
+    fill = np.full((ny, nx), 2.0 + 2.0j, dtype=np.complex64)
+    p2 = gslc_factory(
+        ny=ny, nx=nx, epsg=32611, dx=dx, dy=dy, data=fill,
+        x0=round(x11), y0=round(y11),
+        datetime_str="2025-11-28T02:33:05.000000000",
+    )
+    g1, g2 = GSLC(p1), GSLC(p2)
+    s1 = GSLCStack.from_gslcs([g1])
+    s2 = GSLCStack.from_gslcs([g2])
+
+    merged = s1.merge(s2)
+
+    # Result stays on self's CRS and lattice, with one paired acquisition.
+    assert merged.epsg == 32610
+    assert merged.sizes["time"] == 1
+    assert np.allclose(np.diff(merged.x), dx)
+    assert np.isin(s1.x, merged.x).all()
+    assert np.isin(s1.y, merged.y).all()
+
+    # Self's samples pass through untouched (exact coords, exact values).
+    orig = s1.ds["slc"].isel(time=0).compute().values
+    sub = merged.ds["slc"].isel(time=0).sel(x=s1.x, y=s1.y).compute().values
+    np.testing.assert_array_equal(sub, orig)
+
+    # The region east of frame 1 comes from the warped frame 2: valid pixels
+    # exist and carry the constant fill.
+    east = merged.ds["slc"].isel(time=0).sel(
+        x=slice(s1.x.max() + 5 * dx, None)
+    ).compute().values
+    valid = east[~np.isnan(east)]
+    assert valid.size > 0.3 * east.size
+    np.testing.assert_allclose(valid, 2.0 + 2.0j, rtol=1e-5)
+    g1.close()
+    g2.close()
+
+
+def test_merge_rejects_offset_lattice(gslc_factory):
+    # Same CRS but grids offset by half a pixel: an outer join would silently
+    # interleave near-duplicate coordinates, so merge must refuse.
+    p1 = gslc_factory(ny=32, nx=32, x0=400000.0, seed=15)
+    p2 = gslc_factory(ny=32, nx=32, x0=400000.0 + 5.0, seed=16)
+    g1, g2 = GSLC(p1), GSLC(p2)
+    s1 = GSLCStack.from_gslcs([g1])
+    s2 = GSLCStack.from_gslcs([g2])
+    with pytest.raises(ValueError, match="sub-pixel"):
+        s1.merge(s2)
+    g1.close()
+    g2.close()
+
+
+def test_merge_pairs_nearby_times(gslc_factory):
+    # Adjacent frames on one pass differ by seconds; merge should pair them
+    # and keep self's timestamps.
+    p1 = gslc_factory(ny=32, nx=32, seed=10,
+                      datetime_str="2025-11-28T02:32:50.000000000")
+    p2 = gslc_factory(ny=32, nx=32, x0=400000.0 + 32 * 10.0, seed=11,
+                      datetime_str="2025-11-28T02:33:02.000000000")
+    g1, g2 = GSLC(p1), GSLC(p2)
+    s1 = GSLCStack.from_gslcs([g1])
+    s2 = GSLCStack.from_gslcs([g2])
+    merged = s1.merge(s2)
+    assert merged.sizes["time"] == 1
+    assert merged.sizes["x"] == 64
+    assert merged.ds["time"].values[0] == np.datetime64(
+        "2025-11-28T02:32:50.000000000"
+    )
+    g1.close()
+    g2.close()
+
+
+def test_merge_rejects_unpairable_times(gslc_factory):
+    # Different cycles (days apart) must not silently merge.
+    p1 = gslc_factory(ny=32, nx=32, seed=12,
+                      datetime_str="2025-11-28T02:32:50.000000000")
+    p2 = gslc_factory(ny=32, nx=32, x0=400000.0 + 32 * 10.0, seed=13,
+                      datetime_str="2025-12-10T02:32:50.000000000")
+    g1, g2 = GSLC(p1), GSLC(p2)
+    s1 = GSLCStack.from_gslcs([g1])
+    s2 = GSLCStack.from_gslcs([g2])
+    with pytest.raises(ValueError, match="No acquisition within"):
+        s1.merge(s2)
+
+    # Mismatched acquisition counts are rejected outright.
+    p3 = gslc_factory(ny=32, nx=32, seed=14,
+                      datetime_str="2025-12-10T02:32:50.000000000")
+    g3 = GSLC(p3)
+    with pytest.raises(ValueError, match="different numbers of acquisitions"):
+        s1.merge(GSLCStack.from_gslcs([g1, g3]))
+    g1.close()
+    g2.close()
+    g3.close()
 
 
 def test_persist_resume_roundtrip(gslc_factory, tmp_path):

@@ -12,7 +12,7 @@ Typical flow::
     stack = GSLCStack.from_gslcs([GSLC(p) for p in paths], bbox=bbox)
     stack = stack.persist(ws, "slc_stack", files=paths, bbox=bbox)
     igrams = stack.form_interferograms(looks=5).persist(ws, "igrams")
-    unw = igrams.unwrap(ws, nlooks=5, spacing_az=..., spacing_rg=...)
+    unw = igrams.unwrap(ws, nproc=8)
 """
 
 from .gslc import GSLC

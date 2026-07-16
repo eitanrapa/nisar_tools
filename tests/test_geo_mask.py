@@ -29,6 +29,41 @@ def test_project_to_latlon_from_array():
     assert out.rio.crs.to_epsg() == 4326
 
 
+def test_water_mask_cache_keyed_on_grid(tmp_path, monkeypatch):
+    # The workspace cache must recompute when the grid origin or the mask
+    # parameters change, not just when the shape changes.
+    from nisar_tools import Workspace
+    from nisar_tools import mask as mask_mod
+
+    ws = Workspace(tmp_path / "ws")
+    x = 400000.0 + 10.0 * np.arange(8)
+    y = 4_000_000.0 - 10.0 * np.arange(6)
+
+    calls = []
+
+    def fake_make(x_coords, y_coords, epsg_code, buffer=0.05,
+                  resolution="f", spacing="5e"):
+        calls.append(1)
+        return xr.DataArray(
+            np.ones((len(y_coords), len(x_coords))),
+            coords={"y": y_coords, "x": x_coords},
+            dims=("y", "x"),
+        )
+
+    monkeypatch.setattr(mask_mod, "make_water_mask", fake_make)
+
+    mask_mod.water_mask_for_grid(x, y, 32611, workspace=ws)
+    mask_mod.water_mask_for_grid(x, y, 32611, workspace=ws)  # cache hit
+    assert len(calls) == 1
+    # Same shape, different origin: must recompute.
+    mask_mod.water_mask_for_grid(x + 100.0, y, 32611, workspace=ws)
+    assert len(calls) == 2
+    # Same grid, different coastline resolution: must recompute.
+    mask_mod.water_mask_for_grid(x + 100.0, y, 32611, workspace=ws,
+                                 resolution="i")
+    assert len(calls) == 3
+
+
 def test_water_mask_if_gmt_available():
     pytest.importorskip("pygmt")
     from nisar_tools import mask

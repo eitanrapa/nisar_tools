@@ -68,6 +68,58 @@ fig, ax = unw.plot(pair=0)
 
 A runnable end-to-end example is in [notebooks/nisar_tools.ipynb](notebooks/nisar_tools.ipynb).
 
+### Stitching along-track frames
+
+Adjacent frames from the same pass merge even when the track crosses a UTM
+zone boundary: `merge` pairs acquisitions by time (frames along a pass differ
+by seconds, never exactly) and, when the CRSs differ, warps the other stack
+onto this stack's grid one date at a time:
+
+```python
+stitched = stack_a.merge(stack_b)                         # bilinear on I/Q
+stitched = stack_a.merge(stack_b, resampling="nearest")   # exact samples
+```
+
+The union grid keeps NaN where neither frame has data (including thin wedges
+from the zone rotation) — crop to the valid interior before forming
+interferograms, exactly as with the NaN fill of a single granule. Frames on
+*different* tracks have no common pass and cannot be stitched at the SLC
+level; process each track through unwrapping and mosaic the unwrapped
+products instead.
+
+### Running the notebook
+
+The notebook must run in the environment where `nisar_tools` and its
+dependencies are installed. Register that env as a Jupyter kernel once, then
+select **`Python (remote_sensing)`** in the kernel picker:
+
+```bash
+python -m pip install ipykernel
+python -m ipykernel install --user --name remote_sensing --display-name "Python (remote_sensing)"
+```
+
+(Replace `remote_sensing` with your env name.) A `ModuleNotFoundError: No
+module named 'nisar_tools'` almost always means the notebook is running on a
+different kernel than the one the package is installed into.
+
+This env ships duplicate OpenMP runtimes, and pygmt may otherwise bind to a
+system GMT (e.g. a Homebrew install) whose coastline data the conda netCDF
+stack can't read — causing water masking to fail with GSHHG errors. Both are
+fixed by setting two variables in the kernel's environment. Edit
+`~/Library/Jupyter/kernels/<name>/kernel.json` to add:
+
+```json
+"env": {
+  "KMP_DUPLICATE_LIB_OK": "TRUE",
+  "GMT_LIBRARY_PATH": "/path/to/your/env/lib"
+}
+```
+
+`GMT_LIBRARY_PATH` should point at the `lib` directory of the same env, so
+pygmt loads that env's `libgmt` (matched to its netCDF/HDF5). If you can't use
+the full-resolution coastline, pass a coarser one, e.g.
+`unw.mask_water(workspace=ws, resolution="i")`.
+
 ## Design
 
 | Class | Wraps | Dims |
@@ -79,7 +131,8 @@ A runnable end-to-end example is in [notebooks/nisar_tools.ipynb](notebooks/nisa
 | `Workspace` | per-stage Zarr stores | — |
 
 - **Lazy everywhere** between disk reads and stage persistence. Cropping and
-  merging are coordinate slices; multilooking uses `dask.array.map_overlap`
+  merging are coordinate slices (a cross-zone merge warps one date per dask
+  task onto the reference lattice); multilooking uses `dask.array.map_overlap`
   over the original scipy filters, so results are independent of chunk layout.
 - **Zarr stages** record a parameter hash; `Workspace.has(name, params)` lets a
   re-run skip a finished stage. Unwrapping additionally tracks per-pair "done"
