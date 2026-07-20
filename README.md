@@ -14,8 +14,11 @@ conda-forge; `pygmt` is optional and only needed for water masking.
 
 ```bash
 conda install -c conda-forge h5py "zarr<3" dask rioxarray pyproj snaphu pygmt
-pip install -e .            # add [dev] for tests, [mask] to pull pygmt via pip
+pip install -e .            # add [dev] for tests, [mask] for pygmt, [download] for earthaccess+sardem
 ```
+
+The `download` extra (earthaccess + sardem) is only needed for fetching inputs
+and is imported lazily, so the package works without it.
 
 ## Setup on a new machine
 
@@ -41,6 +44,40 @@ python -m ipykernel install --user --name remote_sensing \
 place. A `ModuleNotFoundError: No module named 'nisar_tools'` in the notebook
 almost always means a different kernel is selected than the env above.
 
+## Downloading inputs
+
+The `download` module fetches the two inputs a run needs — GSLC granules and a
+DEM — all behind lazily-imported optional dependencies and all needing an
+[Earthdata Login](https://urs.earthdata.nasa.gov). (Orbit ephemeris is *not*
+needed: the geometry is read from each GSLC's built-in cube — see below.)
+Bounding boxes use this package's `(lon_min, lon_max, lat_min, lat_max)` order
+(the same `GSLC.crop` takes).
+
+```python
+from nisar_tools import download
+
+download.login()                        # earthaccess: netrc / env vars / interactive
+bbox = (-120.5, -119.5, 34.0, 35.0)
+
+# GSLCs — search Earthdata by area + time (earthaccess), or by exact name.
+gslcs = download.download_gslcs("data/gslc", bbox=bbox, temporal=("2025-11", "2025-12"))
+gslcs = download.download_gslcs("data/gslc", granules=["NISAR_L2_GSLC_..."])
+
+# DEM via sardem — default is the official NISAR reference DEM (needs ~/.netrc);
+# pass data_source="COP" for Copernicus (no login).
+dem   = download.download_dem("data/dem.tif", bbox)
+```
+
+Two backends for granules: **earthaccess** (`method="earthaccess"`, the default —
+searches CMR by name/area/time) and the original **direct-by-name** path
+(`method="asf"`), which pulls straight from the NISAR bucket using only the
+standard library — handy where earthaccess can't be installed (its latest
+release needs Python ≥ 3.12):
+
+```python
+download.download_gslcs("data/gslc", granules=["NISAR_L2_GSLC_..."], method="asf")
+```
+
 ## Pipeline
 
 ```python
@@ -58,15 +95,37 @@ for g in gslcs:
 # 2. Form multilooked interferograms + coherence.
 igrams = stack.form_interferograms(pairs="sequential", looks=5).persist(ws, "igrams")
 
-# 3. Unwrap with SNAPHU, one pair at a time (resumable).
+# 3. Goldstein-Werner phase filter (sharpens fringes before unwrapping).
+#    alpha=float for constant strength, or "adaptive" for Baran (1-coherence).
+igrams = igrams.filter_goldstein(alpha="adaptive").persist(ws, "igrams_filt")
+
+# 4. Unwrap with SNAPHU, one pair at a time (resumable).
 unw = igrams.unwrap(ws, nproc=8)
 
-# 4. Mask water and plot.
+# 5. Convert to line-of-sight displacement + per-pixel look geometry.
+los = unw.to_los(paths[0], dem="data/dem.tif").persist(ws, "los")
+fig, ax = los.plot(pair=0)            # displacement (m); los.plot_incidence() for angles
+
+# 6. Mask water and plot.
 unw = unw.mask_water(workspace=ws)
 fig, ax = unw.plot(pair=0)
 ```
 
 A runnable end-to-end example is in [notebooks/nisar_tools.ipynb](notebooks/nisar_tools.ipynb).
+
+### Line-of-sight displacement and look angles
+
+`UnwrappedStack.to_los(gslc, dem=...)` scales the unwrapped phase to metres,
+`d_los = +(λ/4π)·φ` (positive **toward the sensor**; λ from the GSLC's
+`centerFrequency`), and attaches per-pixel look geometry. The geometry comes
+from the GSLC's own ISCE3-computed cube at `metadata/radarGrid` (incidence angle
+and the target→sensor ENU line-of-sight unit vector, tabulated vs. height),
+trilinearly interpolated in `(x, y, DEM-height)`. So it needs a `gslc` (cube +
+λ) and a `dem` GeoTIFF — not the orbit ephemeris, which the cube already
+encodes. The resulting [`LOSStack`](nisar_tools/los.py) carries `los`
+`(pair, y, x)` plus shared `incidence_angle` and `los_east`/`los_north`/`los_up`
+`(y, x)` for projecting 3-D motion into LOS. Pass `dem=None` for sea-level
+geometry, or `sign=-1` to flip the displacement convention.
 
 ### Stitching along-track frames
 
@@ -147,6 +206,26 @@ The interferogram/coherence formula and the SNAPHU tile/looks sizing are ported
 verbatim from the original procedural module, retained as
 `tests/legacy_reference.py` — the oracle the dask kernels are
 equivalence-tested against.
+
+The Goldstein–Werner filter (`filter_goldstein`) is new, so it has no legacy
+oracle. It runs on the multilooked interferogram, between forming and
+unwrapping: each pair is tiled into overlapping `patch_size` windows whose
+spectra are scaled by `(smooth(|Z|)/max)**alpha` and recombined by weighted
+overlap-add. `alpha` is either a float in `[0, 1]` (constant strength; `0` is an
+exact no-op) or `"adaptive"` for the Baran et al. (2003) coherence-adaptive
+strength — per patch, `alpha = 1 − mean coherence`, so incoherent areas are
+filtered hard and coherent ones barely touched, matching GMTSAR's `phasefilt`
+run with `-amp1/-amp2`. Because a multilooked pair is small, the filter runs one
+whole plane at a time — the same one-pair-in-memory footprint the unwrap stage
+already assumes — and only touches `igram`, leaving `coherence` unchanged. It is
+pinned by its properties (exact `alpha=0` round-trip, uniform-coherence adaptive
+≡ constant `1−c`, phase-noise reduction, NaN preservation) rather than a legacy
+result.
+
+Our algorithm follows the Goldstein–Werner family; versus GMTSAR's `phasefilt`
+it additionally smooths the spectrum (closer to Goldstein 1998), tapers each
+patch (Welch-style), and normalizes so `alpha=0` is exact — GMTSAR's default
+`alpha=0.5` and `psize=32` match our defaults.
 
 ## Tests
 
