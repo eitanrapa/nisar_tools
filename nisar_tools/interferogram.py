@@ -133,6 +133,70 @@ class InterferogramStack(RasterStackMixin):
         ds.attrs.update(self.ds.attrs)
         return InterferogramStack(ds)
 
+    def filter_goldstein(self, alpha=0.5, patch_size=32, overlap=0.75, psd_smooth=3):
+        """Goldstein-Werner phase-filter every pair's igram. Returns a new stack.
+
+        A lazy, per-pair adaptive spectral filter applied after multilooking and
+        before unwrapping: it sharpens fringes and suppresses phase noise, which
+        greatly reduces the residues SNAPHU must resolve. See
+        :func:`nisar_tools._kernels.goldstein_filter` for the algorithm and
+        parameters.
+
+        ``alpha`` is either a float in ``[0, 1]`` (constant strength; ``0`` is a
+        no-op) or ``"adaptive"`` for the Baran et al. (2003) coherence-adaptive
+        strength ``1 - coherence`` per patch, matching GMTSAR's ``phasefilt``
+        with ``-amp1/-amp2``. The adaptive mode reads this stack's ``coherence``.
+
+        Only ``igram`` is filtered; ``coherence`` (a separate quality measure) is
+        left untouched. The filter is a whole-plane FFT operation, so each pair's
+        spatial plane is processed as a single chunk -- the same one-pair-in-memory
+        footprint the unwrap stage already assumes.
+        """
+        adaptive = isinstance(alpha, str)
+        chunks = {"pair": 1, "y": -1, "x": -1}
+        igram = self.ds["igram"].chunk(chunks)
+        kwargs = dict(
+            patch_size=int(patch_size), overlap=float(overlap),
+            psd_smooth=int(psd_smooth),
+        )
+
+        if adaptive:
+            # Pass coherence as a second core-dims input so it is blocked
+            # per-pair alongside the igram.
+            coherence = self.ds["coherence"].chunk(chunks)
+            filtered = xr.apply_ufunc(
+                _kernels.goldstein_filter_planes,
+                igram, coherence,
+                kwargs=dict(alpha=alpha, **kwargs),
+                input_core_dims=[["y", "x"], ["y", "x"]],
+                output_core_dims=[["y", "x"]],
+                dask="parallelized",
+                output_dtypes=[igram.dtype],
+            )
+            alpha_attr = alpha
+        else:
+            filtered = xr.apply_ufunc(
+                _kernels.goldstein_filter_planes,
+                igram,
+                kwargs=dict(alpha=float(alpha), **kwargs),
+                input_core_dims=[["y", "x"]],
+                output_core_dims=[["y", "x"]],
+                dask="parallelized",
+                output_dtypes=[igram.dtype],
+            )
+            alpha_attr = float(alpha)
+
+        ds = self.ds.copy()
+        ds["igram"] = filtered
+        ds.attrs.update(self.ds.attrs)
+        ds.attrs["goldstein"] = {
+            "alpha": alpha_attr,
+            "patch_size": int(patch_size),
+            "overlap": float(overlap),
+            "psd_smooth": int(psd_smooth),
+        }
+        return InterferogramStack(ds)
+
     def unwrap(self, workspace, name="unwrapped", nproc=1, res_az=8, res_rg=3,
                overwrite=False):
         """Unwrap every pair with SNAPHU. See :class:`UnwrappedStack`."""
@@ -161,6 +225,10 @@ class InterferogramStack(RasterStackMixin):
             "pairs": self.ds.attrs.get("pairs"),
             **params,
         }
+        # Only record filter params once filtered, so an unfiltered igrams stage
+        # keeps its original hash (and re-running with a new alpha re-computes).
+        if self.ds.attrs.get("goldstein") is not None:
+            full["goldstein"] = self.ds.attrs["goldstein"]
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return InterferogramStack(reopened)
 
