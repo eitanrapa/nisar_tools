@@ -9,4 +9,3 @@ dist/
 # Local processing outputs
 workdir/
 *.zarr/
-graphify-out/
