@@ -28,6 +28,11 @@ dependencies = [
 # pygmt pulls in the GMT native library; keep it optional so the package
 # imports cleanly on machines without GMT.
 mask = ["pygmt"]
+# earthaccess (Earthdata search/download) and sardem (DEMs) are only needed for
+# the download module and are imported lazily. NOTE: earthaccess's latest
+# release requires Python >= 3.12; on 3.11 pin an older earthaccess (or use the
+# standard-library-only direct method, download_gslcs(..., method="asf")).
+download = ["earthaccess", "sardem"]
 dev = ["pytest", "dask[diagnostics]"]
 
 [tool.setuptools.packages.find]

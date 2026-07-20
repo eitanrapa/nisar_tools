@@ -19,3 +19,7 @@ dependencies:
   - pip
   - pip:
       - -e .          # install nisar_tools (editable) from this repo
+      # Optional, only for the download module (imported lazily). pip honours
+      # Requires-Python, so it picks an earthaccess compatible with 3.11.
+      - earthaccess   # Earthdata search/download of GSLCs + orbit ephemeris
+      - sardem        # DEM download/stitching (incl. the NISAR reference DEM)
