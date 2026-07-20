@@ -111,6 +111,20 @@ class UnwrappedStack(RasterStackMixin):
         ds.attrs.update(self.ds.attrs)
         return UnwrappedStack(ds)
 
+    def to_los(self, gslc, dem=None, frequency="A", wavelength=None, sign=1):
+        """Convert to LOS displacement + per-pixel look geometry.
+
+        Scales the unwrapped phase to metres and attaches the incidence angle
+        and ENU line-of-sight unit vector interpolated from ``gslc``'s built-in
+        geometry cube at the ``dem`` height. See :class:`LOSStack`.
+        """
+        from .los import LOSStack
+
+        return LOSStack.from_unwrapped(
+            self, gslc, dem=dem, frequency=frequency,
+            wavelength=wavelength, sign=sign,
+        )
+
     def to_latlon(self, pair=0):
         """Reproject a single pair's unwrapped phase to lon/lat (eager)."""
         from . import geo

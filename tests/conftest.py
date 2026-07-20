@@ -21,6 +21,41 @@ import pytest
 
 GRID = "science/LSAR/GSLC/grids/frequencyA"
 IDENT = "science/LSAR/identification"
+RADAR_GRID = "science/LSAR/GSLC/metadata/radarGrid"
+CENTER_FREQ_A = 1_239_000_000.0  # Hz, NISAR L-band frequency A -> lambda ~0.242 m
+
+
+def _write_synthetic_geometry(f, grid, ident, x_coords, y_coords, dx, dy, epsg):
+    """Write a minimal ``metadata/radarGrid`` geometry cube + ``centerFrequency``.
+
+    Incidence angle rises linearly across x (near->far range) from 30 to 45 deg,
+    independent of y and height; the LOS unit vector is
+    ``(east=-sin(inc), north=0, up=cos(inc))``. Being analytically known, tests
+    can check the trilinear interpolation exactly.
+    """
+    grid.create_dataset("centerFrequency", data=np.float64(CENTER_FREQ_A))
+    ident.create_dataset("lookDirection", data=np.bytes_("Left"))
+
+    heights = np.array([-500.0, 0.0, 500.0, 1000.0])
+    cx = np.linspace(x_coords.min() - dx, x_coords.max() + dx, 12)
+    cy = np.linspace(y_coords.min() - dy, y_coords.max() + dy, 10)
+    frac = (cx - cx.min()) / (cx.max() - cx.min())
+    inc_deg = (30.0 + 15.0 * frac).astype(np.float32)  # varies along x only
+    inc = np.ascontiguousarray(
+        np.broadcast_to(inc_deg, (len(heights), len(cy), len(cx)))
+    )
+    losx = np.ascontiguousarray((-np.sin(np.deg2rad(inc))).astype(np.float32))
+    losy = np.zeros_like(losx)
+
+    rg = f.create_group(RADAR_GRID)
+    rg.create_dataset("incidenceAngle", data=inc)
+    rg.create_dataset("losUnitVectorX", data=losx)
+    rg.create_dataset("losUnitVectorY", data=losy)
+    rg.create_dataset("heightAboveEllipsoid", data=heights)
+    rg.create_dataset("xCoordinates", data=cx)
+    rg.create_dataset("yCoordinates", data=cy)
+    projd = rg.create_dataset("projection", data=np.int32(epsg))
+    projd.attrs["epsg_code"] = np.int32(epsg)
 
 
 def write_synthetic_gslc(
@@ -38,6 +73,7 @@ def write_synthetic_gslc(
     polarization="HH",
     data=None,
     seed=0,
+    write_geometry=False,
 ):
     """Write a minimal but structurally faithful GSLC HDF5 file.
 
@@ -75,6 +111,9 @@ def write_synthetic_gslc(
         ident = f.create_group(IDENT)
         ident.create_dataset("orbitPassDirection", data=np.bytes_(direction))
         ident.create_dataset("zeroDopplerStartTime", data=np.bytes_(datetime_str))
+
+        if write_geometry:
+            _write_synthetic_geometry(f, grid, ident, x_coords, y_coords, dx, dy, epsg)
 
     return path
 
