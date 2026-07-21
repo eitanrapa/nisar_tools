@@ -72,7 +72,12 @@ def test_igram_coherence_dask_matches_legacy(convolution, downsample, shape):
 
     d1 = da.from_array(c1, chunks=(16, 16))
     d2 = da.from_array(c2, chunks=(16, 16))
-    igram_d, corr_d = _kernels.igram_coherence(d1, d2, max_x, max_y, 5, downsample, convolution)
+    # nan_aware=False is the legacy formula; the NaN-aware default deliberately
+    # differs from it in the interferogram amplitude near the raster border
+    # (see tests/test_nan_aware.py).
+    igram_d, corr_d = _kernels.igram_coherence(
+        d1, d2, max_x, max_y, 5, downsample, convolution, nan_aware=False
+    )
     igram_d = np.asarray(igram_d)
     corr_d = np.asarray(corr_d)
 

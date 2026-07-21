@@ -61,7 +61,9 @@ class UnwrappedStack(RasterStackMixin):
 
         # Metadata-only store so each pair can be written by region.
         template = _template(ds, npair, ny, nx)
-        workspace.init_store(name, template, params, overwrite=overwrite)
+        workspace.init_store(
+            name, template, params, overwrite=overwrite, source=ds
+        )
 
         done = workspace.pairs_done(name)
         for i in range(npair):
@@ -69,20 +71,15 @@ class UnwrappedStack(RasterStackMixin):
                 continue
             igram = np.asarray(ds["igram"].isel(pair=i).values)
             corr = np.asarray(ds["coherence"].isel(pair=i).values)
-
-            unw, conncomp = snaphu.unwrap(
-                igram,
-                corr,
-                nlooks=nlooks,
-                ntiles=ntiles,
-                tile_overlap=overlap,
-                nproc=nproc,
+            unw, conncomp = _unwrap_pair(
+                igram, corr, nlooks=nlooks, ntiles=ntiles,
+                tile_overlap=overlap, nproc=nproc,
             )
 
             pair_ds = xr.Dataset(
                 {
-                    "unw": (("pair", "y", "x"), unw[None].astype(np.float32)),
-                    "conncomp": (("pair", "y", "x"), conncomp[None].astype(np.uint32)),
+                    "unw": (("pair", "y", "x"), unw[None]),
+                    "conncomp": (("pair", "y", "x"), conncomp[None]),
                 }
             )
             workspace.write_region(name, pair_ds, region={"pair": slice(i, i + 1)})
@@ -142,6 +139,46 @@ class UnwrappedStack(RasterStackMixin):
             f"<UnwrappedStack EPSG:{self.epsg} "
             f"pair={s.get('pair')} y={s.get('y')} x={s.get('x')}>"
         )
+
+
+def _unwrap_pair(igram, corr, *, nlooks, ntiles, tile_overlap, nproc):
+    """Unwrap one pair, keeping its invalid pixels out of the solution.
+
+    SNAPHU silently substitutes zeros for NaN and returns a finite value
+    everywhere, so without a mask the area outside the swath comes back as
+    plausible-looking phase that is indistinguishable downstream. Its ``mask``
+    argument excludes those pixels properly; we then restore NaN so the invalid
+    footprint survives into :class:`~nisar_tools.los.LOSStack`.
+
+    The mask is passed only when something is actually invalid, so a fully
+    valid pair takes exactly the call it did before.
+    """
+    valid = np.isfinite(igram.real) & np.isfinite(igram.imag)
+
+    if not valid.any():
+        # SNAPHU has nothing to solve; skip it rather than let it fail.
+        return (
+            np.full(igram.shape, np.nan, dtype=np.float32),
+            np.zeros(igram.shape, dtype=np.uint32),
+        )
+
+    kwargs = {} if valid.all() else {"mask": valid}
+    unw, conncomp = snaphu.unwrap(
+        igram,
+        corr,
+        nlooks=nlooks,
+        ntiles=ntiles,
+        tile_overlap=tile_overlap,
+        nproc=nproc,
+        **kwargs,
+    )
+
+    unw = unw.astype(np.float32)
+    conncomp = conncomp.astype(np.uint32)
+    if not valid.all():
+        unw[~valid] = np.nan
+        conncomp[~valid] = 0
+    return unw, conncomp
 
 
 def _template(igram_ds, npair, ny, nx):

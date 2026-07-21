@@ -16,6 +16,8 @@ dependencies = [
     "xarray",
     "dask[array]",
     "zarr>=2.18,<3",
+    # Used directly: the HDF5 unshuffle in gslc.py and the stage compressor.
+    "numcodecs",
     "rioxarray",
     "rasterio",
     "affine",

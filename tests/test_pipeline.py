@@ -1,5 +1,7 @@
 """End-to-end pipeline tests against the legacy module on synthetic data."""
 
+import warnings
+
 import numpy as np
 import pyproj
 import pytest
@@ -23,7 +25,8 @@ def test_interferogram_matches_legacy(gslc_factory, convolution, downsample):
     stack = GSLCStack.from_gslcs([g1, g2])
 
     igrams = stack.form_interferograms(
-        pairs="sequential", looks=5, downsample=downsample, convolution=convolution
+        pairs="sequential", looks=5, downsample=downsample,
+        convolution=convolution, nan_aware=False,
     )
     igram_new = igrams.ds["igram"].isel(pair=0).compute().values
     corr_new = igrams.ds["coherence"].isel(pair=0).compute().values
@@ -69,6 +72,59 @@ def test_merge_union_grid(gslc_factory):
     assert merged.sizes["y"] == 64
     g1.close()
     g2.close()
+
+
+def test_merge_keeps_the_canonical_chunk_grid(gslc_factory):
+    """Both sides are re-chunked before the combine, so nothing fragments.
+
+    Crops start mid-chunk at their own phase; combining them directly makes
+    dask split both into the union of their chunk boundaries, which multiplies
+    the chunk count and the graph for the same work.
+    """
+    from nisar_tools._base import SPATIAL_CHUNK
+
+    ny = nx = 5000  # > 2 chunks per axis, and a ragged final chunk
+    p1 = gslc_factory(ny=ny, nx=nx, x0=400000.0, y0=4_000_000.0, seed=4)
+    p2 = gslc_factory(ny=ny, nx=nx, x0=400000.0 + 10.0 * 1234,
+                      y0=4_000_000.0 - 10.0 * 2345, seed=5)   # not chunk-aligned
+    g1, g2 = GSLC(p1), GSLC(p2)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            merged = GSLCStack.from_gslcs([g1]).merge(GSLCStack.from_gslcs([g2]))
+            chunks = merged.ds["slc"].chunks
+
+        perf = [w for w in caught if "Increasing number of chunks" in str(w.message)]
+        assert not perf, f"chunk grid fragmented: {[str(w.message) for w in perf]}"
+
+        ny_u, nx_u = merged.sizes["y"], merged.sizes["x"]
+        assert len(chunks[1]) == -(-ny_u // SPATIAL_CHUNK)
+        assert len(chunks[2]) == -(-nx_u // SPATIAL_CHUNK)
+        # Zarr requires the last chunk to be no larger than the first.
+        assert chunks[1][-1] <= chunks[1][0] and chunks[2][-1] <= chunks[2][0]
+    finally:
+        g1.close()
+        g2.close()
+
+
+def test_merge_preserves_axis_direction(gslc_factory):
+    """The reversing slice must land the axes the same way sortby did."""
+    p1 = gslc_factory(ny=64, nx=64, x0=400000.0, seed=4)
+    p2 = gslc_factory(ny=64, nx=64, x0=400000.0 + 64 * 10.0, seed=5)
+    g1, g2 = GSLC(p1), GSLC(p2)
+    try:
+        s1 = GSLCStack.from_gslcs([g1])
+        merged = s1.merge(GSLCStack.from_gslcs([g2]))
+        # Descending pass: y descends, x ascends, as in the source granules.
+        assert (s1.y[0] > s1.y[-1]) == (merged.y[0] > merged.y[-1])
+        assert np.all(np.diff(merged.y) < 0)
+        assert np.all(np.diff(merged.x) > 0)
+        # Self's own samples survive unchanged at their own coordinates.
+        got = merged.ds["slc"].sel(x=s1.x, y=s1.y).compute().values
+        np.testing.assert_array_equal(got, s1.ds["slc"].compute().values)
+    finally:
+        g1.close()
+        g2.close()
 
 
 def test_merge_across_epsg(gslc_factory):

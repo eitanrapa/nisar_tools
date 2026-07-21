@@ -74,12 +74,17 @@ def write_synthetic_gslc(
     data=None,
     seed=0,
     write_geometry=False,
+    compressed=True,
 ):
     """Write a minimal but structurally faithful GSLC HDF5 file.
 
     ``x`` is ascending; ``y`` is descending for a ``Descending`` pass and
     ascending otherwise (matching how NISAR stores geocoded grids). The
     ``yCoordinateSpacing`` is stored signed, as in real products.
+
+    ``compressed`` (default, matching real products) writes the image gzip+
+    shuffle filtered with a NaN fill value. Pass ``False`` for a plain
+    uncompressed dataset, which exercises the h5py fallback read path.
     """
     path = str(path)
     x_coords = x0 + dx * np.arange(nx, dtype=np.float64)
@@ -98,9 +103,19 @@ def write_synthetic_gslc(
     else:
         data = np.asarray(data, dtype=np.complex64)
 
+    # Real GSLCs are gzip+shuffle with a NaN fill, which is the layout
+    # DirectChunkReader decodes itself; default to matching that so the fast
+    # read path is what the suite exercises.
+    filters = (
+        {"compression": "gzip", "compression_opts": 1, "shuffle": True,
+         "fillvalue": np.complex64(complex(np.nan, np.nan))}
+        if compressed else {}
+    )
+
     with h5py.File(path, "w") as f:
         grid = f.create_group(GRID)
-        grid.create_dataset(polarization, data=data, chunks=(min(64, ny), min(64, nx)))
+        grid.create_dataset(polarization, data=data,
+                            chunks=(min(64, ny), min(64, nx)), **filters)
         grid.create_dataset("xCoordinates", data=x_coords)
         grid.create_dataset("yCoordinates", data=y_coords)
         grid.create_dataset("xCoordinateSpacing", data=np.float64(dx))

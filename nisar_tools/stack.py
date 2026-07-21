@@ -75,19 +75,6 @@ class GSLCStack(RasterStackMixin):
         return cls(xr.open_zarr(path))
 
     # -- lazy operations ---------------------------------------------------
-    def crop(self, lon_min, lon_max, lat_min, lat_max):
-        """Return a new, lazily cropped stack."""
-        x_min, x_max, y_min, y_max = geo.bbox_to_native(
-            lon_min, lon_max, lat_min, lat_max, self.epsg
-        )
-        x = self.x
-        y = self.y
-        x_slice = slice(x_min, x_max) if x[0] <= x[-1] else slice(x_max, x_min)
-        y_slice = slice(y_min, y_max) if y[0] <= y[-1] else slice(y_max, y_min)
-        out = self.ds.sel(x=x_slice, y=y_slice)
-        out.attrs.update(self.ds.attrs)
-        return GSLCStack(out)
-
     def merge(self, other, resampling="bilinear", time_tolerance=600.0):
         """Merge an adjacent-frame stack (same acquisitions) onto the union grid.
 
@@ -99,14 +86,18 @@ class GSLCStack(RasterStackMixin):
         date per dask task, resampling real and imaginary parts with
         ``resampling`` (``"nearest"`` preserves exact sample values).
 
-        Implemented as an explicit outer-join align + ``fillna``, then a
-        re-chunk to undo the ragged chunk layout that the outer reindex
-        produces. Self takes precedence where the two overlap.
+        Implemented as an explicit outer-join align + ``fillna``. Both sides are
+        re-chunked onto the canonical grid *before* the ``fillna``: each crop
+        starts mid-chunk at its own phase, so combining them directly would make
+        dask split both into the union of their chunk boundaries — several times
+        the chunks, and a graph several times the size, for the same work.
+        Self takes precedence where the two overlap.
 
         The union grid keeps NaN where neither stack has data — a cross-zone
-        warp always leaves rotated nodata wedges — so crop to the valid
-        interior before forming interferograms, exactly as with the NaN fill
-        of a single granule.
+        warp always leaves rotated nodata wedges — exactly as with the NaN fill
+        of a single granule. :meth:`form_interferograms` is NaN-aware, so that
+        fill neither spreads into nor erodes the valid data; :meth:`crop` is
+        available at every stage if a ragged edge is worth trimming afterwards.
         """
         if (
             self.direction is not None
@@ -132,15 +123,15 @@ class GSLCStack(RasterStackMixin):
         else:
             _check_same_lattice(self.x, self.y, other_slc)
 
+        chunks = {"time": 1, "y": SPATIAL_CHUNK, "x": SPATIAL_CHUNK}
         a, b = xr.align(self.ds["slc"], other_slc, join="outer")
-        merged = a.fillna(b)
-        # The outer join unions coordinates in ascending order; restore this
-        # stack's axis directions (y runs with the pass direction).
-        merged = merged.sortby("y", ascending=bool(self.y[0] < self.y[-1]))
-        merged = merged.sortby("x", ascending=bool(self.x[0] < self.x[-1]))
-        merged = merged.chunk(
-            {"time": 1, "y": SPATIAL_CHUNK, "x": SPATIAL_CHUNK}
-        )
+        # Restore this stack's axis directions (y runs with the pass direction).
+        # A reversing slice is exact and, unlike ``sortby``, needs no fancy
+        # index -- which would re-shuffle the whole array. Reverse before the
+        # re-chunk so the ragged chunk ends up last, as Zarr requires.
+        a, b = _orient_like(a, b, "y", bool(self.y[0] > self.y[-1]))
+        a, b = _orient_like(a, b, "x", bool(self.x[0] > self.x[-1]))
+        merged = a.chunk(chunks).fillna(b.chunk(chunks))
         ds = merged.to_dataset(name="slc")
         ds = ds.rio.write_crs(f"EPSG:{self.epsg}")
         ds.attrs.update(self.ds.attrs)
@@ -195,15 +186,25 @@ class GSLCStack(RasterStackMixin):
         return out.rio.write_crs(f"EPSG:{self.epsg}")
 
     def form_interferograms(
-        self, pairs="sequential", looks=5, downsample=True, convolution="Uniform"
+        self, pairs="sequential", looks=5, downsample=True,
+        convolution="Uniform", nan_aware=True, min_valid_fraction=0.5,
     ):
-        """Form an :class:`InterferogramStack` from pairs of acquisitions."""
+        """Form an :class:`InterferogramStack` from pairs of acquisitions.
+
+        ``nan_aware`` (default) multilooks over the valid samples only, so the
+        NaN left by the swath edge or by :meth:`merge` does not spread across
+        the filter footprint. ``min_valid_fraction`` is how much of an output
+        pixel's filter weight must come from valid input for it to be kept.
+        See :func:`nisar_tools._kernels.igram_coherence`.
+        """
         return InterferogramStack.from_slc_stack(
             self,
             pairs=pairs,
             looks=looks,
             downsample=downsample,
             convolution=convolution,
+            nan_aware=nan_aware,
+            min_valid_fraction=min_valid_fraction,
         )
 
     # -- persistence -------------------------------------------------------
@@ -225,6 +226,22 @@ class GSLCStack(RasterStackMixin):
             f"<GSLCStack EPSG:{self.epsg} "
             f"time={s.get('time')} y={s.get('y')} x={s.get('x')}>"
         )
+
+
+def _orient_like(a, b, dim, descending):
+    """Reverse ``dim`` on both arrays unless it already runs the wanted way.
+
+    ``xr.align(join="outer")`` returns ascending coordinates when it has to
+    union two different indexes, but keeps the original order when they already
+    match (two frames offset in x share their y index exactly), so the current
+    order has to be compared rather than assumed. Both arrays carry the same
+    coordinates after aligning, so one test covers the pair.
+    """
+    values = a[dim].values
+    if bool(values[0] > values[-1]) == descending:
+        return a, b
+    flip = {dim: slice(None, None, -1)}
+    return a.isel(**flip), b.isel(**flip)
 
 
 def _match_times(ref_times, other_times, tolerance):

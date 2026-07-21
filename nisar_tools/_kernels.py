@@ -8,6 +8,12 @@ run lazily over chunked arrays without ever materializing a full-resolution
 stack. The plain-numpy versions are kept as the reference implementation that
 the dask path is equivalence-tested against.
 
+:func:`igram_coherence` is the one place that departs from the oracle: it
+defaults to a NaN-aware normalized convolution, because the legacy formula lets
+scipy's non-NaN-aware filters spread every invalid sample across the whole
+filter footprint. ``nan_aware=False`` still reproduces the legacy result
+exactly, and that is what the equivalence tests pin.
+
 :func:`goldstein_filter` is new (it has no legacy counterpart); it is a 2D
 whole-plane operation validated by its own properties -- an exact ``alpha=0``
 round-trip, phase-noise reduction, and NaN preservation -- rather than against
@@ -17,7 +23,12 @@ the legacy oracle.
 import math
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, uniform_filter
+from scipy.ndimage import (
+    gaussian_filter,
+    gaussian_filter1d,
+    uniform_filter,
+    uniform_filter1d,
+)
 
 VALID_CONVOLUTIONS = ("Uniform", "Gaussian")
 
@@ -122,30 +133,135 @@ def multilook_dask(arr, max_x, max_y, looks, downsample, convolution):
     return smoothed
 
 
-def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution):
-    """Form a multilooked interferogram and its coherence. Verbatim formula.
+def boundary_response(ny, nx, max_x, max_y, looks, downsample, convolution):
+    """The filter's response to an all-valid raster, i.e. ``multilook(ones)``.
+
+    ``mode="constant", cval=0.0`` treats everything beyond the raster as zero,
+    so the response decays toward the edges (to 0.5 at a straight edge, 0.25 at
+    a corner) instead of staying at 1. Dividing a smoothed valid-mask by this
+    turns it into a true valid *fraction*, which is what distinguishes a real
+    data boundary from the arbitrary edge where the raster was cropped.
+
+    Both filters are separable, so this is the outer product of two 1D
+    profiles rather than a full 2D filter pass -- two vectors of length ``ny``
+    and ``nx``, negligible next to the arrays being multilooked.
+    """
+    if convolution == "Gaussian":
+        def _f(n):
+            return gaussian_filter1d(
+                np.ones(n), looks, mode="constant", cval=0.0
+            )
+    elif convolution == "Uniform":
+        def _f(n):
+            return uniform_filter1d(
+                np.ones(n), looks, mode="constant", cval=0.0
+            )
+    else:
+        raise ValueError("convolution must be Uniform or Gaussian")
+
+    prof_y, prof_x = _f(ny), _f(nx)
+    if downsample:
+        # Same truncate-then-stride as ``multilook``, so this lands on the
+        # downsampled grid.
+        prof_y = prof_y[:max_y][looks // 2 :: looks]
+        prof_x = prof_x[:max_x][looks // 2 :: looks]
+    return np.outer(prof_y, prof_x)
+
+
+def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
+                    nan_aware=True, min_valid_fraction=0.5):
+    """Form a multilooked interferogram and its coherence.
 
     Works on either numpy or dask arrays: the only backend-specific step is
     the multilook, which is dispatched on the array type. Every other
-    operation (``*``, ``conj``, ``abs``, ``sqrt``, ``nan_to_num``, ``clip``)
-    is supported identically by numpy and dask.
+    operation (``*``, ``conj``, ``abs``, ``sqrt``, ``isfinite``, ``where``,
+    ``clip``) is supported identically by numpy and dask.
+
+    ``nan_aware=False`` reproduces the legacy formula verbatim. That path feeds
+    NaN straight into scipy's filters, which are not NaN-aware, so every
+    invalid sample spreads over the whole filter footprint: a radius of
+    ``4 * looks`` for Gaussian, and -- because ``uniform_filter`` is a running
+    sum -- everything downstream along both axes for Uniform. On real GSLCs,
+    which are NaN outside the swath (~45% of a granule) and on every merged
+    union grid, that erodes or wipes out the interferogram.
+
+    ``nan_aware=True`` (the default) instead never lets NaN reach scipy. It
+    zero-fills the invalid samples, multilooks the validity mask alongside the
+    data, and divides it back out -- a normalized convolution. An output pixel
+    is kept when at least ``min_valid_fraction`` of its filter weight came from
+    valid input, so the NaN footprint neither dilates nor grows: at a straight
+    edge the 0.5 default lands exactly on the true boundary.
+
+    Relative to the legacy path this leaves the phase and the coherence
+    unchanged -- the smoothed mask cancels exactly in the coherence ratio, and
+    dividing by a positive real does not move the argument. The one difference
+    is the interferogram *amplitude* within a filter radius of a boundary,
+    where the normalization removes the zero-padding bias the legacy path
+    carries.
 
     Returns ``(interferogram, coherence)`` as ``(complex, float32)``.
     """
-    raw_interf = c1 * np.conj(c2)
-    raw_int1 = np.abs(c1) ** 2
-    raw_int2 = np.abs(c2) ** 2
+    if not nan_aware:
+        raw_interf = c1 * np.conj(c2)
+        raw_int1 = np.abs(c1) ** 2
+        raw_int2 = np.abs(c2) ** 2
 
-    ml = multilook_dask if _is_dask(raw_interf) else multilook
-    ml_interf = ml(raw_interf, max_x, max_y, looks, downsample, convolution)
-    ml_int1 = ml(raw_int1, max_x, max_y, looks, downsample, convolution)
-    ml_int2 = ml(raw_int2, max_x, max_y, looks, downsample, convolution)
+        ml = multilook_dask if _is_dask(raw_interf) else multilook
+        ml_interf = ml(raw_interf, max_x, max_y, looks, downsample, convolution)
+        ml_int1 = ml(raw_int1, max_x, max_y, looks, downsample, convolution)
+        ml_int2 = ml(raw_int2, max_x, max_y, looks, downsample, convolution)
+
+        ml_corr = np.abs(ml_interf) / (np.sqrt(ml_int1 * ml_int2) + 1e-8)
+
+        # Force areas completely outside the valid swath back to exactly 0.0.
+        ml_corr = _fillna_zero(ml_corr)
+        ml_corr = ml_corr.clip(0.0, 1.0)  # .clip works on numpy and dask alike
+
+        return ml_interf, ml_corr.astype(np.float32)
+
+    if not (0.0 <= min_valid_fraction <= 1.0):
+        raise ValueError("min_valid_fraction must be in [0, 1]")
+
+    valid = np.isfinite(c1) & np.isfinite(c2)
+    mask = valid.astype(np.float32)
+
+    ml = multilook_dask if _is_dask(c1) else multilook
+
+    def _ml(arr):
+        return ml(arr, max_x, max_y, looks, downsample, convolution)
+
+    # Zero-fill before filtering: scipy never sees a NaN, so nothing spreads.
+    sum_interf = _ml(np.where(valid, c1 * np.conj(c2), 0.0))
+    sum_int1 = _ml(np.where(valid, np.abs(c1) ** 2, 0.0))
+    sum_int2 = _ml(np.where(valid, np.abs(c2) ** 2, 0.0))
+    sum_mask = _ml(mask)
+
+    # ``sum_mask`` carries both effects we care about: how much of the
+    # footprint was valid, and how much of it fell outside the raster. Only the
+    # first is a data boundary, so divide the second out before thresholding.
+    ny, nx = c1.shape[-2:]
+    response = boundary_response(
+        ny, nx, max_x, max_y, looks, downsample, convolution
+    )
+    # The ``> 0`` term also covers min_valid_fraction=0, where a pixel with no
+    # valid contribution at all would otherwise be kept as a meaningless zero.
+    keep = (sum_mask > 0.0) & ((sum_mask / response) >= min_valid_fraction)
+
+    # Normalized convolution: recover the mean over the valid samples alone.
+    # ``keep`` is false wherever ``sum_mask`` is 0, so the guard here only
+    # avoids a divide-by-zero warning on values that get discarded anyway.
+    norm = np.where(sum_mask > 0.0, sum_mask, 1.0)
+    ml_interf = sum_interf / norm
+    ml_int1 = sum_int1 / norm
+    ml_int2 = sum_int2 / norm
 
     ml_corr = np.abs(ml_interf) / (np.sqrt(ml_int1 * ml_int2) + 1e-8)
 
-    # Force areas completely outside the valid swath back to exactly 0.0.
-    ml_corr = _fillna_zero(ml_corr)
-    ml_corr = ml_corr.clip(0.0, 1.0)  # .clip works on numpy and dask alike
+    ml_interf = np.where(keep, ml_interf, np.nan).astype(c1.dtype)
+    # Outside the valid swath the coherence is exactly 0.0, as in the legacy
+    # path; the interferogram carries the NaN footprint instead.
+    ml_corr = np.where(keep, _fillna_zero(ml_corr), 0.0)
+    ml_corr = ml_corr.clip(0.0, 1.0)
 
     return ml_interf, ml_corr.astype(np.float32)
 

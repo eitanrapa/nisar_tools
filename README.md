@@ -140,11 +140,157 @@ stitched = stack_a.merge(stack_b, resampling="nearest")   # exact samples
 ```
 
 The union grid keeps NaN where neither frame has data (including thin wedges
-from the zone rotation) — crop to the valid interior before forming
-interferograms, exactly as with the NaN fill of a single granule. Frames on
+from the zone rotation), exactly as with the NaN fill of a single granule.
+Interferogram formation is NaN-aware, so that fill neither spreads nor eats
+into the valid data — see [Invalid pixels](#invalid-pixels). Frames on
 *different* tracks have no common pass and cannot be stitched at the SLC
 level; process each track through unwrapping and mosaic the unwrapped
 products instead.
+
+### Invalid pixels
+
+A NISAR GSLC is NaN outside its swath — often around 45% of a granule, since
+the radar footprint is a sheared parallelogram on a north-up grid — and every
+merged union grid is NaN in its corners.
+
+`form_interferograms` multilooks over the valid samples only (a normalized
+convolution: the validity mask is smoothed alongside the data and divided back
+out). An output pixel is kept when at least `min_valid_fraction` of its filter
+weight came from valid input, so the invalid footprint neither dilates nor
+grows — at a straight edge the 0.5 default lands on the true boundary:
+
+```python
+igrams = stack.form_interferograms(looks=30, convolution="Gaussian")
+igrams = stack.form_interferograms(looks=30, min_valid_fraction=0.9)  # stricter
+igrams = stack.form_interferograms(looks=30, nan_aware=False)         # legacy
+```
+
+This matters because `scipy.ndimage`'s filters are not NaN-aware: under
+`nan_aware=False` a single invalid sample contaminates its whole filter
+footprint (a radius of `4 * looks` for Gaussian) and, because `uniform_filter`
+is a running sum, everything downstream of it along both axes for Uniform. On
+a real block straddling a swath edge at `looks=30`, 51.3% of the input valid:
+the legacy path keeps 46.1% (Gaussian) or 32.0% (Uniform); the NaN-aware path
+keeps 51.1% either way.
+
+Unwrapping carries the footprint through — invalid pixels are excluded from
+SNAPHU's solution rather than silently substituted with zeros, and come back
+as NaN with a connected-component label of 0.
+
+Every stage can also be cropped, so a ragged edge can be trimmed after the
+fact and not only before:
+
+```python
+igrams = igrams.crop(lon_min, lon_max, lat_min, lat_max)
+unw = unw.crop(lon_min, lon_max, lat_min, lat_max)
+```
+
+## Workspaces
+
+A `Workspace` is a directory of per-stage Zarr stores. Each `persist()` writes
+one store and records the parameters that produced it, hashed, so a re-run can
+tell a finished stage from one that needs recomputing:
+
+```
+workdir/
+├── workspace.json         # created timestamp
+├── slc_stack.zarr         # one store per persisted stage
+├── igrams.zarr
+├── unwrapped.zarr
+└── unwrapped.done.json    # per-pair progress, unwrap only
+```
+
+```python
+ws = Workspace("workdir/")                 # creates the directory if needed
+ws = Workspace("workdir/", create=False)   # open only; never writes on construction
+```
+
+### Reloading finished stages
+
+Reopen a stage directly, without touching the granules or recomputing anything.
+This is the normal way to pick up a previous session — `from_zarr` gives back a
+stage object, `ws.load` gives the raw `xarray.Dataset` underneath:
+
+```python
+from nisar_tools import GSLCStack, InterferogramStack, UnwrappedStack, LOSStack
+
+stack  = GSLCStack.from_zarr(ws.path("slc_stack"))
+igrams = InterferogramStack.from_zarr(ws.path("igrams"))
+unw    = UnwrappedStack.from_zarr(ws.path("unwrapped"))
+
+ds = ws.load("igrams")            # the xr.Dataset, if you'd rather work with it directly
+```
+
+Stores are lazy, so reopening a 200 GB stage costs nothing until you compute.
+
+You rarely need to check first, because re-running the same code is already the
+resume path: `persist()` returns the existing store untouched when the
+parameters match, and raises `WorkspaceError` when they don't. If you do want to
+look:
+
+```python
+ws.exists("igrams")                # True / False
+ws.stored_params_hash("igrams")    # hash recorded at write time, or None
+ws.pairs_done("unwrapped")         # e.g. {0, 1, 2} — which pairs SNAPHU finished
+```
+
+Unwrapping resumes at the first unfinished pair, so an interrupted run picks up
+where it stopped just by calling `igrams.unwrap(ws, ...)` again.
+
+### Clearing
+
+```python
+ws.clear("igrams")            # delete one stage (and its .done.json), keep the rest
+```
+
+To rebuild a stage in place, pass `overwrite=True` — without it, persisting
+different parameters over an existing stage raises rather than silently
+replacing your results:
+
+```python
+igrams = stack.form_interferograms(looks=30).persist(ws, "igrams", overwrite=True)
+```
+
+To throw away everything, delete the directory (`shutil.rmtree("workdir/")`) and
+construct a new `Workspace`.
+
+**Persisting a stage back over the store it reads from raises `WorkspaceError`.**
+`overwrite=True` deletes the target directory *before* the write computes, and
+the lazy graph is still reading from it, so the two race — historically this did
+not fail loudly but produced a plausible-looking array with a varying fraction of
+pixels silently corrupted to NaN. It is now refused up front, with the store left
+untouched:
+
+```python
+stack = GSLCStack.from_zarr(ws.path("slc_stack"))
+merged = stack.merge(other)
+
+merged.persist(ws, "slc_merged")                  # new name — fine
+merged.persist(ws, "slc_stack", overwrite=True)   # WorkspaceError: still an input
+```
+
+The check looks at whether the dataset's *lazy* data still reads the target, so
+it also catches stages rebuilt through `merge` (which drops xarray's `encoding`)
+and covers the region-written unwrap store. A dataset you have already
+`.compute()`d holds nothing open and can be written back freely. Detection is
+best effort: on the rare shape it can't inspect it stays out of the way rather
+than blocking a valid write, so prefer a fresh stage name regardless.
+
+### Changing a parameter invalidates a stage
+
+The hash covers the arguments that affect the numbers — `looks`, `downsample`,
+`convolution`, `nan_aware`, `min_valid_fraction`, the pair list, plus anything
+extra you pass to `persist()`. Changing one means the stored result no longer
+matches, so `persist()` refuses without `overwrite=True`. Nothing cascades
+automatically: downstream stages are not invalidated for you, so after
+re-forming interferograms, clear or overwrite the stages built on top of them.
+
+Recording the inputs is worth doing, since they are not otherwise part of the
+hash:
+
+```python
+stack.persist(ws, "slc_stack", files=paths, bbox=list(bbox))
+```
 
 ### Running the notebook
 
@@ -199,6 +345,30 @@ the full-resolution coastline, pass a coarser one, e.g.
   one acquisition/pair along the stack axis.
 - **One non-lazy stage**: SNAPHU needs whole rasters, so the *pair* is the unit
   of work; peak memory is a single multilooked pair regardless of stack length.
+
+### Read throughput
+
+NISAR GSLCs are gzip-compressed, and h5py serialises every call on a single
+global lock — across threads, across file handles, and across different files.
+Decoding a granule through h5py is therefore effectively single-core, and adding
+dates or frames buys no read parallelism at all (three granules read
+concurrently measured 1.01× versus one).
+
+`GSLC` works around this: it reads each HDF5 chunk's raw compressed bytes, which
+needs h5py only for the I/O, and runs the gzip inflate outside the lock where it
+releases the GIL. Dask's own worker threads then overlap. Measured ~3× on a real
+granule, 2.66× for a full crop-and-persist, with byte-identical output. Granules
+whose filter pipeline can't be inverted fall back to plain h5py automatically.
+
+To measure it on your own machine — the win depends on core count and on whether
+the granules sit on local disk or a network filesystem:
+
+```bash
+python scripts/bench_read.py /path/to/granule.h5
+```
+
+Disk is usually not the limit: on a local SSD the raw compressed bytes come off
+about 4× faster than they can be decoded.
 
 ## Numerics
 
