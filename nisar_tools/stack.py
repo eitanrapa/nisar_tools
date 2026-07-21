@@ -86,12 +86,11 @@ class GSLCStack(RasterStackMixin):
         date per dask task, resampling real and imaginary parts with
         ``resampling`` (``"nearest"`` preserves exact sample values).
 
-        Implemented as an explicit outer-join align + ``fillna``. Both sides are
-        re-chunked onto the canonical grid *before* the ``fillna``: each crop
-        starts mid-chunk at its own phase, so combining them directly would make
-        dask split both into the union of their chunk boundaries — several times
-        the chunks, and a graph several times the size, for the same work.
-        Self takes precedence where the two overlap.
+        Both grids sit on the same lattice, so the union is reached by padding
+        each side onto it rather than reindexing, and both are re-chunked onto
+        the canonical grid before the ``fillna`` — otherwise the two crops,
+        which start mid-chunk at their own phases, would be split into the union
+        of their chunk boundaries. Self takes precedence where the two overlap.
 
         The union grid keeps NaN where neither stack has data — a cross-zone
         warp always leaves rotated nodata wedges — exactly as with the NaN fill
@@ -124,13 +123,11 @@ class GSLCStack(RasterStackMixin):
             _check_same_lattice(self.x, self.y, other_slc)
 
         chunks = {"time": 1, "y": SPATIAL_CHUNK, "x": SPATIAL_CHUNK}
-        a, b = xr.align(self.ds["slc"], other_slc, join="outer")
-        # Restore this stack's axis directions (y runs with the pass direction).
-        # A reversing slice is exact and, unlike ``sortby``, needs no fancy
-        # index -- which would re-shuffle the whole array. Reverse before the
-        # re-chunk so the ragged chunk ends up last, as Zarr requires.
-        a, b = _orient_like(a, b, "y", bool(self.y[0] > self.y[-1]))
-        a, b = _orient_like(a, b, "x", bool(self.x[0] > self.x[-1]))
+        this_slc = self.ds["slc"]
+        union_y = _union_lattice(self.y, other_slc["y"].values)
+        union_x = _union_lattice(self.x, other_slc["x"].values)
+        a = _pad_onto(this_slc, union_y, union_x)
+        b = _pad_onto(other_slc, union_y, union_x)
         merged = a.chunk(chunks).fillna(b.chunk(chunks))
         ds = merged.to_dataset(name="slc")
         ds = ds.rio.write_crs(f"EPSG:{self.epsg}")
@@ -228,20 +225,61 @@ class GSLCStack(RasterStackMixin):
         )
 
 
-def _orient_like(a, b, dim, descending):
-    """Reverse ``dim`` on both arrays unless it already runs the wanted way.
+def _union_lattice(ref, other):
+    """Coordinates covering both axes, on ``ref``'s lattice and direction.
 
-    ``xr.align(join="outer")`` returns ascending coordinates when it has to
-    union two different indexes, but keeps the original order when they already
-    match (two frames offset in x share their y index exactly), so the current
-    order has to be compared rather than assumed. Both arrays carry the same
-    coordinates after aligning, so one test covers the pair.
+    The two grids are known to share a lattice, so their union needs no
+    reindexing — it is ``ref`` extended by whole steps until it reaches
+    ``other``. Keeping ``ref``'s step sign means the merged stack comes out
+    oriented like this one (y running with the pass direction) for free.
     """
-    values = a[dim].values
-    if bool(values[0] > values[-1]) == descending:
-        return a, b
-    flip = {dim: slice(None, None, -1)}
-    return a.isel(**flip), b.isel(**flip)
+    spacing = float(ref[1] - ref[0])
+    lo = min(float(np.min(ref)), float(np.min(other)))
+    hi = max(float(np.max(ref)), float(np.max(other)))
+    return _extend_lattice(ref, spacing, lo, hi)
+
+
+def _pad_onto(arr, union_y, union_x):
+    """Place a ``(time, y, x)`` array on the union grid, NaN elsewhere.
+
+    Padding rather than ``xr.align(join="outer")``: both grids sit on the same
+    lattice, so the union is a pure offset, and reindexing to reach it costs a
+    per-element boolean mask (xarray builds one to mark the missing positions)
+    whose broadcast both fragments the chunk grid and is what emitted dask's
+    "Increasing number of chunks by factor of N" warning. Padding is a pure
+    graph operation with no mask and no fancy indexing.
+    """
+    step_y = float(union_y[1] - union_y[0])
+    step_x = float(union_x[1] - union_x[0])
+    off_y = int(round((float(arr["y"].values[0]) - float(union_y[0])) / step_y))
+    off_x = int(round((float(arr["x"].values[0]) - float(union_x[0])) / step_x))
+    ny, nx = arr.sizes["y"], arr.sizes["x"]
+
+    pad = (
+        (0, 0),
+        (off_y, len(union_y) - off_y - ny),
+        (off_x, len(union_x) - off_x - nx),
+    )
+    if min(p for lohi in pad for p in lohi) < 0:  # pragma: no cover - guarded upstream
+        raise ValueError("Cannot merge: grids do not share a lattice")
+
+    if _is_dask(arr.data):
+        import dask.array as dask_array
+
+        data = dask_array.pad(arr.data, pad, mode="constant", constant_values=np.nan)
+    else:
+        data = np.pad(arr.data, pad, mode="constant", constant_values=np.nan)
+
+    return xr.DataArray(
+        data.astype(arr.dtype, copy=False),
+        dims=arr.dims,
+        coords={"time": arr["time"].values, "y": union_y, "x": union_x},
+        name=arr.name,
+    )
+
+
+def _is_dask(arr):
+    return type(arr).__module__.split(".")[0] == "dask"
 
 
 def _match_times(ref_times, other_times, tolerance):

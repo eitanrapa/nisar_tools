@@ -107,6 +107,91 @@ def test_merge_keeps_the_canonical_chunk_grid(gslc_factory):
         g2.close()
 
 
+def _lazy_stack(x0, y0, ny=40000, nx=40000, ntime=3, step=10.0):
+    """A granule-scale stack backed by lazy zeros — no file, no compute."""
+    import dask.array as dsk
+    import xarray as xr
+
+    data = dsk.zeros((ntime, ny, nx), chunks=(1, 2048, 2048), dtype=np.complex64)
+    ds = xr.Dataset(
+        {"slc": (("time", "y", "x"), data)},
+        coords={
+            "time": np.arange(ntime).astype("datetime64[s]"),
+            "y": y0 - step * np.arange(ny),
+            "x": x0 + step * np.arange(nx),
+        },
+        attrs={"epsg": 32611, "direction": "Descending",
+               "x_spacing": step, "y_spacing": -step},
+    )
+    return GSLCStack(ds)
+
+
+def test_merge_does_not_warn_at_granule_scale():
+    """Regression guard for dask's "Increasing number of chunks" warning.
+
+    It only fires once the unified grid reaches ten times the largest input's
+    partition count, so a small stack cannot exercise it -- hence the granule
+    dimensions here (lazy zeros, so this costs nothing). Reaching the union by
+    reindexing used to trip it: xarray builds a per-element boolean mask for
+    the missing positions, and broadcasting that mask is what blew up the grid.
+    """
+    step = 10.0
+    a = _lazy_stack(400000.0, 4_000_000.0)
+    # Neighbouring frame, offset by a non-multiple of the chunk size in both
+    # axes, so the two crops sit at different chunk phases.
+    b = _lazy_stack(400000.0 + step * 12345, 4_000_000.0 - step * 30011)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        merged = a.merge(b)
+        chunks = merged.ds["slc"].chunks
+
+    perf = [str(w.message) for w in caught
+            if "Increasing number of chunks" in str(w.message)]
+    assert not perf, perf
+
+    from nisar_tools._base import SPATIAL_CHUNK
+    assert len(chunks[1]) == -(-merged.sizes["y"] // SPATIAL_CHUNK)
+    assert len(chunks[2]) == -(-merged.sizes["x"] // SPATIAL_CHUNK)
+    # Union spans both frames, and keeps this stack's descending y.
+    assert merged.sizes["y"] == 40000 + 30011
+    assert merged.sizes["x"] == 40000 + 12345
+    assert merged.y[0] > merged.y[-1]
+    assert merged.x[0] < merged.x[-1]
+
+
+def test_merge_overlap_prefers_self(gslc_factory):
+    """Where the two frames overlap, this stack's samples win."""
+    ny = nx = 64
+    step = 10.0
+    p1 = gslc_factory(ny=ny, nx=nx, x0=400000.0, seed=4)
+    # Half a frame to the east: columns 32..63 of self overlap 0..31 of other.
+    p2 = gslc_factory(ny=ny, nx=nx, x0=400000.0 + step * 32, seed=5)
+    g1, g2 = GSLC(p1), GSLC(p2)
+    try:
+        s1 = GSLCStack.from_gslcs([g1])
+        s2 = GSLCStack.from_gslcs([g2])
+        merged = s1.merge(s2)
+        assert merged.sizes["x"] == nx + 32
+
+        got = merged.ds["slc"].isel(time=0).compute()
+        # Overlap column: must be self's value, not other's.
+        overlap_x = s1.x[40]
+        np.testing.assert_array_equal(
+            got.sel(x=overlap_x).values,
+            s1.ds["slc"].isel(time=0).sel(x=overlap_x).compute().values,
+        )
+        # A column only the other frame covers is filled from it.
+        only_other = s2.x[-1]
+        np.testing.assert_array_equal(
+            got.sel(x=only_other).values,
+            s2.ds["slc"].isel(time=0).sel(x=only_other).compute().values,
+        )
+    finally:
+        g1.close()
+        g2.close()
+
+
 def test_merge_preserves_axis_direction(gslc_factory):
     """The reversing slice must land the axes the same way sortby did."""
     p1 = gslc_factory(ny=64, nx=64, x0=400000.0, seed=4)
