@@ -11,6 +11,8 @@ dependencies:
   - "zarr<3"          # complex64 needs the zarr v2 format
   - numcodecs         # HDF5 unshuffle + stage compressor
   - rioxarray
+  - gdal              # osgeo bindings + the gdal_* CLI tools; arrives anyway
+                      # as a rasterio dependency, pinned here so it is guaranteed
   - pyproj
   - snaphu
   - pygmt             # optional; only needed for water masking

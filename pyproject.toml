@@ -35,6 +35,11 @@ mask = ["pygmt"]
 # release requires Python >= 3.12; on 3.11 pin an older earthaccess (or use the
 # standard-library-only direct method, download_gslcs(..., method="asf")).
 download = ["earthaccess", "sardem"]
+# The osgeo bindings and gdal_* CLI tools. Optional and deliberately not a hard
+# dependency: pip's gdal builds against system libgdal headers and commonly
+# fails, whereas conda-forge's does not -- environment.yml installs it there.
+# Nothing in the package imports osgeo; rasterio already vendors GDAL for it.
+gdal = ["gdal"]
 dev = ["pytest", "dask[diagnostics]"]
 
 [tool.setuptools.packages.find]
