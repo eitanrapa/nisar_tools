@@ -36,7 +36,7 @@ class LOSStack(RasterStackMixin):
 
     @classmethod
     def from_unwrapped(cls, unwrapped, gslc, dem=None, frequency="A",
-                       wavelength=None, sign=1):
+                       wavelength=None, sign=1, mask_geometry=True):
         """Build a :class:`LOSStack` from an unwrapped stack.
 
         ``gslc`` is a granule path supplying the geometry cube and (unless
@@ -44,6 +44,13 @@ class LOSStack(RasterStackMixin):
         or DataArray of ellipsoidal heights (``None`` -> sea-level geometry).
         ``sign`` flips the LOS displacement convention (see
         :func:`nisar_tools.geometry.phase_to_los`).
+
+        ``mask_geometry`` (default) blanks the geometry outside the data. The
+        cube spans the frame's whole bounding rectangle and knows nothing about
+        where the radar actually had returns, so interpolating it fills every
+        pixel -- which plots as a solid rectangle bearing no resemblance to the
+        swath, and quietly reports an incidence angle for ground the pass never
+        illuminated. Pass ``False`` to keep the full rectangle.
         """
         from . import geometry
 
@@ -63,6 +70,12 @@ class LOSStack(RasterStackMixin):
         # don't collide on merge; write the CRS once on the result.
         los = los.drop_vars("spatial_ref", errors="ignore")
         geom = geom.drop_vars("spatial_ref", errors="ignore")
+
+        if mask_geometry:
+            # Geometry is one field shared by every pair, so keep it wherever
+            # *any* pair has data rather than only where all of them do.
+            footprint = los.notnull().any("pair")
+            geom = geom.where(footprint)
 
         ds = xr.Dataset({"los": los, **{v: geom[v] for v in _GEOM_2D}})
         ds = ds.rio.write_crs(f"EPSG:{int(epsg)}")

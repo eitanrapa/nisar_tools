@@ -174,3 +174,50 @@ def test_plot_look_angle_and_incidence_are_different_fields(gslc_factory):
     fig_inc, ax_inc = los.plot_incidence()
     assert fig_look is not None and fig_inc is not None
     assert ax_look.get_title() != ax_inc.get_title()
+
+
+def test_geometry_is_masked_to_the_data_footprint(gslc_factory):
+    """The geometry cube covers the frame's rectangle, the radar does not.
+
+    Interpolating the cube fills every pixel, so without masking the angle
+    fields plot as a solid rectangle that does not match the swath -- and
+    report an incidence angle for ground the pass never illuminated.
+    """
+    p = gslc_factory(ny=40, nx=32, dx=20.0, dy=20.0, write_geometry=True)
+    unw_stack, unw, x, y, _ = _synthetic_unwrapped(p, npair=2)
+
+    # Blank a corner of one pair only; the other pair still covers it.
+    ds = unw_stack.ds.copy()
+    blanked = ds["unw"].values.copy()
+    blanked[0, :10, :8] = np.nan
+    blanked[:, -6:, :] = np.nan          # this strip is missing from both pairs
+    ds["unw"] = (("pair", "y", "x"), blanked)
+    unw_stack = UnwrappedStack(ds)
+
+    los = unw_stack.to_los(p, dem=None)
+    any_pair = np.isfinite(los.ds["los"].values).any(axis=0)
+
+    for name in ("incidence_angle", "look_angle", "los_east", "los_north",
+                 "los_up", "height"):
+        got = np.isfinite(los.ds[name].values)
+        np.testing.assert_array_equal(got, any_pair, err_msg=name)
+
+    # Union, not intersection: the corner blanked in one pair only is kept.
+    assert np.isfinite(los.ds["look_angle"].values[:10, :8]).all()
+    # The strip missing from both pairs is dropped.
+    assert not np.isfinite(los.ds["look_angle"].values[-6:, :]).any()
+
+
+def test_geometry_masking_can_be_disabled(gslc_factory):
+    p = gslc_factory(ny=40, nx=32, dx=20.0, dy=20.0, write_geometry=True)
+    unw_stack, _, _, _, _ = _synthetic_unwrapped(p, npair=1)
+    ds = unw_stack.ds.copy()
+    blanked = ds["unw"].values.copy()
+    blanked[:, :10, :] = np.nan
+    ds["unw"] = (("pair", "y", "x"), blanked)
+    unw_stack = UnwrappedStack(ds)
+
+    full = unw_stack.to_los(p, dem=None, mask_geometry=False)
+    assert np.isfinite(full.ds["look_angle"].values).all()
+    masked = unw_stack.to_los(p, dem=None)
+    assert not np.isfinite(masked.ds["look_angle"].values[:10, :]).any()

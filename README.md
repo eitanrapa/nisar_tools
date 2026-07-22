@@ -130,6 +130,14 @@ encodes. The resulting [`LOSStack`](nisar_tools/los.py) carries `los`
 Pass `dem=None` for sea-level geometry, or `sign=-1` to flip the displacement
 convention.
 
+The geometry is blanked outside the data footprint. The cube spans the frame's
+whole bounding rectangle and knows nothing about where the radar had returns, so
+interpolating it fills every pixel — which plots as a solid rectangle unrelated
+to the swath, and reports an incidence angle for ground the pass never
+illuminated. It is kept wherever *any* pair has data, since the geometry is
+shared across pairs; pass `mask_geometry=False` to `to_los` for the full
+rectangle.
+
 **Incidence angle and look angle are different things.** Incidence is measured
 at the *target*, between the line of sight and the local vertical; the look (or
 off-nadir) angle is measured at the *spacecraft*, against the ellipsoid normal

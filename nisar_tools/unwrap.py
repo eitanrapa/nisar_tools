@@ -210,18 +210,21 @@ class UnwrappedStack(RasterStackMixin):
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return UnwrappedStack(reopened)
 
-    def to_los(self, gslc, dem=None, frequency="A", wavelength=None, sign=1):
+    def to_los(self, gslc, dem=None, frequency="A", wavelength=None, sign=1,
+               mask_geometry=True):
         """Convert to LOS displacement + per-pixel look geometry.
 
-        Scales the unwrapped phase to metres and attaches the incidence angle
-        and ENU line-of-sight unit vector interpolated from ``gslc``'s built-in
-        geometry cube at the ``dem`` height. See :class:`LOSStack`.
+        Scales the unwrapped phase to metres and attaches the incidence angle,
+        look angle and ENU line-of-sight unit vector interpolated from
+        ``gslc``'s built-in geometry cube at the ``dem`` height.
+        ``mask_geometry`` blanks that geometry outside the data footprint; see
+        :meth:`LOSStack.from_unwrapped <nisar_tools.los.LOSStack.from_unwrapped>`.
         """
         from .los import LOSStack
 
         return LOSStack.from_unwrapped(
             self, gslc, dem=dem, frequency=frequency,
-            wavelength=wavelength, sign=sign,
+            wavelength=wavelength, sign=sign, mask_geometry=mask_geometry,
         )
 
     def to_latlon(self, pair=0):
