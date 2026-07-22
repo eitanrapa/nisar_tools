@@ -116,7 +116,8 @@ class InterferogramStack(RasterStackMixin):
         return cls(xr.open_zarr(path))
 
     # -- operations --------------------------------------------------------
-    def mask_water(self, mask_cache=None, resolution="f", spacing=None):
+    def mask_water(self, mask_cache=None, resolution="f", spacing=None,
+                   mask_name=None):
         """Lazily mask water on both igram and coherence. Returns a new stack.
 
         Lazy: the masked values are **not** written anywhere. Call
@@ -130,6 +131,8 @@ class InterferogramStack(RasterStackMixin):
         (e.g. ``"i"``) if the full-resolution GSHHG dataset is unavailable.
         ``spacing`` defaults to tracking this stack's own pixel size, so a
         multilooked stack builds a correspondingly coarse coastline.
+        ``mask_name`` overrides the cache store's name, which otherwise is
+        derived from the grid so masks for different grids coexist.
         """
         from .mask import grid_spacing_arg, water_mask_for_grid
 
@@ -139,7 +142,7 @@ class InterferogramStack(RasterStackMixin):
             spacing = grid_spacing_arg(self.x, self.y, self.epsg)
 
         mask = water_mask_for_grid(
-            self.x, self.y, self.epsg, workspace=mask_cache,
+            self.x, self.y, self.epsg, workspace=mask_cache, name=mask_name,
             resolution=resolution, spacing=spacing,
         )
         # The mask is land=1 / water=NaN; ``where`` needs a boolean condition

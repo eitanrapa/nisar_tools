@@ -104,7 +104,8 @@ unw = igrams.unwrap(ws, nproc=8)
 
 # 5. Convert to line-of-sight displacement + per-pixel look geometry.
 los = unw.to_los(paths[0], dem="data/dem.tif").persist(ws, "los")
-fig, ax = los.plot(pair=0)            # displacement (m); los.plot_incidence() for angles
+fig, ax = los.plot(pair=0)            # displacement (m)
+fig, ax = los.plot_look_angle()       # or .plot_incidence() — these differ
 
 # 6. Mask water and plot. Masking is lazy — persist it if you want it kept.
 unw = unw.mask_water(mask_cache=ws)          # ws caches the coastline mask
@@ -124,9 +125,23 @@ and the target→sensor ENU line-of-sight unit vector, tabulated vs. height),
 trilinearly interpolated in `(x, y, DEM-height)`. So it needs a `gslc` (cube +
 λ) and a `dem` GeoTIFF — not the orbit ephemeris, which the cube already
 encodes. The resulting [`LOSStack`](nisar_tools/los.py) carries `los`
-`(pair, y, x)` plus shared `incidence_angle` and `los_east`/`los_north`/`los_up`
-`(y, x)` for projecting 3-D motion into LOS. Pass `dem=None` for sea-level
-geometry, or `sign=-1` to flip the displacement convention.
+`(pair, y, x)` plus shared `incidence_angle`, `look_angle` and
+`los_east`/`los_north`/`los_up` `(y, x)` for projecting 3-D motion into LOS.
+Pass `dem=None` for sea-level geometry, or `sign=-1` to flip the displacement
+convention.
+
+**Incidence angle and look angle are different things.** Incidence is measured
+at the *target*, between the line of sight and the local vertical; the look (or
+off-nadir) angle is measured at the *spacecraft*, against the ellipsoid normal
+there. Earth curvature makes the look angle the smaller of the two, by
+`sin(look) = Rₑ/(Rₑ+h)·sin(incidence)` — on a real granule, incidence spans
+27.8–51.5° where the look angle spans 24.7–44.4°. Both come straight from the
+product (the look angle is its `elevationAngle`), so neither is derived here:
+
+```python
+fig, ax = los.plot_incidence()     # at the target, from local vertical
+fig, ax = los.plot_look_angle()    # at the sensor, off-nadir
+```
 
 ### Stitching along-track frames
 
@@ -364,6 +379,11 @@ fixed by setting two variables in the kernel's environment. Edit
 pygmt loads that env's `libgmt` (matched to its netCDF/HDF5). If you can't use
 the full-resolution coastline, pass a coarser one, e.g.
 `unw.mask_water(mask_cache=ws, resolution="i")`.
+
+The cached mask store is named from the grid it was built for
+(`water_mask_<hash>.zarr`), so masks for different crops or `looks` settings
+coexist instead of evicting one another; pass `mask_name=` to choose the name
+yourself.
 
 The coastline grid itself is built to match the stack's own pixel size, so a
 multilooked stack costs a correspondingly cheap mask. Override with `spacing=`

@@ -30,10 +30,17 @@ _RADAR_GRID = "science/LSAR/GSLC/metadata/radarGrid"
 _FREQ_GRID = "science/LSAR/GSLC/grids/frequency{f}"
 _LOOK_DIR = "science/LSAR/identification/lookDirection"
 
-_GEOM_VARS = ("incidence_angle", "los_east", "los_north")
+_GEOM_VARS = ("incidence_angle", "look_angle", "los_east", "los_north")
 # HDF5 cube dataset names for each output variable.
+#
+# ``look_angle`` is the product's ``elevationAngle``, which it defines as "the
+# angle between the LOS vector and the normal to the ellipsoid at the sensor" --
+# i.e. the off-nadir look angle, measured at the spacecraft. It is always
+# smaller than the incidence angle (measured at the target, against the local
+# vertical) by the Earth-curvature term: sin(look) = Re/(Re+h) * sin(incidence).
 _CUBE_DATASETS = {
     "incidence_angle": "incidenceAngle",
+    "look_angle": "elevationAngle",
     "los_east": "losUnitVectorX",
     "los_north": "losUnitVectorY",
 }
@@ -169,6 +176,7 @@ def sample_look_geometry(cube, x, y, epsg, height=None):
     ds = xr.Dataset(
         {
             "incidence_angle": (("y", "x"), out["incidence_angle"].astype(np.float32)),
+            "look_angle": (("y", "x"), out["look_angle"].astype(np.float32)),
             "los_east": (("y", "x"), out["los_east"].astype(np.float32)),
             "los_north": (("y", "x"), out["los_north"].astype(np.float32)),
             "los_up": (("y", "x"), up.astype(np.float32)),

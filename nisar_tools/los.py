@@ -6,9 +6,14 @@ line-of-sight unit vector sampled from a GSLC's built-in geometry cube at the
 DEM height (see :mod:`nisar_tools.geometry`).
 
 The ``los`` displacement is per-pair ``(pair, y, x)`` and stays lazy; the
-geometry (``incidence_angle``, ``los_east``/``los_north``/``los_up``,
-``height``) is one field per grid ``(y, x)`` -- the viewing geometry is shared
-across the repeat-pass stack -- and is computed eagerly, once.
+geometry (``incidence_angle``, ``look_angle``, ``los_east``/``los_north``/
+``los_up``, ``height``) is one field per grid ``(y, x)`` -- the viewing geometry
+is shared across the repeat-pass stack -- and is computed eagerly, once.
+
+``incidence_angle`` and ``look_angle`` are not the same thing: incidence is
+measured at the target, between the line of sight and the local vertical, while
+the look (off-nadir) angle is measured at the spacecraft, against the ellipsoid
+normal there. Earth curvature makes the look angle the smaller of the two.
 """
 
 import numpy as np
@@ -17,7 +22,8 @@ import xarray as xr
 
 from ._base import RasterStackMixin
 
-_GEOM_2D = ("incidence_angle", "los_east", "los_north", "los_up", "height")
+_GEOM_2D = ("incidence_angle", "look_angle", "los_east", "los_north",
+            "los_up", "height")
 
 
 class LOSStack(RasterStackMixin):
@@ -104,11 +110,24 @@ class LOSStack(RasterStackMixin):
         return plot_los_displacement(self.ds["los"].isel(pair=pair), epsg_code=self.epsg)
 
     def plot_incidence(self):
+        """Incidence angle: at the target, from the local vertical."""
         from .plot import plot_angle
 
         return plot_angle(
             self.ds["incidence_angle"], epsg_code=self.epsg,
             title="Incidence angle", label="Incidence (deg)",
+        )
+
+    def plot_look_angle(self):
+        """Look (off-nadir) angle: at the spacecraft, from the ellipsoid normal.
+
+        Smaller than the incidence angle by the Earth-curvature term.
+        """
+        from .plot import plot_angle
+
+        return plot_angle(
+            self.ds["look_angle"], epsg_code=self.epsg,
+            title="Look angle", label="Look angle (deg)",
         )
 
     def __repr__(self):

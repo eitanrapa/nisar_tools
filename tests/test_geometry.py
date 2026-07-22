@@ -26,9 +26,15 @@ def _cube(inc_func, nx=6, ny=5, heights=(-500.0, 0.0, 500.0, 1000.0),
             inc[i, :, k] = inc_func(h, x[k])
     losx = (-np.sin(np.deg2rad(inc))).astype(np.float32)
     losy = np.zeros_like(losx)
+    # Off-nadir look angle for a ~747 km orbit over a spherical Earth, so it is
+    # always the smaller of the two, as in a real product.
+    look = np.degrees(
+        np.arcsin(6_371_000.0 / (6_371_000.0 + 747_000.0) * np.sin(np.deg2rad(inc)))
+    ).astype(np.float32)
     ds = xr.Dataset(
         {
             "incidence_angle": (("height", "y", "x"), inc),
+            "look_angle": (("height", "y", "x"), look),
             "los_east": (("height", "y", "x"), losx),
             "los_north": (("height", "y", "x"), losy),
         },
@@ -129,7 +135,9 @@ def test_radar_wavelength_from_gslc(gslc_factory):
 def test_read_geometry_cube_from_gslc(gslc_factory):
     p = gslc_factory(ny=40, nx=40, epsg=32611, write_geometry=True)
     cube = G.read_geometry_cube(p)
-    assert set(cube.data_vars) == {"incidence_angle", "los_east", "los_north"}
+    assert set(cube.data_vars) == {
+        "incidence_angle", "look_angle", "los_east", "los_north"
+    }
     assert cube.sizes["height"] == 4
     assert cube.attrs["epsg"] == 32611
     assert cube.attrs["look_direction"] == "Left"

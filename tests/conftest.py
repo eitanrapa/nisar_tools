@@ -23,6 +23,8 @@ GRID = "science/LSAR/GSLC/grids/frequencyA"
 IDENT = "science/LSAR/identification"
 RADAR_GRID = "science/LSAR/GSLC/metadata/radarGrid"
 CENTER_FREQ_A = 1_239_000_000.0  # Hz, NISAR L-band frequency A -> lambda ~0.242 m
+EARTH_RADIUS = 6_371_000.0       # m, spherical, for the synthetic look angle
+PLATFORM_ALT = 747_000.0         # m, NISAR's nominal orbit altitude
 
 
 def _write_synthetic_geometry(f, grid, ident, x_coords, y_coords, dx, dy, epsg):
@@ -32,6 +34,11 @@ def _write_synthetic_geometry(f, grid, ident, x_coords, y_coords, dx, dy, epsg):
     independent of y and height; the LOS unit vector is
     ``(east=-sin(inc), north=0, up=cos(inc))``. Being analytically known, tests
     can check the trilinear interpolation exactly.
+
+    ``elevationAngle`` (the off-nadir look angle, which the reader exposes as
+    ``look_angle``) follows the spherical-Earth relation
+    ``sin(look) = Re/(Re+h) sin(incidence)`` at a NISAR-like altitude, so it is
+    always the smaller of the two, as in a real product.
     """
     grid.create_dataset("centerFrequency", data=np.float64(CENTER_FREQ_A))
     ident.create_dataset("lookDirection", data=np.bytes_("Left"))
@@ -46,9 +53,15 @@ def _write_synthetic_geometry(f, grid, ident, x_coords, y_coords, dx, dy, epsg):
     )
     losx = np.ascontiguousarray((-np.sin(np.deg2rad(inc))).astype(np.float32))
     losy = np.zeros_like(losx)
+    # Off-nadir look angle for a ~747 km orbit over a spherical Earth.
+    look = np.degrees(
+        np.arcsin(EARTH_RADIUS / (EARTH_RADIUS + PLATFORM_ALT)
+                  * np.sin(np.deg2rad(inc)))
+    ).astype(np.float32)
 
     rg = f.create_group(RADAR_GRID)
     rg.create_dataset("incidenceAngle", data=inc)
+    rg.create_dataset("elevationAngle", data=np.ascontiguousarray(look))
     rg.create_dataset("losUnitVectorX", data=losx)
     rg.create_dataset("losUnitVectorY", data=losy)
     rg.create_dataset("heightAboveEllipsoid", data=heights)

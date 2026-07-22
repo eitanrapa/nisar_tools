@@ -126,3 +126,51 @@ def test_full_chain_form_unwrap_to_los(gslc_factory, tmp_path):
     assert los.sizes["pair"] == unw.sizes["pair"]
     assert los.ds["los"].dtype == np.float32
     assert np.isfinite(los.ds["incidence_angle"].values).all()
+
+
+def _los_stack(gslc_factory):
+    """A LOSStack on the synthetic geometry cube."""
+    p = gslc_factory(ny=60, nx=48, dx=20.0, dy=20.0, write_geometry=True)
+    unw_stack, _, _, _, _ = _synthetic_unwrapped(p)
+    return unw_stack.to_los(p, dem=None)
+
+
+def test_look_angle_is_smaller_than_incidence(gslc_factory):
+    """Look angle is measured at the sensor, incidence at the target.
+
+    Earth curvature makes the look (off-nadir) angle the smaller of the two,
+    by ``sin(look) = Re/(Re+h) sin(incidence)``. They are distinct fields, so
+    plotting one when you meant the other is a silent error.
+    """
+    los = _los_stack(gslc_factory)
+
+    inc = los.ds["incidence_angle"].values
+    look = los.ds["look_angle"].values
+    assert np.isfinite(inc).all() and np.isfinite(look).all()
+    assert (look < inc).all()
+
+    # Recover the platform altitude the fixture used; it must be constant.
+    ratio = np.sin(np.radians(look)) / np.sin(np.radians(inc))
+    altitude = 6_371_000.0 * (1.0 / ratio - 1.0)
+    np.testing.assert_allclose(altitude, 747_000.0, rtol=1e-3)
+
+
+def test_look_angle_survives_persist(gslc_factory, tmp_path):
+    los = _los_stack(gslc_factory)
+    ws = Workspace(tmp_path / "ws_look")
+    los.persist(ws, "los_look")
+    back = LOSStack.from_zarr(ws.path("los_look"))
+    np.testing.assert_array_equal(
+        back.ds["look_angle"].values, los.ds["look_angle"].values
+    )
+
+
+def test_plot_look_angle_and_incidence_are_different_fields(gslc_factory):
+    import matplotlib
+    matplotlib.use("Agg")
+
+    los = _los_stack(gslc_factory)
+    fig_look, ax_look = los.plot_look_angle()
+    fig_inc, ax_inc = los.plot_incidence()
+    assert fig_look is not None and fig_inc is not None
+    assert ax_look.get_title() != ax_inc.get_title()

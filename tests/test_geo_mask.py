@@ -152,7 +152,10 @@ def test_mask_cache_only_caches_the_mask_not_the_data(tmp_path, monkeypatch):
     unw = UnwrappedStack.from_zarr(ws.path("unwrapped"))
 
     masked = unw.mask_water(mask_cache=ws, resolution="i")
-    assert ws.exists("water_mask")          # the *mask* was cached
+    # The mask store is named from the grid, so masks for different grids
+    # coexist rather than evicting one another.
+    cached = [p.name for p in (ws.workdir).iterdir() if p.name.startswith("water_mask")]
+    assert len(cached) == 1 and cached[0] != "water_mask.zarr"
     # Spacing tracks the grid (500 m pixels, 2x oversampled), not a constant.
     assert masked.ds.attrs["water_mask"] == {"resolution": "i", "spacing": "250e"}
 
@@ -261,3 +264,54 @@ def test_mask_cache_key_includes_the_derived_spacing(tmp_path, monkeypatch):
 
     assert calls == ["50e", "100e"], calls   # recomputed, not reused
     assert real is not None
+
+
+def test_masks_for_different_grids_coexist(tmp_path, monkeypatch):
+    """A single fixed store name made the cache one slot wide.
+
+    Alternating between two grids recomputed every time, because each mask
+    overwrote the other. Naming the store from the grid lets them coexist.
+    """
+    from nisar_tools import Workspace, mask as mask_mod
+
+    calls = []
+
+    def counting(x_coords, y_coords, epsg_code, **kwargs):
+        calls.append(len(x_coords))
+        return xr.DataArray(
+            np.ones((len(y_coords), len(x_coords))),
+            coords={"y": y_coords, "x": x_coords}, dims=["y", "x"],
+        )
+
+    monkeypatch.setattr(mask_mod, "make_water_mask", counting)
+    ws = Workspace(tmp_path / "ws")
+
+    def grid(pixel_m, n):
+        return (470_000.0 + pixel_m * np.arange(n),
+                3_630_000.0 - pixel_m * np.arange(n))
+
+    a, b = grid(150.0, 40), grid(300.0, 40)
+    for coords in (a, a, b, a, b):
+        mask_mod.water_mask_for_grid(*coords, 32611, workspace=ws, resolution="i")
+
+    # Two computes total: one per distinct grid, everything else a cache hit.
+    assert len(calls) == 2, calls
+    stores = sorted(p.name for p in (ws.workdir).iterdir()
+                    if p.name.startswith("water_mask"))
+    assert len(stores) == 2, stores
+
+
+def test_explicit_mask_name_overrides_the_derived_one(tmp_path, monkeypatch):
+    from nisar_tools import Workspace, mask as mask_mod
+
+    monkeypatch.setattr(
+        mask_mod, "make_water_mask",
+        lambda x, y, e, **kw: xr.DataArray(
+            np.ones((len(y), len(x))), coords={"y": y, "x": x}, dims=["y", "x"]),
+    )
+    ws = Workspace(tmp_path / "ws")
+    x = 470_000.0 + 150.0 * np.arange(20)
+    y = 3_630_000.0 - 150.0 * np.arange(20)
+    mask_mod.water_mask_for_grid(x, y, 32611, workspace=ws, name="my_mask",
+                                 resolution="i")
+    assert ws.exists("my_mask")

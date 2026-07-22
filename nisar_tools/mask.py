@@ -116,22 +116,28 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
 
 
 def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
-                        name="water_mask", resolution="f", spacing=None):
+                        name=None, resolution="f", spacing=None):
     """Return a water mask, computing and caching it in the workspace if given.
 
     ``resolution``/``spacing`` are forwarded to :func:`make_water_mask`. The
     cache is keyed on the full grid identity (EPSG, shape, origin) and the
     mask parameters, so a different crop or resolution never reuses a stale
-    mask; a parameter change recomputes and overwrites.
+    mask.
+
+    ``name`` defaults to one derived from that same key, so masks for different
+    grids coexist instead of evicting each other. A single fixed name made the
+    cache one slot wide: alternating between two grids recomputed every time,
+    because each store overwrote the other.
     """
+    from .workspace import hash_params
+
     # Resolve before hashing: the grid-derived spacing has to be part of the
     # key, or two grids with the same shape and origin but different pixel
     # sizes would share a cached mask.
     if spacing is None:
         spacing = grid_spacing_arg(x_coords, y_coords, epsg_code)
 
-    params = {
-        "stage": name,
+    key = {
         "epsg": int(epsg_code),
         "nx": len(x_coords),
         "ny": len(y_coords),
@@ -140,6 +146,9 @@ def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
         "resolution": resolution,
         "spacing": spacing,
     }
+    if name is None:
+        name = f"water_mask_{hash_params(key)[:12]}"
+    params = {"stage": name, **key}
     if workspace is not None and workspace.has(name, params):
         # ``reset_coords`` also cleans masks cached before ``make_water_mask``
         # stripped the ``spatial_ref`` coordinate.
