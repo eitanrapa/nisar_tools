@@ -89,8 +89,16 @@ class UnwrappedStack(RasterStackMixin):
         return cls.from_zarr(workspace.path(name))
 
     # -- operations --------------------------------------------------------
-    def mask_water(self, workspace=None, resolution="f", spacing="5e"):
+    def mask_water(self, mask_cache=None, resolution="f", spacing="5e"):
         """Lazily mask water on the unwrapped phase. Returns a new stack.
+
+        Lazy: the masked values are **not** written anywhere. Call
+        :meth:`persist` (under a new stage name) if you want them on disk;
+        otherwise reloading this stage gives the unmasked phase back.
+
+        ``mask_cache`` is a :class:`~nisar_tools.workspace.Workspace` used to
+        cache the *coastline mask itself*, keyed on the grid, so GMT is not
+        re-run for the same crop. It is not where the masked data goes.
 
         ``resolution`` is the GMT coastline resolution; use a coarser value
         (e.g. ``"i"``) if the full-resolution GSHHG dataset is unavailable.
@@ -98,7 +106,7 @@ class UnwrappedStack(RasterStackMixin):
         from .mask import water_mask_for_grid
 
         mask = water_mask_for_grid(
-            self.x, self.y, self.epsg, workspace=workspace,
+            self.x, self.y, self.epsg, workspace=mask_cache,
             resolution=resolution, spacing=spacing,
         )
         ds = self.ds.copy()
@@ -106,7 +114,32 @@ class UnwrappedStack(RasterStackMixin):
         # (NaN is truthy, so passing the raw mask would keep water pixels).
         ds["unw"] = self.ds["unw"].where(mask.notnull())
         ds.attrs.update(self.ds.attrs)
+        ds.attrs["water_mask"] = {"resolution": resolution, "spacing": spacing}
         return UnwrappedStack(ds)
+
+    # -- persistence -------------------------------------------------------
+    def persist(self, workspace, name=None, overwrite=False, **params):
+        """Write the stack to the workspace and return the reopened lazy stack.
+
+        :meth:`from_interferograms` already writes its own store, so this is
+        for a *derived* stack -- most often a water-masked one, which is lazy.
+        Persist it under a new stage name: writing back over the store it reads
+        from is refused.
+        """
+        name = name or self.STAGE
+        ds = self.ds.chunk(self.disk_chunks("pair"))
+        full = {
+            "stage": name,
+            "epsg": self.epsg,
+            "looks": self.ds.attrs.get("looks"),
+            "pairs": self.ds.attrs.get("pairs"),
+            **params,
+        }
+        # Only recorded once masked, so an unmasked stage keeps its own hash.
+        if self.ds.attrs.get("water_mask") is not None:
+            full["water_mask"] = self.ds.attrs["water_mask"]
+        reopened = workspace.store(name, ds, full, overwrite=overwrite)
+        return UnwrappedStack(reopened)
 
     def to_los(self, gslc, dem=None, frequency="A", wavelength=None, sign=1):
         """Convert to LOS displacement + per-pixel look geometry.

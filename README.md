@@ -106,8 +106,9 @@ unw = igrams.unwrap(ws, nproc=8)
 los = unw.to_los(paths[0], dem="data/dem.tif").persist(ws, "los")
 fig, ax = los.plot(pair=0)            # displacement (m); los.plot_incidence() for angles
 
-# 6. Mask water and plot.
-unw = unw.mask_water(workspace=ws)
+# 6. Mask water and plot. Masking is lazy — persist it if you want it kept.
+unw = unw.mask_water(mask_cache=ws)          # ws caches the coastline mask
+unw = unw.persist(ws, "unwrapped_masked")    # optional; new stage name
 fig, ax = unw.plot(pair=0)
 ```
 
@@ -204,6 +205,45 @@ workdir/
 ws = Workspace("workdir/")                 # creates the directory if needed
 ws = Workspace("workdir/", create=False)   # open only; never writes on construction
 ```
+
+### Which steps write, and which don't
+
+Most steps are lazy and return a new stack; nothing reaches disk until you call
+`persist`. Unwrapping is the exception — it takes the workspace as its first
+argument and writes as it goes, because SNAPHU needs whole rasters, so it works
+one pair at a time, writing each into its own region and flagging it done for
+resume. By the time it returns, the store already exists.
+
+The rule of thumb: **a method that takes the workspace positionally writes; one
+that takes it as a keyword does not.**
+
+| step | writes? | where |
+|---|---|---|
+| `from_gslcs`, `crop`, `merge` | no | `.persist(ws, "slc_stack")` |
+| `form_interferograms`, `filter_goldstein` | no | `.persist(ws, "igrams")` |
+| `unwrap(ws, ...)` | **yes** | `unwrapped.zarr`, as it runs |
+| `mask_water(mask_cache=ws)` | no | `.persist(ws, "<new name>")` |
+| `to_los` | no | `.persist(ws, "los")` |
+
+`mask_water`'s `mask_cache` argument is easy to misread: it caches the
+*coastline mask itself* (keyed on the grid, so GMT is not re-run for the same
+crop) and has nothing to do with storing your masked data. Masking is lazy, so
+
+```python
+unw = unw.mask_water(mask_cache=ws)
+```
+
+leaves the mask in that object only — reload the `unwrapped` stage later and the
+phase comes back unmasked. Persist it under a **new** stage name to keep it:
+
+```python
+unw = unw.mask_water(mask_cache=ws).persist(ws, "unwrapped_masked")
+```
+
+A new name is required, not just tidier: persisting back over the store a stack
+reads from is refused (see the warning below). Masking also carries into any
+later stage you do persist, so `unw.mask_water(ws).to_los(gslc).persist(ws,
+"los")` stores masked LOS displacement even without saving the masked phase.
 
 ### Reloading finished stages
 
@@ -323,7 +363,7 @@ fixed by setting two variables in the kernel's environment. Edit
 `GMT_LIBRARY_PATH` should point at the `lib` directory of the same env, so
 pygmt loads that env's `libgmt` (matched to its netCDF/HDF5). If you can't use
 the full-resolution coastline, pass a coarser one, e.g.
-`unw.mask_water(workspace=ws, resolution="i")`.
+`unw.mask_water(mask_cache=ws, resolution="i")`.
 
 ## Design
 

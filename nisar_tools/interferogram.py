@@ -116,8 +116,15 @@ class InterferogramStack(RasterStackMixin):
         return cls(xr.open_zarr(path))
 
     # -- operations --------------------------------------------------------
-    def mask_water(self, workspace=None, resolution="f", spacing="5e"):
+    def mask_water(self, mask_cache=None, resolution="f", spacing="5e"):
         """Lazily mask water on both igram and coherence. Returns a new stack.
+
+        Lazy: the masked values are **not** written anywhere. Call
+        :meth:`persist` (under a new stage name) if you want them on disk.
+
+        ``mask_cache`` is a :class:`~nisar_tools.workspace.Workspace` used to
+        cache the *coastline mask itself*, keyed on the grid, so GMT is not
+        re-run for the same crop. It is not where the masked data goes.
 
         ``resolution`` is the GMT coastline resolution; use a coarser value
         (e.g. ``"i"``) if the full-resolution GSHHG dataset is unavailable.
@@ -125,7 +132,7 @@ class InterferogramStack(RasterStackMixin):
         from .mask import water_mask_for_grid
 
         mask = water_mask_for_grid(
-            self.x, self.y, self.epsg, workspace=workspace,
+            self.x, self.y, self.epsg, workspace=mask_cache,
             resolution=resolution, spacing=spacing,
         )
         # The mask is land=1 / water=NaN; ``where`` needs a boolean condition
@@ -135,6 +142,7 @@ class InterferogramStack(RasterStackMixin):
         ds["igram"] = self.ds["igram"].where(keep)
         ds["coherence"] = self.ds["coherence"].where(keep)
         ds.attrs.update(self.ds.attrs)
+        ds.attrs["water_mask"] = {"resolution": resolution, "spacing": spacing}
         return InterferogramStack(ds)
 
     def filter_goldstein(self, alpha=0.5, patch_size=32, overlap=0.75, psd_smooth=3):
@@ -235,6 +243,8 @@ class InterferogramStack(RasterStackMixin):
         # keeps its original hash (and re-running with a new alpha re-computes).
         if self.ds.attrs.get("goldstein") is not None:
             full["goldstein"] = self.ds.attrs["goldstein"]
+        if self.ds.attrs.get("water_mask") is not None:
+            full["water_mask"] = self.ds.attrs["water_mask"]
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return InterferogramStack(reopened)
 

@@ -117,3 +117,91 @@ def test_water_mask_if_gmt_available():
     # Land cells are 1, water cells are NaN.
     vals = np.unique(m.values[~np.isnan(m.values)])
     assert set(vals.tolist()) <= {1.0}
+
+def test_mask_cache_only_caches_the_mask_not_the_data(tmp_path, monkeypatch):
+    """``mask_cache`` reads like a persist target but is not one.
+
+    It stores the coastline mask so GMT is not re-run for the same grid; the
+    masked values stay lazy until the caller persists them.
+    """
+    pytest.importorskip("rioxarray")
+    from nisar_tools import Workspace
+    from nisar_tools.unwrap import UnwrappedStack
+
+    pygmt = pytest.importorskip("pygmt")
+
+    def fake_grdlandmask(region, spacing, maskvalues, resolution, registration):
+        lon = np.linspace(region[0], region[1], 60)
+        lat = np.linspace(region[2], region[3], 50)
+        data = np.ones((50, 60))
+        data[:, :20] = np.nan
+        return xr.DataArray(data, coords={"y": lat, "x": lon}, dims=("y", "x"))
+
+    monkeypatch.setattr(pygmt, "grdlandmask", fake_grdlandmask)
+
+    ws = Workspace(tmp_path / "ws")
+    x = 470_000.0 + 500.0 * np.arange(40)
+    y = 3_630_000.0 - 500.0 * np.arange(40)
+    ds = xr.Dataset(
+        {"unw": (("pair", "y", "x"), np.ones((1, 40, 40), np.float32)),
+         "conncomp": (("pair", "y", "x"), np.ones((1, 40, 40), np.uint32))},
+        coords={"y": y, "x": x, "pair": [0]},
+        attrs={"epsg": 32611},
+    )
+    ws.store("unwrapped", ds, {"stage": "unwrapped"})
+    unw = UnwrappedStack.from_zarr(ws.path("unwrapped"))
+
+    masked = unw.mask_water(mask_cache=ws, resolution="i")
+    assert ws.exists("water_mask")          # the *mask* was cached
+    assert masked.ds.attrs["water_mask"] == {"resolution": "i", "spacing": "5e"}
+
+    # The masked values were not written: reloading gives the phase back whole.
+    reloaded = UnwrappedStack.from_zarr(ws.path("unwrapped"))
+    assert np.isfinite(reloaded.ds["unw"].compute().values).all()
+    assert not np.isfinite(masked.ds["unw"].compute().values).all()
+
+
+def test_unwrapped_stack_persists_a_masked_result(tmp_path, monkeypatch):
+    """persist() is how a lazily-masked unwrapped stack reaches disk."""
+    pytest.importorskip("rioxarray")
+    from nisar_tools import Workspace, WorkspaceError
+    from nisar_tools.unwrap import UnwrappedStack
+
+    pygmt = pytest.importorskip("pygmt")
+
+    def fake_grdlandmask(region, spacing, maskvalues, resolution, registration):
+        lon = np.linspace(region[0], region[1], 60)
+        lat = np.linspace(region[2], region[3], 50)
+        data = np.ones((50, 60))
+        data[:, :20] = np.nan
+        return xr.DataArray(data, coords={"y": lat, "x": lon}, dims=("y", "x"))
+
+    monkeypatch.setattr(pygmt, "grdlandmask", fake_grdlandmask)
+
+    ws = Workspace(tmp_path / "ws")
+    x = 470_000.0 + 500.0 * np.arange(40)
+    y = 3_630_000.0 - 500.0 * np.arange(40)
+    ds = xr.Dataset(
+        {"unw": (("pair", "y", "x"), np.ones((1, 40, 40), np.float32)),
+         "conncomp": (("pair", "y", "x"), np.ones((1, 40, 40), np.uint32))},
+        coords={"y": y, "x": x, "pair": [0]},
+        attrs={"epsg": 32611},
+    )
+    ws.store("unwrapped", ds, {"stage": "unwrapped"})
+    unw = UnwrappedStack.from_zarr(ws.path("unwrapped"))
+    masked = unw.mask_water(mask_cache=ws, resolution="i")
+
+    out = masked.persist(ws, "unwrapped_masked")
+    assert isinstance(out, UnwrappedStack)
+    back = UnwrappedStack.from_zarr(ws.path("unwrapped_masked"))
+    expected = masked.ds["unw"].compute().values
+    np.testing.assert_array_equal(back.ds["unw"].compute().values, expected)
+
+    # Masking is part of the stage identity, so an unmasked write differs.
+    assert ws.stored_params_hash("unwrapped_masked") != ws.stored_params_hash(
+        "unwrapped"
+    )
+
+    # Writing back over the store it reads from is refused, hence "new name".
+    with pytest.raises(WorkspaceError, match="still an input"):
+        masked.persist(ws, "unwrapped", overwrite=True)
