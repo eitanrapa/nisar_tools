@@ -130,6 +130,18 @@ encodes. The resulting [`LOSStack`](nisar_tools/los.py) carries `los`
 Pass `dem=None` for sea-level geometry, or `sign=-1` to flip the displacement
 convention.
 
+**A merged stack needs one granule per frame.** Each granule's cube spans only
+its own frame, so passing a single one leaves the rest of a merged stack without
+geometry — the angle plots then show one frame where the data shows two:
+
+```python
+los = unw.to_los([paths_083[0], paths_084[0]], dem="workdir/dem.tif")
+```
+
+Cubes are sampled in order and combined, earlier granules winning where they
+overlap — the same precedence `merge` uses for the data. One granule per *frame*
+is enough; the geometry is shared across dates.
+
 The geometry is blanked outside the data footprint. The cube spans the frame's
 whole bounding rectangle and knows nothing about where the radar had returns, so
 interpolating it fills every pixel — which plots as a solid rectangle unrelated

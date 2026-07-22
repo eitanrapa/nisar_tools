@@ -16,6 +16,8 @@ the look (off-nadir) angle is measured at the spacecraft, against the ellipsoid
 normal there. Earth curvature makes the look angle the smaller of the two.
 """
 
+import os
+
 import numpy as np
 import rioxarray  # noqa: F401
 import xarray as xr
@@ -24,6 +26,22 @@ from ._base import RasterStackMixin
 
 _GEOM_2D = ("incidence_angle", "look_angle", "los_east", "los_north",
             "los_up", "height")
+
+
+def _as_granule_list(gslc):
+    """Normalise a granule argument to a list of paths.
+
+    A single path is by far the common case, but a merged stack needs one per
+    frame. Strings and ``os.PathLike`` are scalars here -- a string is iterable,
+    so testing for iterability alone would silently split a path into
+    characters.
+    """
+    if isinstance(gslc, (str, os.PathLike)):
+        return [gslc]
+    granules = list(gslc)
+    if not granules:
+        raise ValueError("Need at least one GSLC granule for the geometry cube")
+    return granules
 
 
 class LOSStack(RasterStackMixin):
@@ -40,10 +58,16 @@ class LOSStack(RasterStackMixin):
         """Build a :class:`LOSStack` from an unwrapped stack.
 
         ``gslc`` is a granule path supplying the geometry cube and (unless
-        ``wavelength`` is given) the radar wavelength. ``dem`` is a GeoTIFF path
-        or DataArray of ellipsoidal heights (``None`` -> sea-level geometry).
-        ``sign`` flips the LOS displacement convention (see
-        :func:`nisar_tools.geometry.phase_to_los`).
+        ``wavelength`` is given) the radar wavelength. For a stack built by
+        :meth:`~nisar_tools.stack.GSLCStack.merge`, pass **one granule per
+        frame**: each cube only spans its own frame, so a single granule leaves
+        the rest of a merged stack without geometry. The cubes are sampled in
+        order and combined, earlier granules taking precedence where they
+        overlap, matching ``merge``'s own rule.
+
+        ``dem`` is a GeoTIFF path or DataArray of ellipsoidal heights
+        (``None`` -> sea-level geometry). ``sign`` flips the LOS displacement
+        convention (see :func:`nisar_tools.geometry.phase_to_los`).
 
         ``mask_geometry`` (default) blanks the geometry outside the data. The
         cube spans the frame's whole bounding rectangle and knows nothing about
@@ -56,12 +80,23 @@ class LOSStack(RasterStackMixin):
 
         du = unwrapped.ds
         x, y, epsg = unwrapped.x, unwrapped.y, unwrapped.epsg
+        granules = _as_granule_list(gslc)
         if wavelength is None:
-            wavelength = geometry.radar_wavelength(gslc, frequency)
+            wavelength = geometry.radar_wavelength(granules[0], frequency)
 
-        cube = geometry.read_geometry_cube(gslc, frequency)
         heights = geometry.dem_heights_on_grid(dem, x, y, epsg)
-        geom = geometry.sample_look_geometry(cube, x, y, epsg, heights)
+        # One cube per frame, sampled onto the target grid and stacked. Each
+        # cube is NaN outside its own frame, so this fills a merged stack;
+        # holding one at a time keeps peak memory at a single cube.
+        geom = None
+        look_direction = None
+        for path in granules:
+            cube = geometry.read_geometry_cube(path, frequency)
+            sampled = geometry.sample_look_geometry(cube, x, y, epsg, heights)
+            geom = sampled if geom is None else geom.fillna(sampled)
+            if look_direction is None:
+                look_direction = cube.attrs.get("look_direction")
+            del cube, sampled
 
         los = geometry.phase_to_los(du["unw"], wavelength, sign=sign)
         los = los.astype(np.float32).rename("los")
@@ -85,7 +120,8 @@ class LOSStack(RasterStackMixin):
             wavelength=float(wavelength),
             frequency=frequency,
             sign=int(sign),
-            look_direction=cube.attrs.get("look_direction"),
+            look_direction=look_direction,
+            granules=[str(p) for p in granules],
             pairs=du.attrs.get("pairs"),
         )
         return cls(ds)

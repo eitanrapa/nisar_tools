@@ -217,7 +217,11 @@ class UnwrappedStack(RasterStackMixin):
         Scales the unwrapped phase to metres and attaches the incidence angle,
         look angle and ENU line-of-sight unit vector interpolated from
         ``gslc``'s built-in geometry cube at the ``dem`` height.
-        ``mask_geometry`` blanks that geometry outside the data footprint; see
+
+        ``gslc`` is one granule path, or **one per frame** for a merged stack:
+        each cube spans only its own frame, so a single granule leaves the rest
+        of a merged stack without geometry. ``mask_geometry`` blanks the
+        geometry outside the data footprint; see
         :meth:`LOSStack.from_unwrapped <nisar_tools.los.LOSStack.from_unwrapped>`.
         """
         from .los import LOSStack

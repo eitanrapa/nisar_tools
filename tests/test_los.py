@@ -221,3 +221,77 @@ def test_geometry_masking_can_be_disabled(gslc_factory):
     assert np.isfinite(full.ds["look_angle"].values).all()
     masked = unw_stack.to_los(p, dem=None)
     assert not np.isfinite(masked.ds["look_angle"].values[:10, :]).any()
+
+
+def _two_frame_stack(gslc_factory):
+    """A merged two-frame stack plus the granule path of each frame."""
+    from nisar_tools import GSLCStack
+
+    ny = nx = 64
+    step = 20.0
+    when = "2025-11-28T02:32:50.000000000"
+    pa = gslc_factory(ny=ny, nx=nx, dx=step, dy=step, x0=400000.0,
+                      y0=4_000_000.0, datetime_str=when, write_geometry=True)
+    pb = gslc_factory(ny=ny, nx=nx, dx=step, dy=step, x0=400000.0 + step * nx,
+                      y0=4_000_000.0 - step * (ny // 2), datetime_str=when,
+                      write_geometry=True)
+    ga, gb = GSLC(pa), GSLC(pb)
+    merged = GSLCStack.from_gslcs([ga]).merge(GSLCStack.from_gslcs([gb]))
+    slc = merged.ds["slc"].isel(time=0).compute().values   # before closing
+    ga.close()
+    gb.close()
+
+    unw = np.where(np.isfinite(slc), 1.0, np.nan).astype(np.float32)[None]
+    ds = xr.Dataset(
+        {"unw": (("pair", "y", "x"), unw)},
+        coords={"pair": [0], "y": merged.y, "x": merged.x},
+    ).rio.write_crs(f"EPSG:{merged.epsg}")
+    ds.attrs.update(epsg=merged.epsg, direction="Descending")
+    return UnwrappedStack(ds), pa, pb
+
+
+def test_merged_stack_needs_a_granule_per_frame(gslc_factory):
+    """Each cube spans only its own frame.
+
+    With one granule, half a merged stack comes back without geometry -- which
+    is not obvious until the geometry is masked to the data footprint, at which
+    point the angle plots show only one frame.
+    """
+    stack, pa, pb = _two_frame_stack(gslc_factory)
+    data = np.isfinite(stack.ds["unw"].isel(pair=0).values)
+
+    one = np.isfinite(stack.to_los(pa, dem=None).ds["look_angle"].values)
+    both = np.isfinite(stack.to_los([pa, pb], dem=None).ds["look_angle"].values)
+
+    # One granule covers its own frame only; both cover the whole footprint.
+    assert 0.3 < one.sum() / data.sum() < 0.7
+    np.testing.assert_array_equal(both, data)
+    assert (one & ~data).sum() == 0          # never outside the data either
+
+
+def test_granule_order_sets_precedence_in_the_overlap(gslc_factory):
+    """Earlier granules win where cubes overlap, as merge does for data."""
+    stack, pa, pb = _two_frame_stack(gslc_factory)
+    ab = stack.to_los([pa, pb], dem=None)
+    ba = stack.to_los([pb, pa], dem=None)
+
+    assert ab.ds.attrs["granules"] == [str(pa), str(pb)]
+    # Same coverage either way; the two orders differ only where cubes overlap.
+    np.testing.assert_array_equal(
+        np.isfinite(ab.ds["look_angle"].values),
+        np.isfinite(ba.ds["look_angle"].values),
+    )
+
+
+def test_single_granule_path_still_works(gslc_factory):
+    """A str/Path must stay a scalar -- iterating one would split it by character."""
+    from pathlib import Path
+
+    p = gslc_factory(ny=40, nx=32, dx=20.0, dy=20.0, write_geometry=True)
+    stack, _, _, _, _ = _synthetic_unwrapped(p)
+    for arg in (p, Path(p), [p]):
+        los = stack.to_los(arg, dem=None)
+        assert np.isfinite(los.ds["look_angle"].values).any()
+
+    with pytest.raises(ValueError, match="at least one GSLC"):
+        stack.to_los([], dem=None)
