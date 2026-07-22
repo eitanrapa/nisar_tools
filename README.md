@@ -143,6 +143,37 @@ fig, ax = los.plot_incidence()     # at the target, from local vertical
 fig, ax = los.plot_look_angle()    # at the sensor, off-nadir
 ```
 
+### The 2π ambiguity
+
+Unwrapping recovers phase only up to a whole multiple of 2π, and SNAPHU solves
+each **connected component** independently — so distinct components can sit
+whole cycles apart with nothing in the data to say which is right. Apply the
+offset once you know it, from a GPS station, a known-stable area, or continuity
+with a neighbouring component:
+
+```python
+unw = unw.add_cycles(1)                 # every pair, whole raster
+unw = unw.add_cycles(-2, pair=0)        # one pair
+unw = unw.add_cycles(1, conncomp=2)     # one connected component
+```
+
+Do this **before** `to_los`: one cycle is half a wavelength of range change
+(~12 cm at L-band), and the shift carries through. Like `mask_water` it is lazy
+and returns a new stack, so `persist` it under a new name to keep it; the shifts
+are recorded in the stage's parameter hash. Non-integer values are rejected,
+since a fractional shift would change the wrapped phase and no longer describe
+the same interferogram.
+
+### Exporting to GMT `.grd`
+
+`geo.project_to_latlon` reprojects any native-grid field to lon/lat, and the
+result writes straight to NetCDF, which is what a `.grd` is — GMT's `grdinfo`
+and `grdimage` read the output directly. See the notebook's "Export to GMT
+`.grd`" section for a `to_grd` helper and a re-import; the two details worth
+knowing are that rioxarray leaves a length-1 `band` axis to squeeze and a
+`spatial_ref` coordinate that must be dropped, or the file gains a second
+variable and `xr.open_dataarray` refuses it.
+
 ### Stitching along-track frames
 
 Adjacent frames from the same pass merge even when the track crosses a UTM

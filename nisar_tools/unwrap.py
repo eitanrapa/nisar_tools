@@ -127,6 +127,63 @@ class UnwrappedStack(RasterStackMixin):
         ds.attrs["water_mask"] = {"resolution": resolution, "spacing": spacing}
         return UnwrappedStack(ds)
 
+    def add_cycles(self, cycles, pair=None, conncomp=None):
+        """Shift the unwrapped phase by an integer number of 2*pi cycles.
+
+        Unwrapping recovers phase only up to a global multiple of 2*pi, and
+        SNAPHU resolves each *connected component* independently, so distinct
+        components can sit whole cycles apart from one another with no way to
+        tell from the data alone. This is how you apply the offset once you
+        know it -- from a GPS station, a known-stable area, or a neighbouring
+        component that should be continuous with this one.
+
+        ``cycles`` is added, so pass a negative value to remove cycles. It must
+        be a whole number: any other shift changes the wrapped phase and no
+        longer describes the same interferogram.
+
+        ``pair`` selects pair indices (default all) and ``conncomp`` selects
+        connected-component labels (default the whole raster). Component 0 is
+        SNAPHU's "not assigned to any component" label, so shifting it is
+        usually a mistake -- it is allowed, but it is not a real region.
+
+        Lazy, like :meth:`mask_water`: it returns a new stack and writes
+        nothing. The shift carries into :meth:`to_los` (one cycle is half a
+        wavelength of range change), so apply it before converting.
+        """
+        if int(cycles) != cycles:
+            raise ValueError(
+                f"cycles must be a whole number of 2*pi, got {cycles!r}; "
+                "a fractional shift would change the wrapped phase"
+            )
+        cycles = int(cycles)
+
+        unw = self.ds["unw"]
+        # Accumulate in float64 and round once on the way out: phase is stored
+        # as float32, and rounding 2*pi to float32 first would leave a residue
+        # that compounds over repeated shifts.
+        shift = xr.zeros_like(unw, dtype=np.float64) + (cycles * 2.0 * np.pi)
+
+        if pair is not None:
+            wanted = np.atleast_1d(np.asarray(pair))
+            shift = shift.where(unw["pair"].isin(wanted), 0.0)
+        if conncomp is not None:
+            wanted = np.atleast_1d(np.asarray(conncomp))
+            shift = shift.where(self.ds["conncomp"].isin(wanted), 0.0)
+
+        ds = self.ds.copy()
+        # NaN + shift stays NaN, so the invalid footprint is preserved.
+        ds["unw"] = (unw + shift).astype(unw.dtype)
+        ds.attrs.update(self.ds.attrs)
+        applied = list(self.ds.attrs.get("cycle_shifts", []))
+        applied.append(
+            {"cycles": cycles,
+             "pair": None if pair is None else np.atleast_1d(pair).tolist(),
+             "conncomp": None if conncomp is None
+             else np.atleast_1d(conncomp).tolist()}
+        )
+        ds.attrs["cycle_shifts"] = applied
+        return UnwrappedStack(ds)
+
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):
         """Write the stack to the workspace and return the reopened lazy stack.
@@ -145,9 +202,11 @@ class UnwrappedStack(RasterStackMixin):
             "pairs": self.ds.attrs.get("pairs"),
             **params,
         }
-        # Only recorded once masked, so an unmasked stage keeps its own hash.
+        # Only recorded once applied, so an untouched stage keeps its own hash.
         if self.ds.attrs.get("water_mask") is not None:
             full["water_mask"] = self.ds.attrs["water_mask"]
+        if self.ds.attrs.get("cycle_shifts"):
+            full["cycle_shifts"] = self.ds.attrs["cycle_shifts"]
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return UnwrappedStack(reopened)
 
