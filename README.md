@@ -365,6 +365,14 @@ pygmt loads that env's `libgmt` (matched to its netCDF/HDF5). If you can't use
 the full-resolution coastline, pass a coarser one, e.g.
 `unw.mask_water(mask_cache=ws, resolution="i")`.
 
+The coastline grid itself is built to match the stack's own pixel size, so a
+multilooked stack costs a correspondingly cheap mask. Override with `spacing=`
+only if you need something specific — and note that **GMT's `e` suffix means
+metres**, not arc-seconds (`s` is arc-seconds, a bare number is degrees). That
+unit is easy to get wrong: asking for `"5e"` builds a 5-metre coastline, which
+on a coastal crop is a few hundred times more nodes than a 150 m interferogram
+grid can represent, and turns masking from a fraction of a second into a minute.
+
 ## Design
 
 | Class | Wraps | Dims |

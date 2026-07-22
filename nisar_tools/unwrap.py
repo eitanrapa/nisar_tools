@@ -89,7 +89,7 @@ class UnwrappedStack(RasterStackMixin):
         return cls.from_zarr(workspace.path(name))
 
     # -- operations --------------------------------------------------------
-    def mask_water(self, mask_cache=None, resolution="f", spacing="5e"):
+    def mask_water(self, mask_cache=None, resolution="f", spacing=None):
         """Lazily mask water on the unwrapped phase. Returns a new stack.
 
         Lazy: the masked values are **not** written anywhere. Call
@@ -102,8 +102,15 @@ class UnwrappedStack(RasterStackMixin):
 
         ``resolution`` is the GMT coastline resolution; use a coarser value
         (e.g. ``"i"``) if the full-resolution GSHHG dataset is unavailable.
+        ``spacing`` defaults to tracking this stack's own pixel size, so a
+        multilooked stack builds a correspondingly coarse coastline.
         """
-        from .mask import water_mask_for_grid
+        from .mask import grid_spacing_arg, water_mask_for_grid
+
+        # Resolve here so the recorded value (which feeds the stage hash) is
+        # the increment actually used, not a placeholder None.
+        if spacing is None:
+            spacing = grid_spacing_arg(self.x, self.y, self.epsg)
 
         mask = water_mask_for_grid(
             self.x, self.y, self.epsg, workspace=mask_cache,

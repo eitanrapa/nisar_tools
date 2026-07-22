@@ -153,7 +153,8 @@ def test_mask_cache_only_caches_the_mask_not_the_data(tmp_path, monkeypatch):
 
     masked = unw.mask_water(mask_cache=ws, resolution="i")
     assert ws.exists("water_mask")          # the *mask* was cached
-    assert masked.ds.attrs["water_mask"] == {"resolution": "i", "spacing": "5e"}
+    # Spacing tracks the grid (500 m pixels, 2x oversampled), not a constant.
+    assert masked.ds.attrs["water_mask"] == {"resolution": "i", "spacing": "250e"}
 
     # The masked values were not written: reloading gives the phase back whole.
     reloaded = UnwrappedStack.from_zarr(ws.path("unwrapped"))
@@ -205,3 +206,58 @@ def test_unwrapped_stack_persists_a_masked_result(tmp_path, monkeypatch):
     # Writing back over the store it reads from is refused, hence "new name".
     with pytest.raises(WorkspaceError, match="still an input"):
         masked.persist(ws, "unwrapped", overwrite=True)
+
+
+def test_mask_spacing_tracks_the_grid_not_the_native_pixel():
+    """The coastline only has to resolve at the pixel it is sampled onto.
+
+    GMT's ``e`` suffix is *metres*: the old fixed ``"5e"`` default read like
+    "5 arc-seconds" but asked for a 5 m coastline, so a multilooked stack still
+    paid for a full-resolution mask -- ~1000x more nodes than its grid could
+    represent, and about a minute of GMT time on a coastal crop.
+    """
+    from nisar_tools.mask import grid_spacing_arg
+
+    for pixel_m, expected in ((150.0, "75e"), (300.0, "150e"), (5.0, "2.5e")):
+        x = 470_000.0 + pixel_m * np.arange(50)
+        y = 3_630_000.0 - pixel_m * np.arange(50)
+        assert grid_spacing_arg(x, y, 32611) == expected
+
+    # Anisotropic grids follow the finer axis.
+    x = 470_000.0 + 200.0 * np.arange(20)
+    y = 3_630_000.0 - 100.0 * np.arange(20)
+    assert grid_spacing_arg(x, y, 32611) == "50e"
+
+    # Geographic grids are already in degrees, GMT's unit-less default.
+    lon = -118.0 + 0.002 * np.arange(20)
+    lat = 34.0 + 0.002 * np.arange(20)
+    assert grid_spacing_arg(lon, lat, 4326) == "0.001"
+
+
+def test_mask_cache_key_includes_the_derived_spacing(tmp_path, monkeypatch):
+    """Two grids of equal shape and origin but different pixel size must not
+    share a cached mask -- the shape/origin key alone cannot tell them apart."""
+    pytest.importorskip("rioxarray")
+    from nisar_tools import Workspace, mask as mask_mod
+
+    calls = []
+    real = mask_mod.make_water_mask
+
+    def counting(x_coords, y_coords, epsg_code, **kwargs):
+        calls.append(kwargs.get("spacing"))
+        return xr.DataArray(
+            np.ones((len(y_coords), len(x_coords))),
+            coords={"y": y_coords, "x": x_coords}, dims=["y", "x"],
+        )
+
+    monkeypatch.setattr(mask_mod, "make_water_mask", counting)
+    ws = Workspace(tmp_path / "ws")
+
+    # Same nx/ny/x0/y0, different pixel size.
+    for pixel_m in (100.0, 200.0):
+        x = 470_000.0 + pixel_m * np.arange(30)
+        y = 3_630_000.0 - pixel_m * np.arange(30)
+        mask_mod.water_mask_for_grid(x, y, 32611, workspace=ws, resolution="i")
+
+    assert calls == ["50e", "100e"], calls   # recomputed, not reused
+    assert real is not None

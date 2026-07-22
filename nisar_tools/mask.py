@@ -14,9 +14,42 @@ import xarray as xr
 
 from . import geo
 
+# Build the coastline this many times finer than the target pixel. Sampling it
+# back down is nearest-neighbour, so a source slightly finer than the
+# destination keeps the reprojection well posed; beyond ~2x the coastline moves
+# by well under a pixel and only costs time.
+_MASK_OVERSAMPLE = 2
+
+
+def grid_spacing_arg(x_coords, y_coords, epsg_code, oversample=_MASK_OVERSAMPLE):
+    """GMT ``-I`` increment that resolves the coastline at this grid's pixel.
+
+    **GMT's ``e`` suffix means metres, not arc-seconds** — a plain number is
+    degrees, ``s`` is arc-seconds. Getting that wrong is expensive: the old
+    default of ``"5e"`` read as "5 arc-seconds" but asked GMT for a *5 metre*
+    coastline, so the mask was built at the GSLC's native resolution however
+    much the interferogram had been multilooked. On a coastal crop that was
+    ~1000x more nodes than the grid could represent, and about a minute of
+    GMT time per call.
+    """
+    import pyproj
+
+    step = min(
+        abs(float(x_coords[1] - x_coords[0])),
+        abs(float(y_coords[1] - y_coords[0])),
+    ) / oversample
+    # Trimmed: coordinate arithmetic leaves float noise, and this string goes
+    # into the mask cache key, where 0.0009999999999976694 and 0.001 would
+    # otherwise look like different masks.
+    step = f"{step:.6g}"
+    # Geographic grids are already in degrees, which is GMT's unit-less default.
+    if pyproj.CRS.from_epsg(int(epsg_code)).is_geographic:
+        return step
+    return f"{step}e"
+
 
 def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
-                    resolution="f", spacing="5e"):
+                    resolution="f", spacing=None):
     """Build a land=1 / water=NaN mask aligned to the given native grid.
 
     Returns a 2D :class:`xarray.DataArray` on ``(y, x)``.
@@ -26,10 +59,17 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
     accurate but needs the large full-resolution GSHHG dataset downloaded; if
     that download is unavailable or its cache is corrupt, pass a coarser
     resolution such as ``"i"`` (intermediate), which is more than adequate for
-    masking geocoded SAR and downloads reliably. ``spacing`` is the mask grid
-    spacing in lon/lat (GMT units, e.g. ``"5e"`` = 5 arc-seconds).
+    masking geocoded SAR and downloads reliably.
+
+    ``spacing`` is the GMT increment for the coastline grid. Leave it ``None``
+    to track the target grid (see :func:`grid_spacing_arg`) — the mask only has
+    to resolve the coastline at the pixel size it will be sampled onto, so a
+    multilooked stack needs a far coarser mask than a full-resolution one.
     """
     import pygmt
+
+    if spacing is None:
+        spacing = grid_spacing_arg(x_coords, y_coords, epsg_code)
 
     x_min, x_max = float(np.min(x_coords)), float(np.max(x_coords))
     y_min, y_max = float(np.min(y_coords)), float(np.max(y_coords))
@@ -76,7 +116,7 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
 
 
 def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
-                        name="water_mask", resolution="f", spacing="5e"):
+                        name="water_mask", resolution="f", spacing=None):
     """Return a water mask, computing and caching it in the workspace if given.
 
     ``resolution``/``spacing`` are forwarded to :func:`make_water_mask`. The
@@ -84,6 +124,12 @@ def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
     mask parameters, so a different crop or resolution never reuses a stale
     mask; a parameter change recomputes and overwrites.
     """
+    # Resolve before hashing: the grid-derived spacing has to be part of the
+    # key, or two grids with the same shape and origin but different pixel
+    # sizes would share a cached mask.
+    if spacing is None:
+        spacing = grid_spacing_arg(x_coords, y_coords, epsg_code)
+
     params = {
         "stage": name,
         "epsg": int(epsg_code),
