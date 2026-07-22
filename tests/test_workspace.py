@@ -179,3 +179,38 @@ def test_source_detection_is_cheap_on_a_large_graph(tmp_path):
     found = _zarr_source_paths(derived)
     assert ws.path("big").resolve() in found
     assert time.perf_counter() - start < 1.0
+
+
+def test_reopened_stage_keeps_its_crs(tmp_path):
+    """Zarr has no coord/variable distinction, so spatial_ref comes back wrong.
+
+    rioxarray then reports ``rio.crs is None`` on every field of a reopened
+    stack, and anything that reprojects -- plotting, exporting to lon/lat --
+    fails with "Provide a CRS-aware DataArray". Both persist() and from_zarr()
+    have to restore it.
+    """
+    import rioxarray  # noqa: F401
+
+    ws = Workspace(tmp_path)
+    ds = _complex_ds().rio.write_crs("EPSG:32611")
+    assert "spatial_ref" in ds.coords
+
+    reopened = ws.store("slc_stack", ds, {"v": 1})
+    assert "spatial_ref" in reopened.coords
+    assert "spatial_ref" not in reopened.data_vars
+    assert reopened["slc"].rio.crs.to_epsg() == 32611
+
+    # load() is the other door into the same store.
+    assert ws.load("slc_stack")["slc"].rio.crs.to_epsg() == 32611
+
+
+def test_every_stage_class_restores_the_crs_from_zarr(tmp_path):
+    import rioxarray  # noqa: F401
+
+    from nisar_tools import GSLCStack, InterferogramStack, LOSStack, UnwrappedStack
+
+    ws = Workspace(tmp_path)
+    ws.store("s", _complex_ds().rio.write_crs("EPSG:32611"), {"v": 1})
+    for cls in (GSLCStack, InterferogramStack, UnwrappedStack, LOSStack):
+        stack = cls.from_zarr(ws.path("s"))
+        assert stack.ds["slc"].rio.crs.to_epsg() == 32611, cls.__name__

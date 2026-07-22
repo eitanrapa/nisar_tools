@@ -15,7 +15,7 @@ import snaphu
 import xarray as xr
 
 from . import _kernels
-from ._base import SPATIAL_CHUNK, RasterStackMixin
+from ._base import SPATIAL_CHUNK, RasterStackMixin, open_stage
 
 
 class UnwrappedStack(RasterStackMixin):
@@ -28,7 +28,7 @@ class UnwrappedStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
-        return cls(xr.open_zarr(path))
+        return cls(open_stage(path))
 
     @classmethod
     def from_interferograms(

@@ -13,7 +13,7 @@ import rioxarray  # noqa: F401
 import xarray as xr
 
 from . import _kernels
-from ._base import RasterStackMixin
+from ._base import RasterStackMixin, open_stage
 
 
 def make_pairs(spec, n):
@@ -113,7 +113,7 @@ class InterferogramStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
-        return cls(xr.open_zarr(path))
+        return cls(open_stage(path))
 
     # -- operations --------------------------------------------------------
     def mask_water(self, mask_cache=None, resolution="f", spacing=None,

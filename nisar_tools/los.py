@@ -22,7 +22,7 @@ import numpy as np
 import rioxarray  # noqa: F401
 import xarray as xr
 
-from ._base import RasterStackMixin
+from ._base import RasterStackMixin, open_stage
 
 _GEOM_2D = ("incidence_angle", "look_angle", "los_east", "los_north",
             "los_up", "height")
@@ -128,7 +128,7 @@ class LOSStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
-        return cls(xr.open_zarr(path))
+        return cls(open_stage(path))
 
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):

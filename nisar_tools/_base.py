@@ -6,6 +6,22 @@ import xarray as xr
 SPATIAL_CHUNK = 2048
 
 
+def open_stage(path):
+    """Open a stage's Zarr store, restoring the CRS coordinate.
+
+    Zarr does not distinguish coordinates from data variables, so the
+    ``spatial_ref`` that :meth:`~xarray.Dataset.rio.write_crs` wrote as a
+    coordinate comes back as a *variable*. rioxarray then stops recognising the
+    CRS, and every field of a reopened stack reports ``rio.crs is None`` --
+    which surfaces far downstream as "Provide a CRS-aware DataArray" from
+    anything that reprojects, such as exporting to lon/lat.
+    """
+    ds = xr.open_zarr(path)
+    if "spatial_ref" in ds.data_vars:
+        ds = ds.set_coords("spatial_ref")
+    return ds
+
+
 class RasterStackMixin:
     """Common accessors for objects backed by an ``xr.Dataset``."""
 

@@ -303,10 +303,18 @@ class Workspace:
         return self.load(name)
 
     def load(self, name):
-        """Open stage ``name`` lazily."""
+        """Open stage ``name`` lazily, with its CRS coordinate restored.
+
+        Goes through :func:`~nisar_tools._base.open_stage` rather than
+        ``xr.open_zarr`` because ``store`` returns ``load``'s result -- so this
+        is the one place every persisted stage is reopened, including the one
+        handed straight back from ``persist``.
+        """
+        from ._base import open_stage
+
         if not self.exists(name):
             raise WorkspaceError(f"Stage '{name}' does not exist in {self.workdir}.")
-        return xr.open_zarr(self.path(name))
+        return open_stage(self.path(name))
 
     def clear(self, name):
         """Delete a stage store and any done-markers."""

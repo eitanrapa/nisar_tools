@@ -10,7 +10,7 @@ import rioxarray  # noqa: F401
 import xarray as xr
 
 from . import geo
-from ._base import SPATIAL_CHUNK, RasterStackMixin
+from ._base import SPATIAL_CHUNK, RasterStackMixin, open_stage
 from .interferogram import InterferogramStack, make_pairs
 
 
@@ -72,7 +72,7 @@ class GSLCStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
-        return cls(xr.open_zarr(path))
+        return cls(open_stage(path))
 
     # -- lazy operations ---------------------------------------------------
     def merge(self, other, resampling="bilinear", time_tolerance=600.0):
