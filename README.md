@@ -46,10 +46,8 @@ almost always means a different kernel is selected than the env above.
 
 ## Downloading inputs
 
-The `download` module fetches the two inputs a run needs — GSLC granules and a
-DEM — all behind lazily-imported optional dependencies and all needing an
-[Earthdata Login](https://urs.earthdata.nasa.gov). (Orbit ephemeris is *not*
-needed: the geometry is read from each GSLC's built-in cube — see below.)
+The `download` module fetches GSLC granules — all behind lazily-imported optional 
+dependencies and all needing an [Earthdata Login](https://urs.earthdata.nasa.gov).
 Bounding boxes use this package's `(lon_min, lon_max, lat_min, lat_max)` order
 (the same `GSLC.crop` takes).
 
@@ -63,11 +61,6 @@ bbox = (-120.5, -119.5, 34.0, 35.0)
 gslcs = download.download_gslcs("data/gslc", bbox=bbox, temporal=("2025-11", "2025-12"))
 gslcs = download.download_gslcs("data/gslc", granules=["NISAR_L2_GSLC_..."])
 
-# DEM via sardem — default is the official NISAR reference DEM (needs ~/.netrc);
-# pass data_source="COP" for Copernicus (no login).
-dem   = download.download_dem("data/dem.tif", bbox)
-```
-
 Two backends for granules: **earthaccess** (`method="earthaccess"`, the default —
 searches CMR by name/area/time) and the original **direct-by-name** path
 (`method="asf"`), which pulls straight from the NISAR bucket using only the
@@ -80,177 +73,14 @@ download.download_gslcs("data/gslc", granules=["NISAR_L2_GSLC_..."], method="asf
 
 ## Pipeline
 
-```python
-from nisar_tools import GSLC, GSLCStack, Workspace
-
-ws = Workspace("workdir/")
-
-# 1. Crop a region out of each granule and persist the aligned stack.
-gslcs = [GSLC(p) for p in paths]
-stack = GSLCStack.from_gslcs(gslcs, bbox=(lon0, lon1, lat0, lat1))
-stack = stack.persist(ws, "slc_stack", files=paths)   # reopens from Zarr
-for g in gslcs:
-    g.close()                                          # safe after persist
-
-# 2. Form multilooked interferograms + coherence.
-igrams = stack.form_interferograms(pairs="sequential", looks=5).persist(ws, "igrams")
-
-# 3. Goldstein-Werner phase filter (sharpens fringes before unwrapping).
-#    alpha=float for constant strength, or "adaptive" for Baran (1-coherence).
-igrams = igrams.filter_goldstein(alpha="adaptive").persist(ws, "igrams_filt")
-
-# 4. Unwrap with SNAPHU, one pair at a time (resumable).
-unw = igrams.unwrap(ws, nproc=8)
-
-# 5. Convert to line-of-sight displacement + per-pixel look geometry.
-los = unw.to_los(paths[0], dem="data/dem.tif").persist(ws, "los")
-fig, ax = los.plot(pair=0)            # displacement (m)
-fig, ax = los.plot_look_angle()       # or .plot_incidence() — these differ
-
-# 6. Mask water and plot. Masking is lazy — persist it if you want it kept.
-unw = unw.mask_water(mask_cache=ws)          # ws caches the coastline mask
-unw = unw.persist(ws, "unwrapped_masked")    # optional; new stage name
-fig, ax = unw.plot(pair=0)
-```
-
 A runnable end-to-end example is in [notebooks/nisar_tools.ipynb](notebooks/nisar_tools.ipynb).
-
-### Line-of-sight displacement and look angles
-
-`UnwrappedStack.to_los(gslc, dem=...)` scales the unwrapped phase to metres,
-`d_los = +(λ/4π)·φ` (positive **toward the sensor**; λ from the GSLC's
-`centerFrequency`), and attaches per-pixel look geometry. The geometry comes
-from the GSLC's own ISCE3-computed cube at `metadata/radarGrid` (incidence angle
-and the target→sensor ENU line-of-sight unit vector, tabulated vs. height),
-trilinearly interpolated in `(x, y, DEM-height)`. So it needs a `gslc` (cube +
-λ) and a `dem` GeoTIFF — not the orbit ephemeris, which the cube already
-encodes. The resulting [`LOSStack`](nisar_tools/los.py) carries `los`
-`(pair, y, x)` plus shared `incidence_angle`, `look_angle` and
-`los_east`/`los_north`/`los_up` `(y, x)` for projecting 3-D motion into LOS.
-Pass `dem=None` for sea-level geometry, or `sign=-1` to flip the displacement
-convention.
-
-**A merged stack needs one granule per frame.** Each granule's cube spans only
-its own frame, so passing a single one leaves the rest of a merged stack without
-geometry — the angle plots then show one frame where the data shows two:
-
-```python
-los = unw.to_los([paths_083[0], paths_084[0]], dem="workdir/dem.tif")
-```
-
-Cubes are sampled in order and combined, earlier granules winning where they
-overlap — the same precedence `merge` uses for the data. One granule per *frame*
-is enough; the geometry is shared across dates.
-
-The geometry is blanked outside the data footprint. The cube spans the frame's
-whole bounding rectangle and knows nothing about where the radar had returns, so
-interpolating it fills every pixel — which plots as a solid rectangle unrelated
-to the swath, and reports an incidence angle for ground the pass never
-illuminated. It is kept wherever *any* pair has data, since the geometry is
-shared across pairs; pass `mask_geometry=False` to `to_los` for the full
-rectangle.
-
-**Incidence angle and look angle are different things.** Incidence is measured
-at the *target*, between the line of sight and the local vertical; the look (or
-off-nadir) angle is measured at the *spacecraft*, against the ellipsoid normal
-there. Earth curvature makes the look angle the smaller of the two, by
-`sin(look) = Rₑ/(Rₑ+h)·sin(incidence)` — on a real granule, incidence spans
-27.8–51.5° where the look angle spans 24.7–44.4°. Both come straight from the
-product (the look angle is its `elevationAngle`), so neither is derived here:
-
-```python
-fig, ax = los.plot_incidence()     # at the target, from local vertical
-fig, ax = los.plot_look_angle()    # at the sensor, off-nadir
-```
-
-### The 2π ambiguity
-
-Unwrapping recovers phase only up to a whole multiple of 2π, and SNAPHU solves
-each **connected component** independently — so distinct components can sit
-whole cycles apart with nothing in the data to say which is right. Apply the
-offset once you know it, from a GPS station, a known-stable area, or continuity
-with a neighbouring component:
-
-```python
-unw = unw.add_cycles(1)                 # every pair, whole raster
-unw = unw.add_cycles(-2, pair=0)        # one pair
-unw = unw.add_cycles(1, conncomp=2)     # one connected component
-```
-
-Do this **before** `to_los`: one cycle is half a wavelength of range change
-(~12 cm at L-band), and the shift carries through. Like `mask_water` it is lazy
-and returns a new stack, so `persist` it under a new name to keep it; the shifts
-are recorded in the stage's parameter hash. Non-integer values are rejected,
-since a fractional shift would change the wrapped phase and no longer describe
-the same interferogram.
 
 ### Exporting to GMT `.grd`
 
 `geo.project_to_latlon` reprojects any native-grid field to lon/lat, and the
 result writes straight to NetCDF, which is what a `.grd` is — GMT's `grdinfo`
 and `grdimage` read the output directly. See the notebook's "Export to GMT
-`.grd`" section for a `to_grd` helper and a re-import; the two details worth
-knowing are that rioxarray leaves a length-1 `band` axis to squeeze and a
-`spatial_ref` coordinate that must be dropped, or the file gains a second
-variable and `xr.open_dataarray` refuses it.
-
-### Stitching along-track frames
-
-Adjacent frames from the same pass merge even when the track crosses a UTM
-zone boundary: `merge` pairs acquisitions by time (frames along a pass differ
-by seconds, never exactly) and, when the CRSs differ, warps the other stack
-onto this stack's grid one date at a time:
-
-```python
-stitched = stack_a.merge(stack_b)                         # bilinear on I/Q
-stitched = stack_a.merge(stack_b, resampling="nearest")   # exact samples
-```
-
-The union grid keeps NaN where neither frame has data (including thin wedges
-from the zone rotation), exactly as with the NaN fill of a single granule.
-Interferogram formation is NaN-aware, so that fill neither spreads nor eats
-into the valid data — see [Invalid pixels](#invalid-pixels). Frames on
-*different* tracks have no common pass and cannot be stitched at the SLC
-level; process each track through unwrapping and mosaic the unwrapped
-products instead.
-
-### Invalid pixels
-
-A NISAR GSLC is NaN outside its swath — often around 45% of a granule, since
-the radar footprint is a sheared parallelogram on a north-up grid — and every
-merged union grid is NaN in its corners.
-
-`form_interferograms` multilooks over the valid samples only (a normalized
-convolution: the validity mask is smoothed alongside the data and divided back
-out). An output pixel is kept when at least `min_valid_fraction` of its filter
-weight came from valid input, so the invalid footprint neither dilates nor
-grows — at a straight edge the 0.5 default lands on the true boundary:
-
-```python
-igrams = stack.form_interferograms(looks=30, convolution="Gaussian")
-igrams = stack.form_interferograms(looks=30, min_valid_fraction=0.9)  # stricter
-igrams = stack.form_interferograms(looks=30, nan_aware=False)         # legacy
-```
-
-This matters because `scipy.ndimage`'s filters are not NaN-aware: under
-`nan_aware=False` a single invalid sample contaminates its whole filter
-footprint (a radius of `4 * looks` for Gaussian) and, because `uniform_filter`
-is a running sum, everything downstream of it along both axes for Uniform. On
-a real block straddling a swath edge at `looks=30`, 51.3% of the input valid:
-the legacy path keeps 46.1% (Gaussian) or 32.0% (Uniform); the NaN-aware path
-keeps 51.1% either way.
-
-Unwrapping carries the footprint through — invalid pixels are excluded from
-SNAPHU's solution rather than silently substituted with zeros, and come back
-as NaN with a connected-component label of 0.
-
-Every stage can also be cropped, so a ragged edge can be trimmed after the
-fact and not only before:
-
-```python
-igrams = igrams.crop(lon_min, lon_max, lat_min, lat_max)
-unw = unw.crop(lon_min, lon_max, lat_min, lat_max)
-```
+`.grd`" section for a `to_grd` helper and a re-import.
 
 ## Workspaces
 
@@ -280,37 +110,6 @@ argument and writes as it goes, because SNAPHU needs whole rasters, so it works
 one pair at a time, writing each into its own region and flagging it done for
 resume. By the time it returns, the store already exists.
 
-The rule of thumb: **a method that takes the workspace positionally writes; one
-that takes it as a keyword does not.**
-
-| step | writes? | where |
-|---|---|---|
-| `from_gslcs`, `crop`, `merge` | no | `.persist(ws, "slc_stack")` |
-| `form_interferograms`, `filter_goldstein` | no | `.persist(ws, "igrams")` |
-| `unwrap(ws, ...)` | **yes** | `unwrapped.zarr`, as it runs |
-| `mask_water(mask_cache=ws)` | no | `.persist(ws, "<new name>")` |
-| `to_los` | no | `.persist(ws, "los")` |
-
-`mask_water`'s `mask_cache` argument is easy to misread: it caches the
-*coastline mask itself* (keyed on the grid, so GMT is not re-run for the same
-crop) and has nothing to do with storing your masked data. Masking is lazy, so
-
-```python
-unw = unw.mask_water(mask_cache=ws)
-```
-
-leaves the mask in that object only — reload the `unwrapped` stage later and the
-phase comes back unmasked. Persist it under a **new** stage name to keep it:
-
-```python
-unw = unw.mask_water(mask_cache=ws).persist(ws, "unwrapped_masked")
-```
-
-A new name is required, not just tidier: persisting back over the store a stack
-reads from is refused (see the warning below). Masking also carries into any
-later stage you do persist, so `unw.mask_water(ws).to_los(gslc).persist(ws,
-"los")` stores masked LOS displacement even without saving the masked phase.
-
 ### Reloading finished stages
 
 Reopen a stage directly, without touching the granules or recomputing anything.
@@ -329,20 +128,6 @@ ds = ws.load("igrams")            # the xr.Dataset, if you'd rather work with it
 
 Stores are lazy, so reopening a 200 GB stage costs nothing until you compute.
 
-You rarely need to check first, because re-running the same code is already the
-resume path: `persist()` returns the existing store untouched when the
-parameters match, and raises `WorkspaceError` when they don't. If you do want to
-look:
-
-```python
-ws.exists("igrams")                # True / False
-ws.stored_params_hash("igrams")    # hash recorded at write time, or None
-ws.pairs_done("unwrapped")         # e.g. {0, 1, 2} — which pairs SNAPHU finished
-```
-
-Unwrapping resumes at the first unfinished pair, so an interrupted run picks up
-where it stopped just by calling `igrams.unwrap(ws, ...)` again.
-
 ### Clearing
 
 ```python
@@ -359,44 +144,6 @@ igrams = stack.form_interferograms(looks=30).persist(ws, "igrams", overwrite=Tru
 
 To throw away everything, delete the directory (`shutil.rmtree("workdir/")`) and
 construct a new `Workspace`.
-
-**Persisting a stage back over the store it reads from raises `WorkspaceError`.**
-`overwrite=True` deletes the target directory *before* the write computes, and
-the lazy graph is still reading from it, so the two race — historically this did
-not fail loudly but produced a plausible-looking array with a varying fraction of
-pixels silently corrupted to NaN. It is now refused up front, with the store left
-untouched:
-
-```python
-stack = GSLCStack.from_zarr(ws.path("slc_stack"))
-merged = stack.merge(other)
-
-merged.persist(ws, "slc_merged")                  # new name — fine
-merged.persist(ws, "slc_stack", overwrite=True)   # WorkspaceError: still an input
-```
-
-The check looks at whether the dataset's *lazy* data still reads the target, so
-it also catches stages rebuilt through `merge` (which drops xarray's `encoding`)
-and covers the region-written unwrap store. A dataset you have already
-`.compute()`d holds nothing open and can be written back freely. Detection is
-best effort: on the rare shape it can't inspect it stays out of the way rather
-than blocking a valid write, so prefer a fresh stage name regardless.
-
-### Changing a parameter invalidates a stage
-
-The hash covers the arguments that affect the numbers — `looks`, `downsample`,
-`convolution`, `nan_aware`, `min_valid_fraction`, the pair list, plus anything
-extra you pass to `persist()`. Changing one means the stored result no longer
-matches, so `persist()` refuses without `overwrite=True`. Nothing cascades
-automatically: downstream stages are not invalidated for you, so after
-re-forming interferograms, clear or overwrite the stages built on top of them.
-
-Recording the inputs is worth doing, since they are not otherwise part of the
-hash:
-
-```python
-stack.persist(ws, "slc_stack", files=paths, bbox=list(bbox))
-```
 
 ### Running the notebook
 
@@ -427,43 +174,7 @@ fixed by setting two variables in the kernel's environment. Edit
 ```
 
 `GMT_LIBRARY_PATH` should point at the `lib` directory of the same env, so
-pygmt loads that env's `libgmt` (matched to its netCDF/HDF5). If you can't use
-the full-resolution coastline, pass a coarser one, e.g.
-`unw.mask_water(mask_cache=ws, resolution="i")`.
-
-The cached mask store is named from the grid it was built for
-(`water_mask_<hash>.zarr`), so masks for different crops or `looks` settings
-coexist instead of evicting one another; pass `mask_name=` to choose the name
-yourself.
-
-The coastline grid itself is built to match the stack's own pixel size, so a
-multilooked stack costs a correspondingly cheap mask. Override with `spacing=`
-only if you need something specific — and note that **GMT's `e` suffix means
-metres**, not arc-seconds (`s` is arc-seconds, a bare number is degrees). That
-unit is easy to get wrong: asking for `"5e"` builds a 5-metre coastline, which
-on a coastal crop is a few hundred times more nodes than a 150 m interferogram
-grid can represent, and turns masking from a fraction of a second into a minute.
-
-## Design
-
-| Class | Wraps | Dims |
-|-------|-------|------|
-| `GSLC` | one HDF5 granule (lazy) | `(y, x)` |
-| `GSLCStack` | aligned acquisitions | `(time, y, x)` |
-| `InterferogramStack` | igram + coherence | `(pair, y, x)` |
-| `UnwrappedStack` | unwrapped phase + conncomp | `(pair, y, x)` |
-| `Workspace` | per-stage Zarr stores | — |
-
-- **Lazy everywhere** between disk reads and stage persistence. Cropping and
-  merging are coordinate slices (a cross-zone merge warps one date per dask
-  task onto the reference lattice); multilooking uses `dask.array.map_overlap`
-  over the original scipy filters, so results are independent of chunk layout.
-- **Zarr stages** record a parameter hash; `Workspace.has(name, params)` lets a
-  re-run skip a finished stage. Unwrapping additionally tracks per-pair "done"
-  flags for crash-safe resume. Chunks are `(1, 2048, 2048)` — never more than
-  one acquisition/pair along the stack axis.
-- **One non-lazy stage**: SNAPHU needs whole rasters, so the *pair* is the unit
-  of work; peak memory is a single multilooked pair regardless of stack length.
+pygmt loads that env's `libgmt` (matched to its netCDF/HDF5).
 
 ### Read throughput
 
@@ -488,33 +199,6 @@ python scripts/bench_read.py /path/to/granule.h5
 
 Disk is usually not the limit: on a local SSD the raw compressed bytes come off
 about 4× faster than they can be decoded.
-
-## Numerics
-
-The interferogram/coherence formula and the SNAPHU tile/looks sizing are ported
-verbatim from the original procedural module, retained as
-`tests/legacy_reference.py` — the oracle the dask kernels are
-equivalence-tested against.
-
-The Goldstein–Werner filter (`filter_goldstein`) is new, so it has no legacy
-oracle. It runs on the multilooked interferogram, between forming and
-unwrapping: each pair is tiled into overlapping `patch_size` windows whose
-spectra are scaled by `(smooth(|Z|)/max)**alpha` and recombined by weighted
-overlap-add. `alpha` is either a float in `[0, 1]` (constant strength; `0` is an
-exact no-op) or `"adaptive"` for the Baran et al. (2003) coherence-adaptive
-strength — per patch, `alpha = 1 − mean coherence`, so incoherent areas are
-filtered hard and coherent ones barely touched, matching GMTSAR's `phasefilt`
-run with `-amp1/-amp2`. Because a multilooked pair is small, the filter runs one
-whole plane at a time — the same one-pair-in-memory footprint the unwrap stage
-already assumes — and only touches `igram`, leaving `coherence` unchanged. It is
-pinned by its properties (exact `alpha=0` round-trip, uniform-coherence adaptive
-≡ constant `1−c`, phase-noise reduction, NaN preservation) rather than a legacy
-result.
-
-Our algorithm follows the Goldstein–Werner family; versus GMTSAR's `phasefilt`
-it additionally smooths the spectrum (closer to Goldstein 1998), tapers each
-patch (Welch-style), and normalizes so `alpha=0` is exact — GMTSAR's default
-`alpha=0.5` and `psize=32` match our defaults.
 
 ## Tests
 
