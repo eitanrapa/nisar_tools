@@ -26,8 +26,8 @@ from scipy.interpolate import RegularGridInterpolator
 
 SPEED_OF_LIGHT = 299_792_458.0  # m/s
 
-_RADAR_GRID = "science/LSAR/GSLC/metadata/radarGrid"
-_FREQ_GRID = "science/LSAR/GSLC/grids/frequency{f}"
+_RADAR_GRID = "science/LSAR/{product}/metadata/radarGrid"
+_FREQ_GRID = "science/LSAR/{product}/grids/frequency{f}"
 _LOOK_DIR = "science/LSAR/identification/lookDirection"
 
 _GEOM_VARS = ("incidence_angle", "look_angle", "los_east", "los_north")
@@ -50,22 +50,32 @@ def _decode(value):
     return value.decode() if isinstance(value, bytes) else str(value)
 
 
-def radar_wavelength(gslc_path, frequency="A"):
-    """Radar wavelength (m) = c / centerFrequency, read from the GSLC granule."""
-    with h5py.File(str(gslc_path), "r") as f:
-        cf = float(f[_FREQ_GRID.format(f=frequency) + "/centerFrequency"][()])
+def radar_wavelength(path, frequency="A", product="GSLC"):
+    """Radar wavelength (m) = c / centerFrequency, read from a NISAR granule.
+
+    ``product`` selects the L2 product group holding the ``grids`` tree:
+    ``"GSLC"`` for a GSLC granule, ``"GUNW"`` for a NASA GUNW, which stores the
+    same ``centerFrequency`` under its own group.
+    """
+    grid = _FREQ_GRID.format(product=product, f=frequency)
+    with h5py.File(str(path), "r") as f:
+        cf = float(f[grid + "/centerFrequency"][()])
     return SPEED_OF_LIGHT / cf
 
 
-def read_geometry_cube(gslc_path, frequency="A"):
-    """Load a GSLC's ``metadata/radarGrid`` geometry cube as an xarray Dataset.
+def read_geometry_cube(path, frequency="A", product="GSLC"):
+    """Load a NISAR ``metadata/radarGrid`` geometry cube as an xarray Dataset.
 
     Returns dims ``(height, y, x)`` with ``incidence_angle`` (degrees) and the
     ``los_east`` / ``los_north`` LOS-unit-vector components; attrs carry the
     cube's ``epsg``, the ``wavelength``, and the ``look_direction``.
+
+    ``product`` picks the product group: a ``"GSLC"`` granule or a ``"GUNW"``,
+    which embeds a cube of the same layout (the two differ only in the number of
+    reference heights, read here from the file, not assumed).
     """
-    with h5py.File(str(gslc_path), "r") as f:
-        rg = f[_RADAR_GRID]
+    with h5py.File(str(path), "r") as f:
+        rg = f[_RADAR_GRID.format(product=product)]
         data = {
             out: (("height", "y", "x"), rg[name][()])
             for out, name in _CUBE_DATASETS.items()
@@ -80,7 +90,7 @@ def read_geometry_cube(gslc_path, frequency="A"):
     ds = xr.Dataset(data, coords={"height": height, "y": y, "x": x})
     ds.attrs.update(
         epsg=epsg,
-        wavelength=radar_wavelength(gslc_path, frequency),
+        wavelength=radar_wavelength(path, frequency, product),
         look_direction=look,
         frequency=frequency,
     )

@@ -24,6 +24,7 @@ import math
 
 import numpy as np
 from scipy.ndimage import (
+    binary_erosion,
     gaussian_filter,
     gaussian_filter1d,
     uniform_filter,
@@ -412,6 +413,199 @@ def goldstein_filter_planes(arr, coherence=None, *, alpha=0.5, patch_size=32,
         ck = None if coh_flat is None else coh_flat[k]
         out[k] = goldstein_filter(flat[k], alpha, patch_size, overlap, psd_smooth,
                                   coherence=ck)
+    return out.reshape(arr.shape)
+
+
+# -- unwrapped-phase cleaning: edge masking, spline outlier rejection, deramp --
+#
+# Ports the recipe of the user's ``filt_gunw.csh`` (GMT ``surface -T`` tension
+# spline + residual outlier masking + a deramp) into pure numpy/scipy. GMT's
+# adjustable-tension surface has no direct scipy equivalent; a NaN-aware smooth
+# surface (normalized Gaussian convolution, the same zero-fill/divide trick as
+# ``igram_coherence``) stands in for the smooth trend, and a low-order 2D
+# polynomial least-squares fit stands in for the ramp.
+
+
+def smooth_surface(field, scale, weight=None):
+    """NaN-aware smooth surface of ``field`` (2D), Gaussian ``scale`` in pixels.
+
+    Invalid pixels are zero-filled for the convolution and divided back out via
+    a smoothed validity mask, so a NaN neither reads as 0 nor spreads -- the
+    normalized-convolution trick used by the nan-aware multilook. Output is NaN
+    where the smoothed validity mass is negligible (too little nearby data).
+
+    ``weight`` (optional, same shape) generalises the validity mask to a
+    per-pixel confidence -- e.g. coherence, so noisier pixels pull the surface
+    less, mirroring how NASA's ionosphere estimator thresholds on coherence.
+    Non-finite or negative weights are treated as 0; ``weight=None`` reproduces
+    the plain 0/1-validity behaviour exactly.
+    """
+    field = np.asarray(field, dtype=np.float64)
+    finite = np.isfinite(field)
+    if weight is None:
+        w = finite.astype(np.float64)
+    else:
+        w = np.where(finite,
+                     np.nan_to_num(np.asarray(weight, dtype=np.float64), nan=0.0),
+                     0.0)
+        w = np.clip(w, 0.0, None)
+    filled = np.where(finite, field, 0.0)
+    num = gaussian_filter(w * filled, sigma=scale, mode="constant", cval=0.0)
+    den = gaussian_filter(w, sigma=scale, mode="constant", cval=0.0)
+    return np.divide(num, den, out=np.full_like(num, np.nan), where=den > 1e-6)
+
+
+def _poly_columns(ny, nx, degree):
+    """Columns of the 2D polynomial design matrix on a normalized [-1, 1] grid.
+
+    Normalizing keeps the least-squares system well conditioned regardless of
+    the pixel coordinates' magnitude. Total-degree basis: 1, x, y, x^2, xy, ...
+    """
+    yy, xx = np.mgrid[0:ny, 0:nx].astype(np.float64)
+    xx = 2.0 * xx / max(nx - 1, 1) - 1.0
+    yy = 2.0 * yy / max(ny - 1, 1) - 1.0
+    cols = [(xx ** (d - i)) * (yy ** i)
+            for d in range(degree + 1) for i in range(d + 1)]
+    return np.stack([c.ravel() for c in cols], axis=1)  # (npix, ncoef)
+
+
+def poly_surface(field, degree, weight=None):
+    """Least-squares 2D polynomial surface fit to ``field``'s finite pixels.
+
+    Evaluated on the whole grid (a polynomial is defined everywhere). Returns
+    all-NaN if there are fewer valid pixels than coefficients. ``weight``
+    (optional, same shape) does weighted least squares -- pixels enter the fit
+    scaled by ``sqrt(weight)``; ``weight=None`` is ordinary least squares.
+    """
+    field = np.asarray(field, dtype=np.float64)
+    ny, nx = field.shape
+    design = _poly_columns(ny, nx, int(degree))
+    values = field.ravel()
+    valid = np.isfinite(values)
+    if int(valid.sum()) < design.shape[1]:
+        return np.full((ny, nx), np.nan)
+    rows, rhs = design[valid], values[valid]
+    if weight is not None:
+        sw = np.sqrt(np.clip(
+            np.nan_to_num(np.asarray(weight, dtype=np.float64).ravel()[valid], nan=0.0),
+            0.0, None,
+        ))
+        rows, rhs = rows * sw[:, None], rhs * sw
+    coef, *_ = np.linalg.lstsq(rows, rhs, rcond=None)
+    return (design @ coef).reshape(ny, nx)
+
+
+def fit_surface(field, method="spline", scale=None, degree=1, weight=None):
+    """Fit a smooth surface to a 2D ``field`` -- the trend a deramp subtracts.
+
+    Single source of truth for both the deramp (which subtracts this) and the
+    phase-screen estimator (which keeps it). ``method="spline"`` is a NaN-aware
+    normalized-convolution Gaussian at sigma ``scale`` px (default a quarter of
+    the smaller axis); ``method="poly"`` is a total-degree-``degree`` 2D
+    polynomial. ``weight`` (optional) is forwarded to the underlying fit.
+    """
+    field = np.asarray(field, dtype=np.float64)
+    if method == "spline":
+        if scale is None:
+            scale = 0.25 * min(field.shape)
+        return smooth_surface(field, scale, weight=weight)
+    if method == "poly":
+        return poly_surface(field, int(degree), weight=weight)
+    raise ValueError(f"method must be 'poly' or 'spline', got {method!r}")
+
+
+def remove_outliers(field, scale, threshold, iterations):
+    """Iteratively NaN pixels far from a NaN-aware smooth surface (2D).
+
+    Mirrors ``filt_gunw.csh``: fit a smooth trend, flag ``|field - trend| >
+    threshold`` as outliers, and refit on the survivors. ``threshold`` is in the
+    field's own units (radians for unwrapped phase). Returns a copy with the
+    rejected pixels set to NaN.
+    """
+    out = np.array(field, dtype=np.float64)
+    for _ in range(int(iterations)):
+        residual = np.abs(out - smooth_surface(out, scale))
+        out = np.where(residual > threshold, np.nan, out)
+    return out.astype(np.asarray(field).dtype)
+
+
+def deramp(field, degree=1, method="poly", scale=None):
+    """Estimate and subtract a long-wavelength surface (ramp) from ``field`` (2D).
+
+    ``method="poly"`` subtracts a total-degree-``degree`` polynomial (the classic
+    InSAR deramp; 1 = plane); ``method="spline"`` subtracts a NaN-aware smooth
+    surface at Gaussian sigma ``scale`` (defaults to a quarter of the smaller
+    axis), a high-pass that also removes gently curved ionosphere ramps. NaNs are
+    preserved. The subtracted surface is exactly what
+    :func:`fit_surface` / the phase-screen estimator produce, so
+    ``deramp(spline) == field - estimate_phase_screen(spline)``.
+    """
+    field = np.asarray(field, dtype=np.float64)
+    surface = fit_surface(field, method=method, scale=scale, degree=degree)
+    return (field - surface).astype(np.asarray(field).dtype)
+
+
+def mask_edges(field, edge_pixels):
+    """Erode ``field``'s finite footprint by ``edge_pixels`` and NaN the border.
+
+    Trims the decorrelated swath-edge fringe (and the raster edge, via
+    ``border_value=0``). A no-op when ``edge_pixels`` is 0.
+    """
+    field = np.asarray(field)
+    valid = np.isfinite(field)
+    if edge_pixels and edge_pixels > 0:
+        valid = binary_erosion(valid, iterations=int(edge_pixels), border_value=0)
+    return np.where(valid, field, np.asarray(np.nan, dtype=field.dtype))
+
+
+def _batch_planes(func, arr, **kwargs):
+    """Apply a 2D-plane ``func`` to each trailing plane of a possibly-3D ``arr``.
+
+    Leading axes (a stacked ``pair`` dimension) are looped over so a whole block
+    goes through one ``apply_ufunc`` call without the planes mixing -- the same
+    batch pattern as :func:`goldstein_filter_planes`.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        return func(arr, **kwargs)
+    flat = arr.reshape((-1,) + arr.shape[-2:])
+    out = np.empty_like(flat)
+    for k in range(flat.shape[0]):
+        out[k] = func(flat[k], **kwargs)
+    return out.reshape(arr.shape)
+
+
+def remove_outliers_planes(arr, *, scale, threshold, iterations):
+    return _batch_planes(remove_outliers, arr, scale=scale, threshold=threshold,
+                         iterations=iterations)
+
+
+def deramp_planes(arr, *, degree, method, scale):
+    return _batch_planes(deramp, arr, degree=degree, method=method, scale=scale)
+
+
+def mask_edges_planes(arr, *, edge_pixels):
+    return _batch_planes(mask_edges, arr, edge_pixels=edge_pixels)
+
+
+def fit_surface_planes(arr, weight=None, *, method, scale, degree):
+    """Fit a surface to each trailing 2D plane of ``arr`` (see :func:`fit_surface`).
+
+    ``weight`` (for the coherence-weighted fit) is the optional second positional
+    input so ``xr.apply_ufunc`` can pass it as a second core-dims array, indexed
+    plane-by-plane alongside ``arr`` -- the same shape as ``goldstein_filter_planes``.
+    """
+    arr = np.asarray(arr)
+    w = None if weight is None else np.asarray(weight)
+    if arr.ndim == 2:
+        return fit_surface(arr, method=method, scale=scale, degree=degree, weight=w)
+    flat = arr.reshape((-1,) + arr.shape[-2:])
+    w_flat = None if w is None else w.reshape((-1,) + w.shape[-2:])
+    out = np.empty_like(flat)
+    for k in range(flat.shape[0]):
+        wk = None if w_flat is None else w_flat[k]
+        out[k] = fit_surface(flat[k], method=method, scale=scale, degree=degree,
+                             weight=wk)
     return out.reshape(arr.shape)
 
 

@@ -54,7 +54,8 @@ class LOSStack(RasterStackMixin):
 
     @classmethod
     def from_unwrapped(cls, unwrapped, gslc, dem=None, frequency="A",
-                       wavelength=None, sign=1, mask_geometry=True):
+                       wavelength=None, sign=1, mask_geometry=True,
+                       product="GSLC"):
         """Build a :class:`LOSStack` from an unwrapped stack.
 
         ``gslc`` is a granule path supplying the geometry cube and (unless
@@ -65,9 +66,11 @@ class LOSStack(RasterStackMixin):
         order and combined, earlier granules taking precedence where they
         overlap, matching ``merge``'s own rule.
 
-        ``dem`` is a GeoTIFF path or DataArray of ellipsoidal heights
-        (``None`` -> sea-level geometry). ``sign`` flips the LOS displacement
-        convention (see :func:`nisar_tools.geometry.phase_to_los`).
+        ``product`` names the granule's product group (``"GSLC"``, or ``"GUNW"``
+        when the geometry comes from a NASA GUNW's own embedded cube). ``dem`` is
+        a GeoTIFF path or DataArray of ellipsoidal heights (``None`` -> sea-level
+        geometry). ``sign`` flips the LOS displacement convention (see
+        :func:`nisar_tools.geometry.phase_to_los`).
 
         ``mask_geometry`` (default) blanks the geometry outside the data. The
         cube spans the frame's whole bounding rectangle and knows nothing about
@@ -82,7 +85,7 @@ class LOSStack(RasterStackMixin):
         x, y, epsg = unwrapped.x, unwrapped.y, unwrapped.epsg
         granules = _as_granule_list(gslc)
         if wavelength is None:
-            wavelength = geometry.radar_wavelength(granules[0], frequency)
+            wavelength = geometry.radar_wavelength(granules[0], frequency, product)
 
         heights = geometry.dem_heights_on_grid(dem, x, y, epsg)
         # One cube per frame, sampled onto the target grid and stacked. Each
@@ -91,7 +94,7 @@ class LOSStack(RasterStackMixin):
         geom = None
         look_direction = None
         for path in granules:
-            cube = geometry.read_geometry_cube(path, frequency)
+            cube = geometry.read_geometry_cube(path, frequency, product)
             sampled = geometry.sample_look_geometry(cube, x, y, epsg, heights)
             geom = sampled if geom is None else geom.fillna(sampled)
             if look_direction is None:
