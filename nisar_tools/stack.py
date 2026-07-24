@@ -10,7 +10,7 @@ import rioxarray  # noqa: F401
 import xarray as xr
 
 from . import geo
-from ._base import SPATIAL_CHUNK, RasterStackMixin, open_stage
+from ._base import SPATIAL_CHUNK, RasterStackMixin, open_stage, wrapped_phase
 from .interferogram import InterferogramStack, make_pairs
 
 
@@ -18,6 +18,11 @@ class GSLCStack(RasterStackMixin):
     """A time stack of aligned GSLCs."""
 
     STAGE = "slc_stack"
+    GRD_STACK_DIM = "time"
+    # An SLC's absolute phase is not geophysically meaningful on its own, so
+    # ``.grd`` export defaults to amplitude only; pass ``fields=["phase"]`` (or
+    # ``["amplitude", "phase"]``) for the phase too.
+    GRD_DEFAULT_FIELDS = ("amplitude",)
 
     def __init__(self, ds):
         self.ds = ds
@@ -217,6 +222,15 @@ class GSLCStack(RasterStackMixin):
         """Resolve a pairs spec into an explicit list against this stack."""
         return make_pairs(pairs, self.sizes["time"])
 
+    # -- export ------------------------------------------------------------
+    def _grd_specs(self):
+        """``amplitude`` and (wrapped) ``phase`` of the complex SLC, per time."""
+        slc = self.ds["slc"]
+        return [
+            ("amplitude", np.abs(slc), True),
+            ("phase", wrapped_phase(slc), True),
+        ]
+
     def __repr__(self):
         s = self.sizes
         return (
@@ -239,8 +253,8 @@ def _union_lattice(ref, other):
     return _extend_lattice(ref, spacing, lo, hi)
 
 
-def _pad_onto(arr, union_y, union_x):
-    """Place a ``(time, y, x)`` array on the union grid, NaN elsewhere.
+def _pad_onto(arr, union_y, union_x, fill=np.nan):
+    """Place a ``(stack, y, x)`` array on the union grid, ``fill`` elsewhere.
 
     Padding rather than ``xr.align(join="outer")``: both grids sit on the same
     lattice, so the union is a pure offset, and reindexing to reach it costs a
@@ -248,7 +262,12 @@ def _pad_onto(arr, union_y, union_x):
     whose broadcast both fragments the chunk grid and is what emitted dask's
     "Increasing number of chunks by factor of N" warning. Padding is a pure
     graph operation with no mask and no fancy indexing.
+
+    The leading (stack) axis -- ``time`` or ``pair`` -- is not padded. ``fill``
+    is the value for pixels outside ``arr``: ``NaN`` for phase / coherence, ``0``
+    for an integer label layer (a connected-component map) that cannot hold NaN.
     """
+    stack_dim = arr.dims[0]
     step_y = float(union_y[1] - union_y[0])
     step_x = float(union_x[1] - union_x[0])
     off_y = int(round((float(arr["y"].values[0]) - float(union_y[0])) / step_y))
@@ -266,14 +285,14 @@ def _pad_onto(arr, union_y, union_x):
     if _is_dask(arr.data):
         import dask.array as dask_array
 
-        data = dask_array.pad(arr.data, pad, mode="constant", constant_values=np.nan)
+        data = dask_array.pad(arr.data, pad, mode="constant", constant_values=fill)
     else:
-        data = np.pad(arr.data, pad, mode="constant", constant_values=np.nan)
+        data = np.pad(arr.data, pad, mode="constant", constant_values=fill)
 
     return xr.DataArray(
         data.astype(arr.dtype, copy=False),
         dims=arr.dims,
-        coords={"time": arr["time"].values, "y": union_y, "x": union_x},
+        coords={stack_dim: arr[stack_dim].values, "y": union_y, "x": union_x},
         name=arr.name,
     )
 

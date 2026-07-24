@@ -48,6 +48,13 @@ class LOSStack(RasterStackMixin):
     """LOS displacement (per pair) plus shared per-pixel look geometry."""
 
     STAGE = "los"
+    # The per-pair displacement plus the ENU LOS **unit vectors** and the two
+    # angles. Keeping the unit vector -- not just the displacement magnitude --
+    # is what lets the scalar LOS be decomposed into ground components later
+    # (e.g. inverting ascending + descending for vertical and east-west). The
+    # sampled DEM ``height`` is available via ``fields=["height", ...]``.
+    GRD_DEFAULT_FIELDS = ("los", "los_east", "los_north", "los_up",
+                          "incidence_angle", "look_angle")
 
     def __init__(self, ds):
         self.ds = ds
@@ -148,6 +155,17 @@ class LOSStack(RasterStackMixin):
         }
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return LOSStack(reopened)
+
+    # -- export -----------------------------------------------------------
+    def _grd_specs(self):
+        """The per-pair ``los`` displacement (written ``los_pair{i}.grd``) and
+        the shared 2-D look geometry: the ENU LOS unit vector, the two angles,
+        and the sampled DEM ``height`` (one file each)."""
+        specs = [("los", self.ds["los"], True)]
+        for v in _GEOM_2D:
+            if v in self.ds.data_vars:
+                specs.append((v, self.ds[v], False))
+        return specs
 
     # -- reprojection / plotting ------------------------------------------
     def to_latlon(self, pair=0):

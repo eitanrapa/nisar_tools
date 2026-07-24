@@ -71,22 +71,6 @@ def test_deramp_is_field_minus_fit_surface():
                            equal_nan=True)
 
 
-def test_poly_surface_weight_uniform_equals_unweighted():
-    rng = np.random.default_rng(1)
-    field = rng.normal(size=(20, 25))
-    w = np.full_like(field, 3.0)  # uniform weights -> same as OLS
-    assert np.allclose(poly_surface(field, 2, weight=w), poly_surface(field, 2))
-
-
-def test_smooth_surface_weight_zero_drops_pixel():
-    field = np.ones((21, 21))
-    field[10, 10] = 100.0            # a spike
-    w = np.ones_like(field)
-    w[10, 10] = 0.0                  # zero-weight it out
-    s = smooth_surface(field, scale=3.0, weight=w)
-    assert abs(s[10, 10] - 1.0) < 1e-6  # neighbours are 1.0, spike ignored
-
-
 # -- UnwrappedStack methods (on ingested GUNW) -----------------------------
 def test_remove_phase_screen_subtracts(gunw_factory):
     u = UnwrappedStack.from_gunw_file(gunw_factory(ny=40, nx=40, nan_border=2,
@@ -99,7 +83,7 @@ def test_remove_phase_screen_subtracts(gunw_factory):
     unw1 = out.ds["unw"].isel(pair=0).values
     valid = np.isfinite(unw0) & np.isfinite(screen)
     assert np.allclose(unw1[valid], (unw0 - screen)[valid], atol=1e-5)
-    assert out.ds.attrs["phase_screen_removed"] == ["phase_screen"]
+    assert out.ds.attrs["phase_screen_removed"] is True
 
     with pytest.raises(ValueError, match="already been removed"):
         out.remove_phase_screen()
@@ -110,77 +94,6 @@ def test_remove_phase_screen_requires_layer(gunw_factory):
     u.ds = u.ds.drop_vars("phase_screen")
     with pytest.raises(ValueError, match="carries no"):
         u.remove_phase_screen()
-
-
-def _snaphu_like(gunw_factory, **kw):
-    """A GUNW read then stripped of its NASA screen, standing in for a SNAPHU
-    stack that carries no phase_screen until one is estimated."""
-    u = UnwrappedStack.from_gunw_file(gunw_factory(**kw))
-    u.ds = u.ds.drop_vars("phase_screen")
-    u.ds.attrs.pop("phase_screen_method", None)
-    return u
-
-
-def test_estimate_phase_screen_creates_layer(gunw_factory):
-    u = _snaphu_like(gunw_factory, ny=40, nx=48, nan_border=2)
-    assert "phase_screen" not in u.ds
-
-    out = u.estimate_phase_screen(method="spline", scale=5.0)
-    assert "phase_screen" in out.ds
-    screen = out.ds["phase_screen"].isel(pair=0).values
-    unw = out.ds["unw"].isel(pair=0).values
-    # format parity with a GUNW screen: float32, radians grid, unw footprint
-    assert out.ds["phase_screen"].dtype == np.float32
-    assert np.array_equal(np.isnan(screen), np.isnan(unw))
-    meth = out.ds.attrs["phase_screen_method"]
-    assert meth["method"] == "spline" and meth["name"] == "phase_screen"
-
-    # ...and it feeds remove_phase_screen just like NASA's
-    corrected = out.remove_phase_screen()
-    assert corrected.ds.attrs["phase_screen_removed"] == ["phase_screen"]
-
-
-def test_estimate_then_remove_equals_deramp(gunw_factory):
-    """estimate_phase_screen(spline) + remove == deramp(spline), same machinery."""
-    u = _snaphu_like(gunw_factory, ny=40, nx=48, nan_border=2)
-    est = u.estimate_phase_screen(method="spline", scale=6.0, weighted=False)
-    via_screen = est.remove_phase_screen().ds["unw"].isel(pair=0).values
-    via_deramp = u.deramp(method="spline", scale=6.0).ds["unw"].isel(pair=0).values
-    valid = np.isfinite(via_deramp)
-    assert np.allclose(via_screen[valid], via_deramp[valid], atol=1e-5)
-
-
-def test_estimate_uses_coherence_weight(gunw_factory):
-    u = _snaphu_like(gunw_factory, ny=32, nx=32, nan_border=2)
-    # weighted defaults on when coherence is present
-    out = u.estimate_phase_screen(method="spline", scale=5.0)
-    assert out.ds.attrs["phase_screen_method"]["weighted"] is True
-    # ...and off when coherence is absent
-    u.ds = u.ds.drop_vars("coherence")
-    out2 = u.estimate_phase_screen(method="spline", scale=5.0)
-    assert out2.ds.attrs["phase_screen_method"]["weighted"] is False
-
-
-def test_estimate_refuses_to_clobber_nasa_screen(gunw_factory):
-    u = UnwrappedStack.from_gunw_file(gunw_factory())  # has NASA phase_screen
-    with pytest.raises(ValueError, match="already exists"):
-        u.estimate_phase_screen()
-
-    # a distinct name keeps both NASA + spline for comparison
-    out = u.estimate_phase_screen(name="phase_screen_spline", scale=5.0)
-    assert "phase_screen" in out.ds and "phase_screen_spline" in out.ds
-
-    # each can be removed independently, tracked by name
-    two = (out.remove_phase_screen("phase_screen")
-              .remove_phase_screen("phase_screen_spline"))
-    assert two.ds.attrs["phase_screen_removed"] == [
-        "phase_screen", "phase_screen_spline"
-    ]
-
-
-def test_nasa_screen_is_labelled(gunw_factory):
-    u = UnwrappedStack.from_gunw_file(gunw_factory())
-    assert u.ds.attrs["phase_screen_method"]["method"] == "nasa_split_spectrum"
 
 
 def test_mask_edges_trims_footprint(gunw_factory):

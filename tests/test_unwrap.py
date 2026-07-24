@@ -39,6 +39,29 @@ def test_unwrap_runs_and_shapes(gslc_factory, tmp_path):
     assert ws.pairs_done("unwrapped") == set(range(igrams.sizes["pair"]))
 
 
+def test_unwrap_carries_coherence_through(gslc_factory, tmp_path):
+    """SNAPHU output keeps the interferogram's coherence, so mask_edges(
+    min_coherence) works on a GSLC-derived stack and not only a GUNW."""
+    igrams = _igram_stack(gslc_factory, tmp_path / "ws0")
+    igrams = igrams.persist(Workspace(tmp_path / "ws0"), "igrams")
+    ws = Workspace(tmp_path / "ws1")
+
+    unw = igrams.unwrap(ws, nproc=1)
+    assert "coherence" in unw.ds
+    assert unw.ds["coherence"].dtype == np.float32
+    # It is the interferogram's coherence, carried through unchanged.
+    np.testing.assert_allclose(
+        unw.ds["coherence"].values, igrams.ds["coherence"].values, equal_nan=True
+    )
+
+    # ...and it now drives mask_edges(min_coherence) on a SNAPHU stack.
+    coh = unw.ds["coherence"].isel(pair=0).values
+    thr = float(np.nanmedian(coh))
+    out = unw.mask_edges(edge_pixels=0, min_coherence=thr).ds["unw"].isel(pair=0).values
+    low = np.isfinite(coh) & (coh < thr)
+    assert low.any() and np.all(np.isnan(out[low]))  # sub-threshold pixels nulled
+
+
 def test_unwrap_resumes_after_interruption(gslc_factory, tmp_path, monkeypatch):
     import json
     import snaphu

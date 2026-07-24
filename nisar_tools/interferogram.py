@@ -13,7 +13,7 @@ import rioxarray  # noqa: F401
 import xarray as xr
 
 from . import _kernels
-from ._base import RasterStackMixin, open_stage
+from ._base import RasterStackMixin, open_stage, wrapped_phase
 
 
 def make_pairs(spec, n):
@@ -38,6 +38,9 @@ class InterferogramStack(RasterStackMixin):
     """A stack of multilooked interferograms with coherence."""
 
     STAGE = "igrams"
+    # Wrapped phase and coherence by default; the interferogram amplitude is
+    # available via ``fields=["amplitude", ...]``.
+    GRD_DEFAULT_FIELDS = ("phase", "coherence")
 
     def __init__(self, ds):
         self.ds = ds
@@ -257,6 +260,17 @@ class InterferogramStack(RasterStackMixin):
             full["water_mask"] = self.ds.attrs["water_mask"]
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return InterferogramStack(reopened)
+
+    # -- export ------------------------------------------------------------
+    def _grd_specs(self):
+        """Wrapped ``phase`` and ``amplitude`` of the complex interferogram
+        plus ``coherence``, per pair."""
+        ig = self.ds["igram"]
+        return [
+            ("phase", wrapped_phase(ig), True),
+            ("amplitude", np.abs(ig), True),
+            ("coherence", self.ds["coherence"], True),
+        ]
 
     # -- plotting ----------------------------------------------------------
     def plot_wrapped(self, pair=0):

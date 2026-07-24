@@ -426,29 +426,17 @@ def goldstein_filter_planes(arr, coherence=None, *, alpha=0.5, patch_size=32,
 # polynomial least-squares fit stands in for the ramp.
 
 
-def smooth_surface(field, scale, weight=None):
+def smooth_surface(field, scale):
     """NaN-aware smooth surface of ``field`` (2D), Gaussian ``scale`` in pixels.
 
     Invalid pixels are zero-filled for the convolution and divided back out via
     a smoothed validity mask, so a NaN neither reads as 0 nor spreads -- the
     normalized-convolution trick used by the nan-aware multilook. Output is NaN
     where the smoothed validity mass is negligible (too little nearby data).
-
-    ``weight`` (optional, same shape) generalises the validity mask to a
-    per-pixel confidence -- e.g. coherence, so noisier pixels pull the surface
-    less, mirroring how NASA's ionosphere estimator thresholds on coherence.
-    Non-finite or negative weights are treated as 0; ``weight=None`` reproduces
-    the plain 0/1-validity behaviour exactly.
     """
     field = np.asarray(field, dtype=np.float64)
     finite = np.isfinite(field)
-    if weight is None:
-        w = finite.astype(np.float64)
-    else:
-        w = np.where(finite,
-                     np.nan_to_num(np.asarray(weight, dtype=np.float64), nan=0.0),
-                     0.0)
-        w = np.clip(w, 0.0, None)
+    w = finite.astype(np.float64)
     filled = np.where(finite, field, 0.0)
     num = gaussian_filter(w * filled, sigma=scale, mode="constant", cval=0.0)
     den = gaussian_filter(w, sigma=scale, mode="constant", cval=0.0)
@@ -469,13 +457,11 @@ def _poly_columns(ny, nx, degree):
     return np.stack([c.ravel() for c in cols], axis=1)  # (npix, ncoef)
 
 
-def poly_surface(field, degree, weight=None):
+def poly_surface(field, degree):
     """Least-squares 2D polynomial surface fit to ``field``'s finite pixels.
 
     Evaluated on the whole grid (a polynomial is defined everywhere). Returns
-    all-NaN if there are fewer valid pixels than coefficients. ``weight``
-    (optional, same shape) does weighted least squares -- pixels enter the fit
-    scaled by ``sqrt(weight)``; ``weight=None`` is ordinary least squares.
+    all-NaN if there are fewer valid pixels than coefficients.
     """
     field = np.asarray(field, dtype=np.float64)
     ny, nx = field.shape
@@ -484,33 +470,25 @@ def poly_surface(field, degree, weight=None):
     valid = np.isfinite(values)
     if int(valid.sum()) < design.shape[1]:
         return np.full((ny, nx), np.nan)
-    rows, rhs = design[valid], values[valid]
-    if weight is not None:
-        sw = np.sqrt(np.clip(
-            np.nan_to_num(np.asarray(weight, dtype=np.float64).ravel()[valid], nan=0.0),
-            0.0, None,
-        ))
-        rows, rhs = rows * sw[:, None], rhs * sw
-    coef, *_ = np.linalg.lstsq(rows, rhs, rcond=None)
+    coef, *_ = np.linalg.lstsq(design[valid], values[valid], rcond=None)
     return (design @ coef).reshape(ny, nx)
 
 
-def fit_surface(field, method="spline", scale=None, degree=1, weight=None):
+def fit_surface(field, method="spline", scale=None, degree=1):
     """Fit a smooth surface to a 2D ``field`` -- the trend a deramp subtracts.
 
-    Single source of truth for both the deramp (which subtracts this) and the
-    phase-screen estimator (which keeps it). ``method="spline"`` is a NaN-aware
-    normalized-convolution Gaussian at sigma ``scale`` px (default a quarter of
-    the smaller axis); ``method="poly"`` is a total-degree-``degree`` 2D
-    polynomial. ``weight`` (optional) is forwarded to the underlying fit.
+    The single source of truth for the smooth trend :func:`deramp` subtracts.
+    ``method="spline"`` is a NaN-aware normalized-convolution Gaussian at sigma
+    ``scale`` px (default a quarter of the smaller axis); ``method="poly"`` is a
+    total-degree-``degree`` 2D polynomial.
     """
     field = np.asarray(field, dtype=np.float64)
     if method == "spline":
         if scale is None:
             scale = 0.25 * min(field.shape)
-        return smooth_surface(field, scale, weight=weight)
+        return smooth_surface(field, scale)
     if method == "poly":
-        return poly_surface(field, int(degree), weight=weight)
+        return poly_surface(field, int(degree))
     raise ValueError(f"method must be 'poly' or 'spline', got {method!r}")
 
 
@@ -536,9 +514,8 @@ def deramp(field, degree=1, method="poly", scale=None):
     InSAR deramp; 1 = plane); ``method="spline"`` subtracts a NaN-aware smooth
     surface at Gaussian sigma ``scale`` (defaults to a quarter of the smaller
     axis), a high-pass that also removes gently curved ionosphere ramps. NaNs are
-    preserved. The subtracted surface is exactly what
-    :func:`fit_surface` / the phase-screen estimator produce, so
-    ``deramp(spline) == field - estimate_phase_screen(spline)``.
+    preserved. The subtracted surface is exactly what :func:`fit_surface`
+    produces, so ``deramp(spline) == field - fit_surface(spline)``.
     """
     field = np.asarray(field, dtype=np.float64)
     surface = fit_surface(field, method=method, scale=scale, degree=degree)
@@ -586,27 +563,6 @@ def deramp_planes(arr, *, degree, method, scale):
 
 def mask_edges_planes(arr, *, edge_pixels):
     return _batch_planes(mask_edges, arr, edge_pixels=edge_pixels)
-
-
-def fit_surface_planes(arr, weight=None, *, method, scale, degree):
-    """Fit a surface to each trailing 2D plane of ``arr`` (see :func:`fit_surface`).
-
-    ``weight`` (for the coherence-weighted fit) is the optional second positional
-    input so ``xr.apply_ufunc`` can pass it as a second core-dims array, indexed
-    plane-by-plane alongside ``arr`` -- the same shape as ``goldstein_filter_planes``.
-    """
-    arr = np.asarray(arr)
-    w = None if weight is None else np.asarray(weight)
-    if arr.ndim == 2:
-        return fit_surface(arr, method=method, scale=scale, degree=degree, weight=w)
-    flat = arr.reshape((-1,) + arr.shape[-2:])
-    w_flat = None if w is None else w.reshape((-1,) + w.shape[-2:])
-    out = np.empty_like(flat)
-    for k in range(flat.shape[0]):
-        wk = None if w_flat is None else w_flat[k]
-        out[k] = fit_surface(flat[k], method=method, scale=scale, degree=degree,
-                             weight=wk)
-    return out.reshape(arr.shape)
 
 
 def snaphu_params(igram_shape, nproc, overlap_target=256):

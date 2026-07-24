@@ -57,6 +57,40 @@ def _as_list(paths):
     return list(paths)
 
 
+def _match_pairs(self_ds, other_ds, tolerance_s):
+    """Order ``other``'s pairs to line up with ``self``'s by ref+secondary time.
+
+    Frames of the same acquisitions define the same pairs, but each frame's
+    ``zeroDopplerStartTime`` can differ by seconds, so pairs are matched by
+    nearest ``(ref_time, sec_time)`` within ``tolerance_s`` rather than by exact
+    time. Returns an index array ``order`` with ``other.isel(pair=order)`` in
+    ``self``'s pair order. Raises if the pair sets do not correspond one-to-one.
+    """
+    tol = np.timedelta64(int(round(tolerance_s * 1e9)), "ns")
+    sr = np.asarray(self_ds["ref_time"].values)
+    ss = np.asarray(self_ds["sec_time"].values)
+    orr = np.asarray(other_ds["ref_time"].values)
+    ors = np.asarray(other_ds["sec_time"].values)
+    if len(orr) != len(sr):
+        raise ValueError(
+            f"Cannot merge: stacks have different pair counts ({len(sr)} vs "
+            f"{len(orr)})"
+        )
+    order = np.empty(len(sr), dtype=int)
+    for i in range(len(sr)):
+        dr, dsec = np.abs(orr - sr[i]), np.abs(ors - ss[i])
+        j = int(np.argmin(dr + dsec))
+        if dr[j] > tol or dsec[j] > tol:
+            raise ValueError(
+                f"Cannot merge: no pair in the other stack matches self pair {i} "
+                f"({sr[i]} / {ss[i]}) within {tolerance_s}s"
+            )
+        order[i] = j
+    if len(set(order.tolist())) != len(order):
+        raise ValueError("Cannot merge: pairs do not correspond one-to-one")
+    return order
+
+
 class UnwrappedStack(RasterStackMixin):
     """A stack of unwrapped phases with connected-component labels."""
 
@@ -121,6 +155,9 @@ class UnwrappedStack(RasterStackMixin):
                 {
                     "unw": (("pair", "y", "x"), unw[None]),
                     "conncomp": (("pair", "y", "x"), conncomp[None]),
+                    # Carry the SNAPHU input coherence straight through to the
+                    # output so it is available to mask_edges(min_coherence).
+                    "coherence": (("pair", "y", "x"), corr.astype(np.float32)[None]),
                 }
             )
             workspace.write_region(name, pair_ds, region={"pair": slice(i, i + 1)})
@@ -255,13 +292,6 @@ class UnwrappedStack(RasterStackMixin):
             source_files=paths,
             pairs=[[str(r), str(s)] for r, s in zip(ref_times, sec_times)],
         )
-        # Label the NASA screen's provenance so it is distinguishable from a
-        # spline screen fitted by estimate_phase_screen (dispersive-only vs a
-        # broadband deramp proxy).
-        if any_iono:
-            ds.attrs["phase_screen_method"] = {
-                "name": "phase_screen", "method": "nasa_split_spectrum",
-            }
         return cls(ds)
 
     # -- operations --------------------------------------------------------
@@ -306,8 +336,10 @@ class UnwrappedStack(RasterStackMixin):
         Erodes each pair's finite footprint by ``edge_pixels`` pixels
         (:func:`scipy.ndimage.binary_erosion`, also trimming the raster edge),
         removing the decorrelated fringe along the swath boundary. Works for both
-        SNAPHU and GUNW stacks. ``min_coherence`` additionally nulls pixels below
-        that coherence (GUNW stacks only, which carry a ``coherence`` layer).
+        SNAPHU and GUNW stacks. ``min_coherence`` additionally nulls pixels whose
+        coherence is below that threshold; both provenances carry a ``coherence``
+        layer (a GUNW's ``coherenceMagnitude``, or the interferogram's carried
+        through the SNAPHU unwrap).
 
         ``use_builtin_mask`` (GUNW only) first nulls the pixels the product's own
         ``subswath_mask`` flags as invalid samples -- an *exact* edge/gap mask
@@ -342,8 +374,10 @@ class UnwrappedStack(RasterStackMixin):
         if min_coherence is not None:
             if "coherence" not in self.ds:
                 raise ValueError(
-                    "min_coherence needs a coherence layer; this stack has none "
-                    "(only GUNW-derived stacks carry coherence)."
+                    "min_coherence needs a coherence layer, which this stack "
+                    "lacks. Both SNAPHU and GUNW stacks normally carry one; an "
+                    "unwrapped store written before coherence was carried through "
+                    "would not -- rebuild it (overwrite=True or ws.clear)."
                 )
             masked = masked.where(self.ds["coherence"] >= min_coherence)
 
@@ -405,100 +439,35 @@ class UnwrappedStack(RasterStackMixin):
                               "scale": scale}
         return UnwrappedStack(ds)
 
-    def estimate_phase_screen(self, method="spline", scale=None, degree=1,
-                              weighted=True, name="phase_screen", overwrite=False):
-        """Fit a phase screen to the unwrapped phase and carry it. Returns a new stack.
+    def remove_phase_screen(self):
+        """Subtract the GUNW's NASA ionosphere phase screen (lazy). Returns a new stack.
 
-        For a GSLC-derived (SNAPHU) stack, which ships no NASA screen, this is how
-        a ``phase_screen`` is produced: fit the same smooth surface
-        :meth:`deramp` subtracts (:func:`nisar_tools._kernels.fit_surface`) and
-        *keep* it. ``deramp(method=..., scale=..., degree=...)`` is then exactly
-        ``estimate_phase_screen(...).remove_phase_screen()``.
+        A NASA GUNW ships an ``ionospherePhaseScreen`` (loaded as
+        ``phase_screen``); this subtracts it from the unwrapped phase
+        (``unw - phase_screen``, as in the reference ``h52grd.py``). The screen
+        layer is kept for inspection.
 
-        ``method`` / ``scale`` / ``degree`` are as in :meth:`deramp` (``"spline"``
-        = NaN-aware Gaussian at sigma ``scale`` px, the default; ``"poly"`` = a
-        degree-``degree`` surface). ``weighted`` uses this stack's ``coherence``
-        (when present) to down-weight noisy pixels, echoing how NASA's split-
-        spectrum ionosphere estimate is coherence-driven.
-
-        The result is stored under ``name`` (``float32``, radians, ``(pair, y, x)``,
-        re-masked to the ``unw`` footprint), so it is format-identical to a GUNW's
-        ``ionospherePhaseScreen`` and flows through :meth:`remove_phase_screen`
-        the same way. **Semantics differ**: a spline captures the *total* smooth
-        trend (ionosphere plus orbital/tropo ramps and any long-wavelength
-        deformation), whereas NASA's screen is the dispersive part only -- so this
-        is a broadband deramp used as an ionosphere proxy, not a true dispersive
-        estimate. Recorded in ``attrs["phase_screen_method"]``.
-
-        By default it refuses to overwrite an existing ``name`` -- so a GUNW's
-        NASA screen is not silently clobbered; pass a distinct ``name`` (e.g.
-        ``"phase_screen_spline"``) to keep both for comparison, or
-        ``overwrite=True``.
+        Raises if the stack carries no screen -- a SNAPHU stack has none, and
+        instead flattens long-wavelength trends with the deramp pipeline
+        (:meth:`mask_edges` -> :meth:`remove_outliers` -> :meth:`deramp`) -- or
+        if the screen was already removed.
         """
-        if name in self.ds and not overwrite:
+        if "phase_screen" not in self.ds:
             raise ValueError(
-                f"{name!r} already exists on this stack (a GUNW carries NASA's "
-                f"ionospherePhaseScreen there). Pass a different name= to keep "
-                f"both for comparison, or overwrite=True to replace it."
+                "This stack carries no 'phase_screen' to remove. Only a NASA "
+                "GUNW ships one; a SNAPHU stack instead flattens long-wavelength "
+                "trends with deramp (mask_edges -> remove_outliers -> deramp)."
             )
-        chunks = {"pair": 1, "y": -1, "x": -1}
-        unw = self.ds["unw"].chunk(chunks)
-        kwargs = {"method": method, "scale": scale, "degree": int(degree)}
-
-        use_weight = weighted and "coherence" in self.ds
-        if use_weight:
-            coherence = self.ds["coherence"].chunk(chunks)
-            screen = xr.apply_ufunc(
-                _kernels.fit_surface_planes, unw, coherence, kwargs=kwargs,
-                input_core_dims=[["y", "x"], ["y", "x"]],
-                output_core_dims=[["y", "x"]],
-                dask="parallelized", output_dtypes=[unw.dtype],
-            )
-        else:
-            screen = xr.apply_ufunc(
-                _kernels.fit_surface_planes, unw, kwargs=kwargs,
-                input_core_dims=[["y", "x"]], output_core_dims=[["y", "x"]],
-                dask="parallelized", output_dtypes=[unw.dtype],
-            )
-        # Confine the screen to the data footprint (the smooth surface bleeds a
-        # little past the swath edge), so unw - screen adds no new valid pixels
-        # and the footprint matches a GUNW's screen.
-        screen = screen.where(unw.notnull())
-
-        ds = self.ds.copy()
-        ds[name] = screen
-        ds.attrs.update(self.ds.attrs)
-        ds.attrs["phase_screen_method"] = {
-            "name": name, "method": method, "scale": scale,
-            "degree": int(degree), "weighted": bool(use_weight),
-        }
-        return UnwrappedStack(ds)
-
-    def remove_phase_screen(self, name="phase_screen"):
-        """Subtract a carried phase screen from the unwrapped phase (lazy).
-
-        The screen ``name`` is either a GUNW's NASA ``ionospherePhaseScreen``
-        (loaded as ``phase_screen``) or one produced by
-        :meth:`estimate_phase_screen`; both are subtracted the same way
-        (``unw - screen``, as in the reference ``h52grd.py``). Raises if the named
-        screen is absent or was already removed. The screen layer is kept for
-        inspection.
-        """
-        if name not in self.ds:
+        if self.ds.attrs.get("phase_screen_removed"):
             raise ValueError(
-                f"This stack carries no {name!r} to remove. A GUNW loads NASA's "
-                "screen as 'phase_screen'; otherwise call estimate_phase_screen() "
-                "first to fit one."
+                "The phase screen has already been removed from this stack"
             )
-        removed = list(self.ds.attrs.get("phase_screen_removed", []))
-        if name in removed:
-            raise ValueError(f"{name!r} has already been removed from this stack")
 
         ds = self.ds.copy()
         unw = self.ds["unw"]
-        ds["unw"] = (unw - self.ds[name]).astype(unw.dtype)
+        ds["unw"] = (unw - self.ds["phase_screen"]).astype(unw.dtype)
         ds.attrs.update(self.ds.attrs)
-        ds.attrs["phase_screen_removed"] = removed + [name]
+        ds.attrs["phase_screen_removed"] = True
         return UnwrappedStack(ds)
 
     def add_cycles(self, cycles, pair=None, conncomp=None):
@@ -552,6 +521,111 @@ class UnwrappedStack(RasterStackMixin):
         ds.attrs["cycle_shifts"] = applied
         return UnwrappedStack(ds)
 
+    def merge(self, other, time_tolerance=600.0):
+        """Stitch an adjacent same-track :class:`UnwrappedStack` onto the union grid.
+
+        The same lattice-padding machinery as :meth:`~nisar_tools.stack.GSLCStack.merge`
+        (union grid, no reindex, ``self`` wins in the overlap), plus the one thing
+        unwrapped phase needs: each frame was unwrapped independently, so across the
+        seam the two frames' ``unw`` share the *identical wrapped phase* but sit a
+        whole number of 2*pi cycles apart. Per pair, that integer is read from the
+        overlap -- the rounded median of ``(unw_self - unw_other) / 2*pi`` -- and
+        added to ``other``, so the phase is **continuous across the join with no
+        2*pi step**.
+
+        The two stacks must share a lattice and UTM zone and cover the same
+        acquisitions (pairs are matched by reference/secondary time within
+        ``time_tolerance`` seconds, so per-frame ``zeroDopplerStartTime`` jitter is
+        tolerated). ``coherence`` -- and, for a GUNW, ``phase_screen`` /
+        ``subswath_mask`` -- are carried through with the same ``self`` precedence;
+        ``other``'s ``conncomp`` labels are shifted clear of ``self``'s so the two
+        frames' components stay distinct.
+
+        The offset is one value per pair over the *whole* overlap. If SNAPHU split
+        the overlap into components sitting at different cycle offsets, the median
+        aligns the dominant one; correct any stragglers afterwards with
+        :meth:`add_cycles` (``conncomp=``). Lazy, like the other operations.
+        """
+        from .stack import _check_same_lattice, _pad_onto, _union_lattice
+
+        if int(self.epsg) != int(other.epsg):
+            raise ValueError(
+                f"Cannot merge unwrapped stacks in different UTM zones (EPSG "
+                f"{self.epsg} vs {other.epsg}); reproject one onto the other first."
+            )
+        if (self.direction is not None and other.direction is not None
+                and self.direction != other.direction):
+            raise ValueError("Cannot merge stacks with different pass directions")
+        if min(self.sizes["y"], self.sizes["x"],
+               other.sizes["y"], other.sizes["x"]) < 2:
+            raise ValueError("Merging needs stacks with at least 2 pixels along y and x")
+
+        # Line other's pairs up with self's (same acquisitions, maybe reordered),
+        # then relabel them with self's pair identity for the shared union grid.
+        order = _match_pairs(self.ds, other.ds, time_tolerance)
+        o = other.ds.isel(pair=order).assign_coords(
+            pair=self.ds["pair"].values,
+            ref_time=("pair", np.asarray(self.ds["ref_time"].values)),
+            sec_time=("pair", np.asarray(self.ds["sec_time"].values)),
+        )
+        _check_same_lattice(self.x, self.y, o)
+
+        union_y = _union_lattice(self.y, o["y"].values)
+        union_x = _union_lattice(self.x, o["x"].values)
+
+        # Pad both onto the union grid (identical coords), read the per-pair cycle
+        # offset from the overlap, and shift other to close the 2*pi step.
+        two_pi = 2.0 * np.pi
+        a_unw = _pad_onto(self.ds["unw"], union_y, union_x)
+        b_unw = _pad_onto(o["unw"], union_y, union_x)
+        diff = ((a_unw - b_unw) / two_pi).chunk({"y": -1, "x": -1})
+        cycles = np.round(diff.median(dim=("y", "x"), skipna=True)).fillna(0.0)
+        b_unw = b_unw + cycles * two_pi
+        self_has = a_unw.notnull()  # every layer follows the phase footprint
+
+        merged = {"unw": xr.where(self_has, a_unw, b_unw).astype(np.float32)}
+
+        base = self.ds["conncomp"].max() if "conncomp" in self.ds else 0
+        for name in self.ds.data_vars:
+            if name in ("unw", "spatial_ref") or name not in o.data_vars:
+                continue
+            integer = np.issubdtype(self.ds[name].dtype, np.integer)
+            b_var = o[name]
+            if name == "conncomp":  # keep the two frames' labels distinct
+                b_var = xr.where(b_var > 0, b_var + base, 0).astype(self.ds[name].dtype)
+            fill = 0 if integer else np.nan
+            a_pad = _pad_onto(self.ds[name], union_y, union_x, fill=fill)
+            b_pad = _pad_onto(b_var, union_y, union_x, fill=fill)
+            merged[name] = xr.where(self_has, a_pad, b_pad).astype(self.ds[name].dtype)
+
+        ds = xr.Dataset(
+            merged,
+            coords={
+                "pair": self.ds["pair"].values,
+                "y": union_y, "x": union_x,
+                "ref_time": ("pair", np.asarray(self.ds["ref_time"].values)),
+                "sec_time": ("pair", np.asarray(self.ds["sec_time"].values)),
+            },
+        )
+        ds = ds.rio.write_crs(f"EPSG:{self.epsg}")
+        ds.attrs.update(self.ds.attrs)
+        # A merged stack's geometry is no longer shared across the footprint, so a
+        # GUNW's to_los must sample each frame's own cube: keep both frames' files.
+        if self.ds.attrs.get("source_files") and other.ds.attrs.get("source_files"):
+            ds.attrs["source_files"] = (
+                list(self.ds.attrs["source_files"])
+                + list(other.ds.attrs["source_files"])
+            )
+        merges = list(self.ds.attrs.get("merged", []))
+        merges.append({
+            "other_epsg": int(other.epsg),
+            "other_npair": int(other.sizes["pair"]),
+            "other_y": [float(np.min(o["y"].values)), float(np.max(o["y"].values))],
+            "other_x": [float(np.min(o["x"].values)), float(np.max(o["x"].values))],
+        })
+        ds.attrs["merged"] = merges
+        return UnwrappedStack(ds)
+
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):
         """Write the stack to the workspace and return the reopened lazy stack.
@@ -574,8 +648,7 @@ class UnwrappedStack(RasterStackMixin):
         # Provenance of each lazy transform, folded into the hash only once
         # applied, so an untouched stage keeps its own identity.
         for key in ("water_mask", "cycle_shifts", "phase_screen_removed",
-                    "phase_screen_method", "edges_masked", "outliers_removed",
-                    "deramp"):
+                    "edges_masked", "outliers_removed", "deramp", "merged"):
             value = self.ds.attrs.get(key)
             if value:
                 full[key] = value
@@ -612,7 +685,9 @@ class UnwrappedStack(RasterStackMixin):
                         "GUNW-derived stack has no recorded source files; pass "
                         "gslc= pointing at the GUNW .h5 file for the geometry cube."
                     )
-                gslc = [files[0]]  # shared geometry -> one cube suffices
+                # One cube per frame: a single-frame GUNW has one file, a merged
+                # one has both, each covering its own part of the footprint.
+                gslc = list(files)
             if wavelength is None:
                 wavelength = self.ds.attrs.get("wavelength")
             product = "GUNW"
@@ -629,6 +704,18 @@ class UnwrappedStack(RasterStackMixin):
             self, gslc, dem=dem, frequency=frequency, wavelength=wavelength,
             sign=sign, mask_geometry=mask_geometry, product=product,
         )
+
+    # -- export -----------------------------------------------------------
+    def _grd_specs(self):
+        """Every layer present, per pair: ``unw`` always, then whichever of
+        ``coherence`` / ``phase_screen`` / ``conncomp`` / ``subswath_mask`` the
+        stack carries (a SNAPHU result has only ``unw`` + ``conncomp``; a GUNW
+        adds coherence and, when present, the ionosphere screen and mask)."""
+        specs = [("unw", self.ds["unw"], True)]
+        for v in ("coherence", "phase_screen", "conncomp", "subswath_mask"):
+            if v in self.ds.data_vars:
+                specs.append((v, self.ds[v], True))
+        return specs
 
     # -- reprojection / plotting ------------------------------------------
     def to_latlon(self, pair=0):
@@ -696,11 +783,15 @@ def _template(igram_ds, npair, ny, nx):
     chunks = (1, min(SPATIAL_CHUNK, ny), min(SPATIAL_CHUNK, nx))
     unw = da.zeros((npair, ny, nx), chunks=chunks, dtype=np.float32)
     conncomp = da.zeros((npair, ny, nx), chunks=chunks, dtype=np.uint32)
+    coherence = da.zeros((npair, ny, nx), chunks=chunks, dtype=np.float32)
 
     template = xr.Dataset(
         {
             "unw": (("pair", "y", "x"), unw),
             "conncomp": (("pair", "y", "x"), conncomp),
+            # The interferogram's coherence, carried through unchanged so a
+            # SNAPHU stack -- like a GUNW -- can drive mask_edges(min_coherence).
+            "coherence": (("pair", "y", "x"), coherence),
         },
         coords={
             "pair": igram_ds["pair"].values,

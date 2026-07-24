@@ -135,6 +135,55 @@ def _los_stack(gslc_factory):
     return unw_stack.to_los(p, dem=None)
 
 
+def test_to_grd_exports_the_los_unit_vectors(gslc_factory, tmp_path):
+    """The `.grd` export must keep the ENU LOS unit vectors, not just the
+    displacement magnitude and the look angle.
+
+    Keeping ``los_east``/``los_north``/``los_up`` is what lets the scalar LOS
+    displacement be decomposed into ground components later; an export that
+    dropped the look vector would throw that away.
+    """
+    los = _los_stack(gslc_factory)          # 2 pairs on the synthetic cube
+    outdir = tmp_path / "grd"
+
+    written = los.to_grd(outdir)
+
+    expected = {
+        "los_pair0.grd", "los_pair1.grd",
+        "los_east.grd", "los_north.grd", "los_up.grd",
+        "incidence_angle.grd", "look_angle.grd",
+    }
+    assert {p.name for p in written} == expected
+    assert all((outdir / name).exists() for name in expected)
+
+    # Read back as plain lon/lat grids (the point of exporting -- no nisar_tools
+    # needed) and confirm the components still form a unit look vector, i.e. the
+    # vectors survived the reproject-and-write intact.
+    e = xr.open_dataarray(outdir / "los_east.grd")
+    n = xr.open_dataarray(outdir / "los_north.grd")
+    u = xr.open_dataarray(outdir / "los_up.grd")
+    assert e.dims == ("lat", "lon")
+    norm = e.values ** 2 + n.values ** 2 + u.values ** 2
+    m = np.isfinite(norm)
+    assert m.any()
+    np.testing.assert_allclose(norm[m], 1.0, atol=1e-4)
+
+
+def test_to_grd_field_and_pair_selection(gslc_factory, tmp_path):
+    """``fields=`` selects fields; ``indices=`` selects stack slices."""
+    los = _los_stack(gslc_factory)
+    outdir = tmp_path / "grd_sel"
+
+    written = los.to_grd(outdir, fields=["los"], indices=[1])
+
+    assert {p.name for p in written} == {"los_pair1.grd"}
+    assert not (outdir / "los_pair0.grd").exists()
+    assert not (outdir / "los_up.grd").exists()
+
+    with pytest.raises(KeyError, match="unknown field"):
+        los.to_grd(outdir, fields=["nope"])
+
+
 def test_look_angle_is_smaller_than_incidence(gslc_factory):
     """Look angle is measured at the sensor, incidence at the target.
 

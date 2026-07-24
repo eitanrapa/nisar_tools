@@ -139,3 +139,29 @@ def project_to_latlon(data, x_coords=None, y_coords=None, epsg_code=None):
         ).rio.write_crs(f"EPSG:{epsg_code}")
 
     return da.rio.reproject("EPSG:4326")
+
+
+def write_grd(field, path):
+    """Reproject a 2D native-grid field to lon/lat and write a GMT `.grd`.
+
+    A GMT ``.grd`` is single-variable NetCDF, so the field is reprojected to
+    WGS84, its axes renamed ``lat``/``lon`` and the data variable to ``z``.
+    Two rioxarray artefacts are stripped or the file is unusable: the length-1
+    ``band`` axis a reproject leaves behind (``squeeze``), and the
+    ``spatial_ref`` coordinate, which NetCDF would otherwise write as a second
+    variable and GMT would then refuse. ``field`` must be CRS-aware (any field
+    of a stack is). Eager. Returns ``path``.
+
+    Integer label layers (a connected-component or subswath mask) are cast to
+    ``float32`` with NaN outside coverage: a GMT grid is float anyway, uint32
+    overflows classic NetCDF's int32, and a NaN edge beats an integer sentinel
+    warped in from the reprojection.
+    """
+    if np.issubdtype(field.dtype, np.integer):
+        field = field.astype(np.float32).rio.write_nodata(np.nan)
+    g = project_to_latlon(field)                      # eager; EPSG:4326
+    g = g.squeeze(drop=True)                           # drop the band axis
+    g = g.drop_vars("spatial_ref", errors="ignore")    # else a 2nd variable
+    g = g.rename({"y": "lat", "x": "lon"}).rename("z")
+    g.to_netcdf(path)
+    return path
