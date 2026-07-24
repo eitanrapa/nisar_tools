@@ -415,7 +415,7 @@ class UnwrappedStack(RasterStackMixin):
         }
         return UnwrappedStack(ds)
 
-    def deramp(self, degree=1, method="poly", scale=None):
+    def deramp(self, degree=1, method="poly", scale=None, mask=None):
         """Remove a long-wavelength ramp (e.g. ionosphere). Returns a new stack.
 
         ``method="poly"`` subtracts a total-degree-``degree`` 2D polynomial (the
@@ -424,20 +424,63 @@ class UnwrappedStack(RasterStackMixin):
         sigma ``scale`` px (a high-pass for gently curved ionosphere ramps). Best
         run after :meth:`mask_edges` / :meth:`remove_outliers` so the fit is not
         pulled by edges or spikes.
+
+        ``mask`` optionally excludes a **signal region** from the ramp fit, so
+        real deformation does not bias the trend: the surface is fit only to the
+        finite pixels *outside* the mask, then subtracted **everywhere** (the
+        signal keeps its data, minus the ramp). Pass either a boolean ``(y, x)``
+        array / DataArray that is ``True`` over the signal, or a
+        ``(lon_min, lon_max, lat_min, lat_max)`` lon/lat bbox for a rectangular
+        region. With ``method="spline"`` keep ``scale`` comfortably larger than
+        the masked gap, or the region's interior fills with NaN.
         """
+        exclude, mask_prov = self._deramp_mask(mask)
         unw = self.ds["unw"].chunk({"pair": 1, "y": -1, "x": -1})
         deramped = xr.apply_ufunc(
             _kernels.deramp_planes, unw,
-            kwargs={"degree": int(degree), "method": method, "scale": scale},
+            kwargs={"degree": int(degree), "method": method, "scale": scale,
+                    "exclude": exclude},
             input_core_dims=[["y", "x"]], output_core_dims=[["y", "x"]],
             dask="parallelized", output_dtypes=[unw.dtype],
         )
         ds = self.ds.copy()
         ds["unw"] = deramped
         ds.attrs.update(self.ds.attrs)
-        ds.attrs["deramp"] = {"degree": int(degree), "method": method,
-                              "scale": scale}
+        prov = {"degree": int(degree), "method": method, "scale": scale}
+        if mask_prov is not None:
+            prov["mask"] = mask_prov
+        ds.attrs["deramp"] = prov
         return UnwrappedStack(ds)
+
+    def _deramp_mask(self, mask):
+        """Resolve a deramp signal ``mask`` to a boolean ``(y, x)`` exclude array
+        plus a JSON-able provenance tag.
+
+        ``mask`` is ``None`` (no exclusion), a boolean grid (``True`` = signal to
+        leave out of the fit), or a ``(lon_min, lon_max, lat_min, lat_max)`` bbox.
+        """
+        if mask is None:
+            return None, None
+        # A lon/lat bbox is a length-4 sequence of scalars.
+        if (not isinstance(mask, (xr.DataArray, np.ndarray))
+                and len(mask) == 4 and all(np.isscalar(v) for v in mask)):
+            from . import geo
+
+            x_min, x_max, y_min, y_max = geo.bbox_to_native(*mask, self.epsg)
+            x, y = self.x, self.y
+            in_x = (x >= min(x_min, x_max)) & (x <= max(x_min, x_max))
+            in_y = (y >= min(y_min, y_max)) & (y <= max(y_min, y_max))
+            return (in_y[:, None] & in_x[None, :]), list(mask)
+
+        arr = mask.values if isinstance(mask, xr.DataArray) else np.asarray(mask)
+        exclude = np.asarray(arr, dtype=bool)
+        expected = (self.sizes["y"], self.sizes["x"])
+        if exclude.shape != expected:
+            raise ValueError(
+                f"deramp mask shape {exclude.shape} does not match the (y, x) "
+                f"grid {expected}"
+            )
+        return exclude, "custom"
 
     def remove_phase_screen(self):
         """Subtract the GUNW's NASA ionosphere phase screen (lazy). Returns a new stack.

@@ -426,16 +426,24 @@ def goldstein_filter_planes(arr, coherence=None, *, alpha=0.5, patch_size=32,
 # polynomial least-squares fit stands in for the ramp.
 
 
-def smooth_surface(field, scale):
+def smooth_surface(field, scale, exclude=None):
     """NaN-aware smooth surface of ``field`` (2D), Gaussian ``scale`` in pixels.
 
     Invalid pixels are zero-filled for the convolution and divided back out via
     a smoothed validity mask, so a NaN neither reads as 0 nor spreads -- the
     normalized-convolution trick used by the nan-aware multilook. Output is NaN
     where the smoothed validity mass is negligible (too little nearby data).
+
+    ``exclude`` (optional boolean mask, same shape) drops those pixels from the
+    fit while still evaluating the surface there: the normalized convolution
+    fills them from surrounding non-excluded data. Used to keep a signal region
+    out of a deramp's trend estimate. Its interior comes back NaN if the gap is
+    wide relative to ``scale`` (no nearby data survives to interpolate from).
     """
     field = np.asarray(field, dtype=np.float64)
     finite = np.isfinite(field)
+    if exclude is not None:
+        finite = finite & ~np.asarray(exclude, dtype=bool)
     w = finite.astype(np.float64)
     filled = np.where(finite, field, 0.0)
     num = gaussian_filter(w * filled, sigma=scale, mode="constant", cval=0.0)
@@ -457,38 +465,44 @@ def _poly_columns(ny, nx, degree):
     return np.stack([c.ravel() for c in cols], axis=1)  # (npix, ncoef)
 
 
-def poly_surface(field, degree):
+def poly_surface(field, degree, exclude=None):
     """Least-squares 2D polynomial surface fit to ``field``'s finite pixels.
 
     Evaluated on the whole grid (a polynomial is defined everywhere). Returns
-    all-NaN if there are fewer valid pixels than coefficients.
+    all-NaN if there are fewer valid pixels than coefficients. ``exclude``
+    (optional boolean mask, same shape) drops those pixels from the fit -- so a
+    masked signal region does not bias the ramp -- while the fitted polynomial is
+    still evaluated over the full grid.
     """
     field = np.asarray(field, dtype=np.float64)
     ny, nx = field.shape
     design = _poly_columns(ny, nx, int(degree))
     values = field.ravel()
     valid = np.isfinite(values)
+    if exclude is not None:
+        valid = valid & ~np.asarray(exclude, dtype=bool).ravel()
     if int(valid.sum()) < design.shape[1]:
         return np.full((ny, nx), np.nan)
     coef, *_ = np.linalg.lstsq(design[valid], values[valid], rcond=None)
     return (design @ coef).reshape(ny, nx)
 
 
-def fit_surface(field, method="spline", scale=None, degree=1):
+def fit_surface(field, method="spline", scale=None, degree=1, exclude=None):
     """Fit a smooth surface to a 2D ``field`` -- the trend a deramp subtracts.
 
     The single source of truth for the smooth trend :func:`deramp` subtracts.
     ``method="spline"`` is a NaN-aware normalized-convolution Gaussian at sigma
     ``scale`` px (default a quarter of the smaller axis); ``method="poly"`` is a
-    total-degree-``degree`` 2D polynomial.
+    total-degree-``degree`` 2D polynomial. ``exclude`` (optional boolean mask)
+    is forwarded to the underlying fit to keep a signal region out of it.
     """
     field = np.asarray(field, dtype=np.float64)
     if method == "spline":
         if scale is None:
             scale = 0.25 * min(field.shape)
-        return smooth_surface(field, scale)
+        return smooth_surface(field, scale, exclude=exclude)
     if method == "poly":
-        return poly_surface(field, int(degree))
+        return poly_surface(field, int(degree), exclude=exclude)
     raise ValueError(f"method must be 'poly' or 'spline', got {method!r}")
 
 
@@ -507,7 +521,7 @@ def remove_outliers(field, scale, threshold, iterations):
     return out.astype(np.asarray(field).dtype)
 
 
-def deramp(field, degree=1, method="poly", scale=None):
+def deramp(field, degree=1, method="poly", scale=None, exclude=None):
     """Estimate and subtract a long-wavelength surface (ramp) from ``field`` (2D).
 
     ``method="poly"`` subtracts a total-degree-``degree`` polynomial (the classic
@@ -516,9 +530,14 @@ def deramp(field, degree=1, method="poly", scale=None):
     axis), a high-pass that also removes gently curved ionosphere ramps. NaNs are
     preserved. The subtracted surface is exactly what :func:`fit_surface`
     produces, so ``deramp(spline) == field - fit_surface(spline)``.
+
+    ``exclude`` (optional boolean mask) marks a signal region to leave out of the
+    ramp *fit*; the ramp is still subtracted from those pixels, so the signal is
+    kept but not allowed to bias the trend.
     """
     field = np.asarray(field, dtype=np.float64)
-    surface = fit_surface(field, method=method, scale=scale, degree=degree)
+    surface = fit_surface(field, method=method, scale=scale, degree=degree,
+                          exclude=exclude)
     return (field - surface).astype(np.asarray(field).dtype)
 
 
@@ -557,8 +576,10 @@ def remove_outliers_planes(arr, *, scale, threshold, iterations):
                          iterations=iterations)
 
 
-def deramp_planes(arr, *, degree, method, scale):
-    return _batch_planes(deramp, arr, degree=degree, method=method, scale=scale)
+def deramp_planes(arr, *, degree, method, scale, exclude=None):
+    # exclude is a single (y, x) signal mask shared across the stacked planes.
+    return _batch_planes(deramp, arr, degree=degree, method=method, scale=scale,
+                         exclude=exclude)
 
 
 def mask_edges_planes(arr, *, edge_pixels):

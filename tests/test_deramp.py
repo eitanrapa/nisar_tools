@@ -8,6 +8,7 @@ plus the underlying numpy kernels.
 
 import numpy as np
 import pytest
+import xarray as xr
 
 from nisar_tools import UnwrappedStack, Workspace
 from nisar_tools._kernels import (
@@ -195,3 +196,110 @@ def test_pipeline_chains_and_preserves_type(gunw_factory):
     # still convertible to LOS from its own cube
     los = out.to_los()
     assert los.sizes == out.sizes
+
+
+# -- deramp with a masked-out signal region --------------------------------
+def test_poly_surface_exclude_ignores_masked_region():
+    ny, nx = 30, 40
+    yy, xx = np.mgrid[0:ny, 0:nx].astype(float)
+    truth = 2.0 + 0.5 * xx - 0.3 * yy         # the ramp we want back
+    field = truth.copy()
+    field[5:15, 5:15] += 20.0                 # a strong signal bump on top
+    exclude = np.zeros((ny, nx), bool)
+    exclude[5:15, 5:15] = True
+
+    # Excluding the bump recovers the true ramp; including it biases the fit.
+    assert np.allclose(poly_surface(field, 1, exclude=exclude), truth, atol=1e-6)
+    assert not np.allclose(poly_surface(field, 1), truth, atol=1.0)
+
+
+def test_smooth_surface_exclude_fills_from_neighbours():
+    field = np.ones((41, 41))
+    field[18:23, 18:23] = 100.0               # a region to keep out of the fit
+    exclude = np.zeros_like(field, bool)
+    exclude[18:23, 18:23] = True
+    s = smooth_surface(field, scale=6.0, exclude=exclude)
+    # The masked block is filled from the surrounding 1.0 field, not its 100s.
+    assert np.all(np.abs(s[18:23, 18:23] - 1.0) < 1e-3)
+
+
+def test_deramp_kernel_exclude_removes_ramp_and_keeps_signal():
+    ny, nx = 30, 40
+    yy, xx = np.mgrid[0:ny, 0:nx].astype(float)
+    field = (0.5 * xx - 0.3 * yy)
+    field[10:20, 10:20] += 5.0                # localized signal over the ramp
+    exclude = np.zeros((ny, nx), bool)
+    exclude[10:20, 10:20] = True
+
+    out = deramp(field, degree=1, method="poly", exclude=exclude)
+    outside = ~exclude
+    assert np.nanstd(out[outside]) < 1e-6                    # ramp gone far-field
+    assert np.allclose(out[10:20, 10:20], 5.0, atol=1e-6)    # signal preserved
+
+
+def _ramp_stack(bump=5.0, ny=30, nx=40, x=None, y=None):
+    yy, xx = np.mgrid[0:ny, 0:nx].astype(np.float32)
+    field = (0.5 * xx - 0.3 * yy)
+    field[10:20, 10:20] += bump
+    ds = xr.Dataset(
+        {"unw": (("pair", "y", "x"), field[None].astype(np.float32))},
+        coords={"pair": [0],
+                "y": np.arange(ny, dtype=float) if y is None else y,
+                "x": np.arange(nx, dtype=float) if x is None else x},
+    ).rio.write_crs("EPSG:32611")
+    ds.attrs.update(epsg=32611, direction="Descending", source="snaphu")
+    return UnwrappedStack(ds)
+
+
+def test_deramp_mask_array_excludes_the_signal():
+    u = _ramp_stack(bump=5.0)
+    mask = np.zeros((30, 40), bool)
+    mask[10:20, 10:20] = True
+
+    out = u.deramp(degree=1, mask=mask).ds["unw"].isel(pair=0).values
+    outside = ~mask
+    assert np.nanstd(out[outside]) < 1e-4                    # far field flat
+    assert np.allclose(out[10:20, 10:20], 5.0, atol=1e-4)    # signal kept
+
+    # Without the mask the signal biases the fit, so the far field is not flat.
+    plain = u.deramp(degree=1).ds["unw"].isel(pair=0).values
+    assert np.nanstd(plain[outside]) > 0.01
+
+    with pytest.raises(ValueError, match="does not match"):
+        u.deramp(mask=np.zeros((5, 5), bool))
+
+
+def test_deramp_mask_bbox_and_provenance():
+    from nisar_tools import geo
+
+    ny = nx = 40
+    dx = dy = 100.0
+    x = 400000.0 + dx * np.arange(nx)
+    y = 3_800_000.0 - dy * np.arange(ny)      # descending (north-down)
+    u = _ramp_stack(bump=8.0, ny=ny, nx=nx, x=x, y=y)
+
+    # A lon/lat bbox over the signal block (rows/cols 10..19).
+    bbox = geo.native_bbox_to_lonlat(
+        x[10] - dx / 2, x[19] + dx / 2, y[19] - dy / 2, y[10] + dy / 2, 32611
+    )
+    out = u.deramp(degree=1, mask=bbox)
+    got = out.ds["unw"].isel(pair=0).values
+
+    # Rows 25.. are well clear of the block: the bbox-excluded fit flattens them,
+    # and the plain deramp (biased by the bump) does not.
+    far = got[25:, :]
+    plain_far = u.deramp(degree=1).ds["unw"].isel(pair=0).values[25:, :]
+    assert np.nanstd(far) < 0.05
+    assert np.nanstd(far) < np.nanstd(plain_far)
+    assert out.ds.attrs["deramp"]["mask"] == list(bbox)
+
+
+def test_deramp_mask_changes_persist_hash(tmp_path):
+    u = _ramp_stack()
+    mask = np.zeros((30, 40), bool)
+    mask[10:20, 10:20] = True
+    ws = Workspace(tmp_path / "ws")
+
+    u.deramp(degree=1).persist(ws, "plain")
+    u.deramp(degree=1, mask=mask).persist(ws, "masked")
+    assert ws.stored_params_hash("plain") != ws.stored_params_hash("masked")
