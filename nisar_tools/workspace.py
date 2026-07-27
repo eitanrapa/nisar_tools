@@ -12,11 +12,27 @@ expensive, interruptible unwrap stage.
 
 import hashlib
 import json
+import os
 import shutil
+import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 import xarray as xr
+
+
+def _atomic_write_text(path, text):
+    """Replace ``path``'s contents in one step, never leaving it half-written."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 # zarr v2 format is required for complex64 (the v3 spec has no complex dtype).
 _ZARR_KWARGS = {}
@@ -230,6 +246,9 @@ class Workspace:
 
     def __init__(self, workdir, create=True):
         self.workdir = Path(workdir)
+        # Serialises the done-marker read-modify-write, which the unwrap stage
+        # calls from several threads when pairs run concurrently.
+        self._done_lock = threading.Lock()
         if create:
             self.workdir.mkdir(parents=True, exist_ok=True)
             meta = self.workdir / "workspace.json"
@@ -374,11 +393,22 @@ class Workspace:
         zarr.consolidate_metadata(str(self.path(name)))
 
     def mark_pair_done(self, name, pair):
+        """Record that ``pair`` is written, so an interrupted run can resume.
+
+        Read-modify-write, so it takes the workspace lock: the unwrap stage calls
+        this from every worker thread when pairs run concurrently, and an
+        unsynchronised version loses markers (and with them the resume). The file
+        is replaced atomically, so an interrupt mid-write cannot truncate the
+        marker list and silently un-finish already-written pairs.
+        """
         done = self._done_path(name)
-        state = json.loads(done.read_text()) if done.exists() else {"pairs_done": []}
-        if pair not in state["pairs_done"]:
-            state["pairs_done"].append(pair)
-        done.write_text(json.dumps(state))
+        with self._done_lock:
+            state = (
+                json.loads(done.read_text()) if done.exists() else {"pairs_done": []}
+            )
+            if pair not in state["pairs_done"]:
+                state["pairs_done"].append(pair)
+            _atomic_write_text(done, json.dumps(state))
 
     def pairs_done(self, name):
         done = self._done_path(name)

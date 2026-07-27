@@ -16,6 +16,8 @@ gzip-compressed: decoding through h5py is single-core no matter how many threads
 (or granules) are in play. See that class for the details.
 """
 
+import math
+import os
 import zlib
 
 import dask.array as da
@@ -187,20 +189,60 @@ class GSLC:
                 self._direct = False
         return self._direct or None
 
+    def read_chunks(self, ny, nx, target_blocks=None):
+        """Read-block size for an ``(ny, nx)`` region of this granule.
+
+        How much one HDF5 read task decompresses is a *separate* question from how
+        the result is stored, but both numbers used to be 2048 (``chunks`` here and
+        ``SPATIAL_CHUNK`` in ``_base``). Since :meth:`crop` slices the
+        already-chunked array, a modest crop -- the notebook's bbox is about
+        2750x2220 px -- came out as 2x2 dask blocks, so at most four of ten cores
+        ran the gzip inflate. That is why the direct-chunk reader measures ~3x on a
+        raw read but 2.66x end to end.
+
+        The block is sized to give ``target_blocks`` of them over the region
+        (default four per core), rounded *down* to a multiple of the file's own
+        chunking and never above ``self.chunks``. Not smaller than that: the
+        downstream multilook overlaps by ``4 * looks`` (see
+        ``_kernels._overlap_depth``), so at ``looks=30`` a 512-px block does 2.2x
+        the work of its interior against 1.25x for a 2048-px one. Enough blocks to
+        fill the cores, no more.
+        """
+        if target_blocks is None:
+            target_blocks = 4 * (os.cpu_count() or 1)
+        file_chunks = getattr(self._dset, "chunks", None) or (1, 1)
+        cap_y, cap_x = self.chunks
+        side = max(1, math.isqrt(max(1, (int(ny) * int(nx)) // max(1, target_blocks))))
+
+        def _align(value, unit, cap):
+            return min(cap, max(unit, (value // unit) * unit))
+
+        return (_align(side, file_chunks[0], cap_y),
+                _align(side, file_chunks[1], cap_x))
+
     @property
     def data(self):
         """Lazy, CRS-aware DataArray ``(y, x)`` of the complex image."""
+        return self.data_chunked(self.chunks)
+
+    def data_chunked(self, chunks):
+        """:attr:`data` with an explicit read-block size.
+
+        Separate from :attr:`data` because the block size has to be fixed at
+        ``da.from_array`` time -- rechunking afterwards only splits blocks that
+        have already been read whole, so it buys no read parallelism.
+        """
         reader = self._reader()
         if reader is not None:
             # DirectChunkReader keeps the gzip inflate outside h5py's lock, so
             # dask's worker threads can actually overlap; it needs no lock of
             # its own because h5py already guards the raw chunk reads.
-            arr = da.from_array(reader, chunks=self.chunks, lock=False)
+            arr = da.from_array(reader, chunks=chunks, lock=False)
         else:
             # h5py serialises on one global lock across every handle and file,
             # so this path reads at one core's decode rate no matter how many
             # threads or granules are in play. lock=True adds no further cost.
-            arr = da.from_array(self._dset, chunks=self.chunks, lock=True)
+            arr = da.from_array(self._dset, chunks=chunks, lock=True)
         data = xr.DataArray(
             arr,
             dims=("y", "x"),
@@ -209,8 +251,13 @@ class GSLC:
         )
         return data.rio.write_crs(f"EPSG:{self.epsg}")
 
-    def crop(self, lon_min, lon_max, lat_min, lat_max):
-        """Lazily crop to a lon/lat bounding box. Returns a DataArray."""
+    def crop(self, lon_min, lon_max, lat_min, lat_max, target_blocks=None):
+        """Lazily crop to a lon/lat bounding box. Returns a DataArray.
+
+        The read blocks are sized for the *crop*, not the granule (see
+        :meth:`read_chunks`), so a small bbox still splits into enough dask tasks
+        to keep every core inflating.
+        """
         x_min, x_max, y_min, y_max = geo.bbox_to_native(
             lon_min, lon_max, lat_min, lat_max, self.epsg
         )
@@ -225,7 +272,17 @@ class GSLC:
             if self.y_coords[0] <= self.y_coords[-1]
             else slice(y_max, y_min)
         )
-        return self.data.sel(x=x_slice, y=y_slice)
+        # Size the blocks from the crop's extent, then slice. Selecting on the
+        # coordinates (which are already in memory) is what resolves the bbox to a
+        # pixel count; no data is read.
+        extent = (
+            int(((self.y_coords >= min(y_min, y_max))
+                 & (self.y_coords <= max(y_min, y_max))).sum()),
+            int(((self.x_coords >= min(x_min, x_max))
+                 & (self.x_coords <= max(x_min, x_max))).sum()),
+        )
+        chunks = self.read_chunks(extent[0], extent[1], target_blocks)
+        return self.data_chunked(chunks).sel(x=x_slice, y=y_slice)
 
     def close(self):
         """Close the underlying HDF5 file. Persist or compute first."""

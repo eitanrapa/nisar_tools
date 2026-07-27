@@ -19,6 +19,7 @@ dependencies:
   - matplotlib
   - ipykernel         # so this env can be a Jupyter kernel
   - pytest
+  - pytest-xdist      # `pytest -n auto`; every test has its own tmp_path
   - pip
   - pip:
       - -e .          # install nisar_tools (editable) from this repo

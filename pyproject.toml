@@ -40,10 +40,17 @@ download = ["earthaccess", "sardem"]
 # fails, whereas conda-forge's does not -- environment.yml installs it there.
 # Nothing in the package imports osgeo; rasterio already vendors GDAL for it.
 gdal = ["gdal"]
-dev = ["pytest", "dask[diagnostics]"]
+dev = ["pytest", "pytest-xdist", "dask[diagnostics]"]
 
 [tool.setuptools.packages.find]
 include = ["nisar_tools*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Every test builds its own tmp_path workspace, so the suite parallelises with
+# `-n auto` (pytest-xdist, in the `dev` extra). Not in addopts: the memory-growth
+# test measures with tracemalloc and its bound goes noisy under load, so opt in
+# per run -- `-n auto -k "not memory_does_not_scale"` -- and run that one serially.
+markers = [
+    "serial: must not run under pytest-xdist (measures time or memory)",
+]

@@ -20,7 +20,10 @@ downstream operations -- water/edge masking, spline outlier rejection, deramping
 or ``"gunw"``) records which path built it and drives :meth:`to_los`'s geometry.
 """
 
+import itertools
 import os
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import dask.array as da
 import h5py
@@ -30,7 +33,12 @@ import snaphu
 import xarray as xr
 
 from . import _kernels, geometry
-from ._base import SPATIAL_CHUNK, RasterStackMixin, open_stage
+from ._base import (
+    SPATIAL_CHUNK,
+    RasterStackMixin,
+    compute_chunks,
+    open_stage,
+)
 
 # -- NASA GUNW HDF5 layout (verified from real granules) ----------------------
 # The unwrappedInterferogram group holds the grid coordinates/projection and the
@@ -107,8 +115,34 @@ class UnwrappedStack(RasterStackMixin):
     @classmethod
     def from_interferograms(
         cls, igrams, workspace, name="unwrapped", nproc=1, res_az=8, res_rg=3,
-        overwrite=False,
+        overwrite=False, ntiles=None, tile_overlap=None,
+        max_tile_pixels=_kernels.DEFAULT_MAX_TILE_PIXELS, min_region_size=100,
+        tile_cost_thresh=500, single_tile_reoptimize=True, pairs_in_flight=1,
     ):
+        """Unwrap every pair with SNAPHU into a region-written, resumable store.
+
+        **Tiling is a function of the raster, not of ``nproc``.** SNAPHU's tile
+        grid decides where the 2*pi seams fall, so it is part of the answer, not a
+        performance dial: ``max_tile_pixels`` (and an explicit ``ntiles``) set the
+        geometry, and ``nproc`` only says how many of those tiles may be solved at
+        once. Consequently ``nproc`` is *not* in the params hash -- varying it must
+        not invalidate a finished store -- while the tiling parameters are.
+
+        Lower ``max_tile_pixels`` for more, smaller tiles (more concurrency inside
+        a pair, but more seams); a raster under the budget is unwrapped as a single
+        tile, which is the best-quality option and skips the tile-assembly and
+        ``single_tile_reoptimize`` passes entirely. ``single_tile_reoptimize=False``
+        drops a second, fully serial whole-raster SNAPHU pass -- the biggest single
+        speed knob for a tiled unwrap.
+
+        Pairs are independent, so ``pairs_in_flight`` unwraps them concurrently.
+        Even at the default 1 the *next* pair's inputs are read while SNAPHU works
+        on the current one, which hides the whole HDF5 -> multilook -> filter chain
+        behind the unwrap. Raise it above 1 when SNAPHU cannot use the cores itself
+        -- a single-tile raster, or ``nproc`` above the tile count -- since the
+        process budget is then split ``nproc // pairs_in_flight`` ways. Peak memory
+        is proportional to ``pairs_in_flight``, not to the stack length.
+        """
         ds = igrams.ds
         npair = ds.sizes["pair"]
         ny, nx = ds.sizes["y"], ds.sizes["x"]
@@ -121,7 +155,21 @@ class UnwrappedStack(RasterStackMixin):
         nlooks = _kernels.snaphu_nlooks(
             looks, looks, spacing_az, spacing_rg, res_az, res_rg
         )
-        ntiles, overlap = _kernels.snaphu_params((ny, nx), nproc)
+        ntiles, overlap = _kernels.snaphu_params(
+            (ny, nx), nproc, ntiles=ntiles, tile_overlap=tile_overlap,
+            max_tile_pixels=max_tile_pixels, min_region_size=min_region_size,
+        )
+        # Fail here, naming the numbers, rather than as a bare RuntimeError
+        # carrying only the subprocess's stderr.
+        _kernels.snaphu_params_check(
+            (ny, nx), ntiles, overlap, min_region_size=min_region_size
+        )
+
+        snaphu_kwargs = dict(
+            nlooks=nlooks, ntiles=ntiles, tile_overlap=overlap, nproc=nproc,
+            min_region_size=min_region_size, tile_cost_thresh=tile_cost_thresh,
+            single_tile_reoptimize=single_tile_reoptimize,
+        )
 
         params = {
             "stage": name,
@@ -132,6 +180,13 @@ class UnwrappedStack(RasterStackMixin):
             "res_az": res_az,
             "res_rg": res_rg,
             "pairs": ds.attrs.get("pairs"),
+            # Tiling changes the unwrapped phase, so it belongs in the hash.
+            # ``nproc`` deliberately does not: it no longer changes the result.
+            "ntiles": list(ntiles),
+            "tile_overlap": overlap,
+            "min_region_size": int(min_region_size),
+            "tile_cost_thresh": int(tile_cost_thresh),
+            "single_tile_reoptimize": bool(single_tile_reoptimize),
         }
 
         # Metadata-only store so each pair can be written by region.
@@ -141,16 +196,22 @@ class UnwrappedStack(RasterStackMixin):
         )
 
         done = workspace.pairs_done(name)
-        for i in range(npair):
-            if i in done:
-                continue
-            igram = np.asarray(ds["igram"].isel(pair=i).values)
-            corr = np.asarray(ds["coherence"].isel(pair=i).values)
-            unw, conncomp = _unwrap_pair(
-                igram, corr, nlooks=nlooks, ntiles=ntiles,
-                tile_overlap=overlap, nproc=nproc,
+        todo = [i for i in range(npair) if i not in done]
+        inflight = max(1, int(pairs_in_flight))
+        if inflight > 1:
+            # SNAPHU forks NPROC children per pair, so the process budget has to
+            # be shared or the box is oversubscribed by `pairs_in_flight` times.
+            snaphu_kwargs["nproc"] = max(1, nproc // inflight)
+
+        def _load(i):
+            """Materialise one pair. This is the whole upstream graph."""
+            return (
+                np.asarray(ds["igram"].isel(pair=i).values),
+                np.asarray(ds["coherence"].isel(pair=i).values),
             )
 
+        def _unwrap_and_write(i, igram, corr):
+            unw, conncomp = _unwrap_pair(igram, corr, pair=i, **snaphu_kwargs)
             pair_ds = xr.Dataset(
                 {
                     "unw": (("pair", "y", "x"), unw[None]),
@@ -160,8 +221,21 @@ class UnwrappedStack(RasterStackMixin):
                     "coherence": (("pair", "y", "x"), corr.astype(np.float32)[None]),
                 }
             )
+            # Disk chunks are 1 deep along `pair`, so concurrent region writes
+            # never touch the same Zarr chunk and need no synchronizer.
             workspace.write_region(name, pair_ds, region={"pair": slice(i, i + 1)})
             workspace.mark_pair_done(name, i)
+
+        with ThreadPoolExecutor(inflight, thread_name_prefix="unwrap") as pool:
+            running = deque()
+            for i, (igram, corr) in _prefetch(_load, todo, lookahead=inflight):
+                # Bound the unwraps in flight as well as the loads, so peak memory
+                # stays proportional to `pairs_in_flight` and not to npair.
+                while len(running) >= inflight:
+                    running.popleft().result()
+                running.append(pool.submit(_unwrap_and_write, i, igram, corr))
+            for future in running:
+                future.result()
 
         workspace.consolidate(name)
         return cls.from_zarr(workspace.path(name))
@@ -365,11 +439,13 @@ class UnwrappedStack(RasterStackMixin):
             valid = (m != _MASK_FILL) & (ss_ref > 0) & (ss_sec > 0)
             unw = unw.where(valid)
 
-        masked = xr.apply_ufunc(
-            _kernels.mask_edges_planes, unw.chunk({"pair": 1, "y": -1, "x": -1}),
-            kwargs={"edge_pixels": int(edge_pixels)},
-            input_core_dims=[["y", "x"]], output_core_dims=[["y", "x"]],
-            dask="parallelized", output_dtypes=[unw.dtype],
+        # Erosion by ``edge_pixels`` cross iterations reaches exactly that far, so
+        # a matching halo decomposes it spatially and the result is identical to
+        # the whole-plane fit -- unlike the old chunk({"y": -1, "x": -1}), which
+        # capped concurrency at the pair count.
+        masked = _plane_kernel(
+            _kernels.mask_edges, unw, depth=max(1, int(edge_pixels)),
+            edge_pixels=int(edge_pixels),
         )
         if min_coherence is not None:
             if "coherence" not in self.ds:
@@ -398,13 +474,14 @@ class UnwrappedStack(RasterStackMixin):
         ``threshold`` radians, and refits ``iterations`` times. This is the
         tension-spline + residual-mask step of ``filt_gunw.csh``, in scipy.
         """
-        unw = self.ds["unw"].chunk({"pair": 1, "y": -1, "x": -1})
-        cleaned = xr.apply_ufunc(
-            _kernels.remove_outliers_planes, unw,
-            kwargs={"scale": float(scale), "threshold": float(threshold),
-                    "iterations": int(iterations)},
-            input_core_dims=[["y", "x"]], output_core_dims=[["y", "x"]],
-            dask="parallelized", output_dtypes=[unw.dtype],
+        # scipy's Gaussian truncates at 4 sigma, so the smooth surface has finite
+        # support and a 4*scale halo per iteration reproduces the whole-plane
+        # result exactly while letting the chunks run independently.
+        cleaned = _plane_kernel(
+            _kernels.remove_outliers, self.ds["unw"],
+            depth=_kernels.remove_outliers_depth(scale, iterations),
+            scale=float(scale), threshold=float(threshold),
+            iterations=int(iterations),
         )
         ds = self.ds.copy()
         ds["unw"] = cleaned
@@ -435,14 +512,21 @@ class UnwrappedStack(RasterStackMixin):
         the masked gap, or the region's interior fills with NaN.
         """
         exclude, mask_prov = self._deramp_mask(mask)
-        unw = self.ds["unw"].chunk({"pair": 1, "y": -1, "x": -1})
-        deramped = xr.apply_ufunc(
-            _kernels.deramp_planes, unw,
-            kwargs={"degree": int(degree), "method": method, "scale": scale,
-                    "exclude": exclude},
-            input_core_dims=[["y", "x"]], output_core_dims=[["y", "x"]],
-            dask="parallelized", output_dtypes=[unw.dtype],
-        )
+        unw = self.ds["unw"]
+        if method == "poly":
+            # A least-squares fit is a sum over pixels, so the normal equations
+            # accumulate per chunk and the (tiny) system is solved once. Same
+            # answer as the whole-plane fit without ever building an
+            # (npix, ncoef) design matrix -- 768 MB for a degree-2 fit on a
+            # 4000x4000 plane.
+            deramped = _plane_kernel_poly(unw, int(degree), exclude)
+        else:
+            # A spline deramp's sigma defaults to a quarter of the raster, so its
+            # support is global by design; there is nothing to decompose.
+            deramped = _plane_kernel(
+                _kernels.deramp, unw, depth=max(unw.sizes["y"], unw.sizes["x"]),
+                degree=int(degree), method=method, scale=scale, exclude=exclude,
+            )
         ds = self.ds.copy()
         ds["unw"] = deramped
         ds.attrs.update(self.ds.attrs)
@@ -564,7 +648,7 @@ class UnwrappedStack(RasterStackMixin):
         ds.attrs["cycle_shifts"] = applied
         return UnwrappedStack(ds)
 
-    def merge(self, other, time_tolerance=600.0):
+    def merge(self, other, resampling="bilinear", time_tolerance=600.0):
         """Stitch an adjacent same-track :class:`UnwrappedStack` onto the union grid.
 
         The same lattice-padding machinery as :meth:`~nisar_tools.stack.GSLCStack.merge`
@@ -576,26 +660,40 @@ class UnwrappedStack(RasterStackMixin):
         added to ``other``, so the phase is **continuous across the join with no
         2*pi step**.
 
-        The two stacks must share a lattice and UTM zone and cover the same
-        acquisitions (pairs are matched by reference/secondary time within
-        ``time_tolerance`` seconds, so per-frame ``zeroDopplerStartTime`` jitter is
-        tolerated). ``coherence`` -- and, for a GUNW, ``phase_screen`` /
-        ``subswath_mask`` -- are carried through with the same ``self`` precedence;
-        ``other``'s ``conncomp`` labels are shifted clear of ``self``'s so the two
-        frames' components stay distinct.
+        When ``other`` is gridded in a **different UTM zone** -- a track crossing a
+        zone boundary -- every one of its layers is first warped onto ``self``'s
+        grid, one pair per dask task, keeping ``self``'s spacing and grid phase so
+        the overlap still lines up exactly. ``resampling`` applies to the continuous
+        layers (``"nearest"`` preserves exact sample values); the label layers
+        (``conncomp``, ``subswath_mask``) are always nearest, since an interpolated
+        label is not a label. The 2*pi offset is read *after* the warp, on the shared
+        grid, so resampling cannot smear the cycle estimate -- the median over the
+        whole overlap is far more robust than the sub-radian resampling error. A
+        cross-zone warp leaves rotated nodata wedges, exactly as
+        :meth:`~nisar_tools.stack.GSLCStack.merge` does; :meth:`crop` trims a ragged
+        edge if it matters.
+
+        The two stacks must share a lattice (or differ only by CRS, handled above)
+        and cover the same acquisitions (pairs are matched by reference/secondary
+        time within ``time_tolerance`` seconds, so per-frame
+        ``zeroDopplerStartTime`` jitter is tolerated). ``coherence`` -- and, for a
+        GUNW, ``phase_screen`` / ``subswath_mask`` -- are carried through with the
+        same ``self`` precedence; ``other``'s ``conncomp`` labels are shifted clear
+        of ``self``'s so the two frames' components stay distinct.
 
         The offset is one value per pair over the *whole* overlap. If SNAPHU split
         the overlap into components sitting at different cycle offsets, the median
         aligns the dominant one; correct any stragglers afterwards with
         :meth:`add_cycles` (``conncomp=``). Lazy, like the other operations.
         """
-        from .stack import _check_same_lattice, _pad_onto, _union_lattice
+        from .stack import (
+            _check_same_lattice,
+            _pad_onto,
+            _union_lattice,
+            warp_onto_lattice,
+            warp_target_lattice,
+        )
 
-        if int(self.epsg) != int(other.epsg):
-            raise ValueError(
-                f"Cannot merge unwrapped stacks in different UTM zones (EPSG "
-                f"{self.epsg} vs {other.epsg}); reproject one onto the other first."
-            )
         if (self.direction is not None and other.direction is not None
                 and self.direction != other.direction):
             raise ValueError("Cannot merge stacks with different pass directions")
@@ -611,7 +709,31 @@ class UnwrappedStack(RasterStackMixin):
             ref_time=("pair", np.asarray(self.ds["ref_time"].values)),
             sec_time=("pair", np.asarray(self.ds["sec_time"].values)),
         )
-        _check_same_lattice(self.x, self.y, o)
+
+        cross_zone = int(self.epsg) != int(other.epsg)
+        if cross_zone:
+            # One target lattice for every layer, or the padded grids would not
+            # line up with each other.
+            tx, ty = warp_target_lattice(
+                self.x, self.y, o["x"].values, o["y"].values,
+                other.epsg, self.epsg,
+            )
+            o = xr.Dataset(
+                {
+                    name: warp_onto_lattice(
+                        o[name], tx, ty, other.epsg, self.epsg, resampling
+                    )
+                    for name in o.data_vars
+                    if name != "spatial_ref" and "y" in o[name].dims
+                },
+                coords={
+                    "pair": o["pair"].values, "y": ty, "x": tx,
+                    "ref_time": ("pair", np.asarray(o["ref_time"].values)),
+                    "sec_time": ("pair", np.asarray(o["sec_time"].values)),
+                },
+            )
+        else:
+            _check_same_lattice(self.x, self.y, o)
 
         union_y = _union_lattice(self.y, o["y"].values)
         union_x = _union_lattice(self.x, o["x"].values)
@@ -660,12 +782,17 @@ class UnwrappedStack(RasterStackMixin):
                 + list(other.ds.attrs["source_files"])
             )
         merges = list(self.ds.attrs.get("merged", []))
-        merges.append({
+        record = {
             "other_epsg": int(other.epsg),
             "other_npair": int(other.sizes["pair"]),
             "other_y": [float(np.min(o["y"].values)), float(np.max(o["y"].values))],
             "other_x": [float(np.min(o["x"].values)), float(np.max(o["x"].values))],
-        })
+        }
+        if cross_zone:
+            # Only recorded when a warp actually ran, so a same-zone merge keeps
+            # the hash it had before cross-zone support existed.
+            record["resampling"] = str(resampling)
+        merges.append(record)
         ds.attrs["merged"] = merges
         return UnwrappedStack(ds)
 
@@ -781,7 +908,102 @@ class UnwrappedStack(RasterStackMixin):
         )
 
 
-def _unwrap_pair(igram, corr, *, nlooks, ntiles, tile_overlap, nproc):
+# SNAPHU writes warnings and errors to the same stream (``sp0`` is stderr), and
+# snaphu-py re-raises the whole captured buffer as the exception message. This one
+# is emitted on *every* tiled run -- snaphu warns below TILEOVRLPWARNTHRESH = 400,
+# above any overlap we would sensibly ask for -- so it is always the first line of
+# a failure and always a red herring. Strip it so the real fault is what surfaces.
+_SNAPHU_NOISE = (
+    "WARNING: Tile overlap is small (may give bad results)",
+    "only one tile--disregarding tile overlap values",
+    "only one tile--disregarding multiprocessor option",
+)
+
+
+def _plane_kernel(func, field, depth, target_blocks=None, **kwargs):
+    """Run a 2-D plane kernel over a ``(pair, y, x)`` DataArray, chunk by chunk.
+
+    Wraps :func:`_kernels.halo_planes`, which overlaps the spatial axes by
+    ``depth`` so the kernel decomposes across chunks instead of forcing one whole
+    plane per task. Dims, coords and attrs are preserved.
+
+    A persisted stack arrives on the 2048-px *disk* chunk, which for a multilooked
+    raster is usually the whole plane -- so it is rechunked to a working size first
+    (see :func:`_base.compute_chunks`), or there would be nothing to decompose.
+    """
+    if _kernels._is_dask(field.data):
+        working = compute_chunks(
+            field.sizes["y"], field.sizes["x"], depth, target_blocks
+        )
+        if working is not None:
+            field = field.chunk({"pair": 1, "y": working[0], "x": working[1]})
+    data = _kernels.halo_planes(func, field.data, depth, **kwargs)
+    return xr.DataArray(
+        data, dims=field.dims, coords=field.coords, attrs=field.attrs,
+        name=field.name,
+    )
+
+
+def _plane_kernel_poly(field, degree, exclude, target_blocks=None):
+    """Polynomial deramp of a ``(pair, y, x)`` DataArray as a chunked reduction."""
+    if _kernels._is_dask(field.data):
+        # No halo here (the fit is a global reduction), so the only floor on the
+        # working chunk is not fragmenting the graph: one design-matrix block per
+        # chunk, so a handful of coefficients' worth of scratch each.
+        working = compute_chunks(
+            field.sizes["y"], field.sizes["x"], halo=1,
+            target_blocks=target_blocks,
+        )
+        if working is not None:
+            field = field.chunk({"pair": 1, "y": working[0], "x": working[1]})
+        data = _kernels.deramp_poly_dask(field.data, degree, exclude=exclude)
+    else:
+        data = _kernels.deramp_planes(
+            field.data, degree=degree, method="poly", scale=None, exclude=exclude
+        )
+    return xr.DataArray(
+        data, dims=field.dims, coords=field.coords, attrs=field.attrs,
+        name=field.name,
+    )
+
+
+def _prefetch(load, items, lookahead=1):
+    """Yield ``(item, load(item))`` with ``lookahead`` loads running ahead.
+
+    A bounded sliding window, so peak memory tracks the window rather than
+    ``len(items)`` -- the point of the whole out-of-core design. The loads run on
+    their own threads, which is what lets a pair's read/multilook/filter chain
+    overlap the SNAPHU call on the pair before it.
+    """
+    lookahead = max(1, int(lookahead))
+    pool = ThreadPoolExecutor(lookahead, thread_name_prefix="unwrap-load")
+    try:
+        pending = iter(items)
+        window = deque(
+            (item, pool.submit(load, item))
+            for item in itertools.islice(pending, lookahead + 1)
+        )
+        while window:
+            item, future = window.popleft()
+            for nxt in itertools.islice(pending, 1):
+                window.append((nxt, pool.submit(load, nxt)))
+            yield item, future.result()
+    finally:
+        # A consumer that raises must not leave loader threads running.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _snaphu_error_detail(message):
+    """The lines of a SNAPHU stderr buffer that actually describe the failure."""
+    lines = [
+        line for line in str(message).splitlines()
+        if line.strip() and line.strip() not in _SNAPHU_NOISE
+    ]
+    return "\n".join(lines) or str(message).strip() or "(no message)"
+
+
+def _unwrap_pair(igram, corr, *, nlooks, ntiles, tile_overlap, nproc, pair=None,
+                 **snaphu_kwargs):
     """Unwrap one pair, keeping its invalid pixels out of the solution.
 
     SNAPHU silently substitutes zeros for NaN and returns a finite value
@@ -803,15 +1025,26 @@ def _unwrap_pair(igram, corr, *, nlooks, ntiles, tile_overlap, nproc):
         )
 
     kwargs = {} if valid.all() else {"mask": valid}
-    unw, conncomp = snaphu.unwrap(
-        igram,
-        corr,
-        nlooks=nlooks,
-        ntiles=ntiles,
-        tile_overlap=tile_overlap,
-        nproc=nproc,
-        **kwargs,
-    )
+    try:
+        unw, conncomp = snaphu.unwrap(
+            igram,
+            corr,
+            nlooks=nlooks,
+            ntiles=ntiles,
+            tile_overlap=tile_overlap,
+            nproc=nproc,
+            **snaphu_kwargs,
+            **kwargs,
+        )
+    except RuntimeError as exc:
+        (ni, nj), _ = _kernels.snaphu_tile_shape(igram.shape, ntiles, tile_overlap)
+        where = "" if pair is None else f"pair {pair}: "
+        raise RuntimeError(
+            f"{where}SNAPHU failed on a {igram.shape[0]}x{igram.shape[1]} raster "
+            f"with ntiles={tuple(ntiles)}, tile_overlap={tile_overlap} "
+            f"(tile {ni}x{nj} = {ni * nj} px), nlooks={nlooks}, nproc={nproc}:\n"
+            f"{_snaphu_error_detail(exc)}"
+        ) from exc
 
     unw = unw.astype(np.float32)
     conncomp = conncomp.astype(np.uint32)

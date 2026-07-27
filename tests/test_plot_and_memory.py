@@ -54,6 +54,7 @@ def _peak_pipeline_mb(gslc_factory, ws_dir, ndates, ny=256, nx=256):
     return peak_mb
 
 
+@pytest.mark.serial
 def test_memory_does_not_scale_with_stack_length(gslc_factory, tmp_path):
     """Out-of-core evidence: a 10x longer stack must not need ~10x the memory.
 

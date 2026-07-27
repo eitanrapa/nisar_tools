@@ -104,12 +104,18 @@ def test_multilook_dask_3d_filters_only_spatial(convolution, downsample):
         np.testing.assert_allclose(out[k], ref, rtol=1e-6, atol=1e-6)
 
 
-def test_snaphu_params_matches_legacy():
-    for shape in [(1000, 4000), (4000, 1000), (512, 512)]:
-        for nproc in [1, 4, 40]:
-            assert _kernels.snaphu_params(shape, nproc) == legacy._calculate_snaphu_params(
-                shape, nproc
-            )
+# NOTE: ``snaphu_params`` deliberately no longer matches
+# ``legacy._calculate_snaphu_params``, and the assertion that it did has been
+# retired. The legacy formula derived the tile grid from ``nproc``, which conflated
+# two unrelated things: the tiling decides where SNAPHU's 2*pi seams fall, so it is
+# part of the *answer*, while ``nproc`` is only how many tiles may be solved at
+# once. Two consequences, both bugs: the unwrapped phase changed with ``nproc``
+# (while the params hash did not, so a re-run silently reused the other tiling's
+# store), and a small ``nproc`` produced tiles large enough to trip SNAPHU's hard
+# per-tile region ceiling -- ``Number of regions in tile exceeds max allowed``.
+# The sizing rules that replaced it are pinned by ``test_snaphu_params`` in
+# tests/test_unwrap.py; the legacy function stays in the oracle for the multilook
+# tests that still use it.
 
 
 def test_snaphu_nlooks_matches_legacy():

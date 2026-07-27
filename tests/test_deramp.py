@@ -13,12 +13,157 @@ import xarray as xr
 from nisar_tools import UnwrappedStack, Workspace
 from nisar_tools._kernels import (
     deramp,
+    deramp_poly_dask,
     fit_surface,
+    halo_planes,
     mask_edges,
+    mask_edges_planes,
     poly_surface,
     remove_outliers,
+    remove_outliers_depth,
+    remove_outliers_planes,
     smooth_surface,
 )
+
+
+# -- chunk decomposition ---------------------------------------------------
+#
+# These kernels used to force chunk({"pair": 1, "y": -1, "x": -1}), so a stack ran
+# on as many cores as it had pairs -- one or two, typically -- and each task held a
+# whole plane. They now decompose spatially; these tests pin that the answer did
+# not move when they did.
+
+def _ragged_field(shape=(3, 64, 80), seed=0):
+    """A stack with a sheared invalid footprint and an interior hole."""
+    rng = np.random.default_rng(seed)
+    ny, nx = shape[-2:]
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    field = rng.normal(size=shape) + 0.01 * xx + 0.02 * yy
+    field = np.where((xx + 0.7 * yy < 8) | (xx - 0.6 * yy > nx - 10), np.nan, field)
+    field[..., ny // 2, nx // 3] = np.nan
+    return field
+
+
+@pytest.mark.parametrize("edge_pixels", [0, 1, 3, 8])
+@pytest.mark.parametrize("chunks", [(1, 16, 20), (1, 64, 80), (1, 13, 11)])
+def test_mask_edges_halo_is_exact(edge_pixels, chunks):
+    """``edge_pixels`` cross erosions reach exactly ``edge_pixels`` px, so a
+    matching halo gives the identical result, seams and all."""
+    da = pytest.importorskip("dask.array")
+    field = _ragged_field()
+    ref = mask_edges_planes(field, edge_pixels=edge_pixels)
+    got = halo_planes(
+        mask_edges, da.from_array(field, chunks=chunks),
+        depth=max(1, edge_pixels), edge_pixels=edge_pixels,
+    ).compute()
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(ref))
+    np.testing.assert_array_equal(got[np.isfinite(ref)], ref[np.isfinite(ref)])
+
+
+@pytest.mark.parametrize("scale,iterations", [(4.0, 1), (4.0, 2), (8.0, 2)])
+def test_remove_outliers_halo_is_exact(scale, iterations):
+    """scipy's Gaussian truncates at 4 sigma, so the smooth surface has *finite*
+    support and ``remove_outliers_depth`` covers it exactly -- per iteration,
+    because each pass re-smooths the previous pass's NaN pattern."""
+    da = pytest.importorskip("dask.array")
+    field = _ragged_field(shape=(2, 96, 96), seed=1) * 0.2
+    field[:, 40:44, 40:44] += 12.0  # spikes to reject
+    ref = remove_outliers_planes(
+        field, scale=scale, threshold=1.0, iterations=iterations
+    )
+    got = halo_planes(
+        remove_outliers, da.from_array(field, chunks=(1, 48, 48)),
+        depth=remove_outliers_depth(scale, iterations),
+        scale=scale, threshold=1.0, iterations=iterations,
+    ).compute()
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(ref))
+    np.testing.assert_allclose(got[np.isfinite(ref)], ref[np.isfinite(ref)])
+
+
+def test_halo_planes_falls_back_when_the_halo_exceeds_the_raster():
+    """A globally supported kernel (spline deramp at its default scale) has no
+    decomposition; it must still run, as one plane per task."""
+    da = pytest.importorskip("dask.array")
+    field = _ragged_field(shape=(2, 32, 32), seed=2)
+    ref = remove_outliers_planes(field, scale=16.0, threshold=1.0, iterations=2)
+    got = halo_planes(
+        remove_outliers, da.from_array(field, chunks=(1, 8, 8)),
+        depth=remove_outliers_depth(16.0, 2),  # 128 >> 32
+        scale=16.0, threshold=1.0, iterations=2,
+    ).compute()
+    np.testing.assert_allclose(got, ref, equal_nan=True)
+
+
+@pytest.mark.parametrize("degree", [1, 2, 3])
+@pytest.mark.parametrize("chunks", [(1, 16, 20), (1, 13, 11), (1, 64, 80)])
+@pytest.mark.parametrize("masked", [False, True])
+def test_deramp_poly_chunked_matches_whole_plane(degree, chunks, masked):
+    """The fit is a sum over pixels, so accumulating the normal equations per
+    chunk and solving once is the same fit -- to normal-equation precision."""
+    da = pytest.importorskip("dask.array")
+    field = _ragged_field(seed=3)
+    ny, nx = field.shape[-2:]
+    exclude = None
+    if masked:
+        exclude = np.zeros((ny, nx), bool)
+        exclude[ny // 2:, nx // 2:] = True
+
+    ref = np.stack([
+        deramp(plane, degree=degree, method="poly", exclude=exclude)
+        for plane in field
+    ])
+    got = deramp_poly_dask(
+        da.from_array(field, chunks=chunks), degree, exclude=exclude
+    ).compute()
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(ref))
+    finite = np.isfinite(ref)
+    np.testing.assert_allclose(got[finite], ref[finite], rtol=1e-9, atol=1e-9)
+
+
+def test_deramp_poly_chunked_handles_an_unconstrainable_plane():
+    """Fewer valid pixels than coefficients gives an all-NaN plane, matching
+    ``poly_surface``'s whole-plane guard."""
+    da = pytest.importorskip("dask.array")
+    field = np.full((1, 20, 20), np.nan)
+    field[0, 0, 0] = 1.0
+    got = deramp_poly_dask(da.from_array(field, chunks=(1, 10, 10)), 2).compute()
+    assert np.all(np.isnan(got))
+
+
+def test_cleaning_methods_do_not_collapse_spatial_chunks():
+    """The point of the exercise: a one-pair stack must expose more than one
+    runnable task per stage.
+
+    A whole-plane input is the realistic case -- a persisted stack arrives on the
+    2048-px disk chunk, and a multilooked raster is smaller than that -- so this
+    starts from one chunk and checks the stage splits it. The exact block count is
+    a function of ``os.cpu_count()``, so only "more than one" is asserted.
+    """
+    da = pytest.importorskip("dask.array")
+    ny = nx = 512
+    ds = xr.Dataset(
+        {
+            "unw": (("pair", "y", "x"),
+                    da.zeros((1, ny, nx), chunks=(1, ny, nx), dtype=np.float32)),
+            "conncomp": (("pair", "y", "x"),
+                         da.ones((1, ny, nx), chunks=(1, ny, nx), dtype=np.uint32)),
+        },
+        coords={"pair": [0], "y": np.arange(float(ny)), "x": np.arange(float(nx))},
+        attrs={"epsg": 32611},
+    )
+    stack = UnwrappedStack(ds)
+    assert stack.ds["unw"].data.numblocks[-2:] == (1, 1)  # one plane going in
+    for label, out in (
+        ("mask_edges", stack.mask_edges(edge_pixels=4)),
+        ("remove_outliers", stack.remove_outliers(scale=4.0, iterations=1)),
+        ("deramp(poly)", stack.deramp(degree=1, method="poly")),
+    ):
+        blocks = out.ds["unw"].data.numblocks[-2:]
+        assert blocks[0] * blocks[1] > 1, f"{label} stayed one block: {blocks}"
+
+    # The spline deramp is globally supported, so it stays whole-plane on purpose.
+    spline = stack.deramp(method="spline")
+    assert spline.ds["unw"].data.numblocks[-2:] == (1, 1)
 
 
 # -- kernels ---------------------------------------------------------------

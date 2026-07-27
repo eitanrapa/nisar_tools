@@ -140,52 +140,11 @@ class GSLCStack(RasterStackMixin):
         return GSLCStack(ds)
 
     def _warp_onto_grid(self, slc, src_epsg, resampling):
-        """Lazily warp a ``(time, y, x)`` DataArray onto this stack's lattice.
-
-        The target grid keeps this stack's spacing and grid phase, extended
-        to cover the source footprint, so the outer join in :meth:`merge`
-        lines the overlap up exactly instead of interleaving floating-point
-        near-duplicates. Each date is one dask task warping a whole frame,
-        so peak memory per task is one source frame plus one target frame.
-        """
-        geo.resampling_from_name(resampling)  # fail now, not at compute time
-
-        x_ref, y_ref = self.x, self.y
-        sx = slc["x"].values
-        sy = slc["y"].values
-        sdx = float(sx[1] - sx[0])
-        sdy = float(sy[1] - sy[0])
-
-        x_min, x_max, y_min, y_max = geo.transform_native_bbox(
-            min(sx[0], sx[-1]) - abs(sdx) / 2,
-            max(sx[0], sx[-1]) + abs(sdx) / 2,
-            min(sy[0], sy[-1]) - abs(sdy) / 2,
-            max(sy[0], sy[-1]) + abs(sdy) / 2,
-            src_epsg,
-            self.epsg,
+        """Lazily warp a ``(time, y, x)`` DataArray onto this stack's lattice."""
+        tx, ty = warp_target_lattice(
+            self.x, self.y, slc["x"].values, slc["y"].values, src_epsg, self.epsg
         )
-        tx = _extend_lattice(x_ref, float(x_ref[1] - x_ref[0]), x_min, x_max)
-        ty = _extend_lattice(y_ref, float(y_ref[1] - y_ref[0]), y_min, y_max)
-
-        src = slc.chunk({"time": 1, "y": -1, "x": -1}).data
-        warped = src.map_blocks(
-            _warp_block,
-            dtype=src.dtype,
-            chunks=(1, len(ty), len(tx)),
-            src_transform=geo.grid_transform(sx, sy),
-            src_epsg=src_epsg,
-            dst_transform=geo.grid_transform(tx, ty),
-            dst_epsg=self.epsg,
-            dst_shape=(len(ty), len(tx)),
-            resampling=resampling,
-        )
-        out = xr.DataArray(
-            warped,
-            dims=("time", "y", "x"),
-            coords={"time": slc["time"].values, "y": ty, "x": tx},
-            name=slc.name,
-        )
-        return out.rio.write_crs(f"EPSG:{self.epsg}")
+        return warp_onto_lattice(slc, tx, ty, src_epsg, self.epsg, resampling)
 
     def form_interferograms(
         self, pairs="sequential", looks=5, downsample=True,
@@ -379,9 +338,78 @@ def _extend_lattice(ref, spacing, lo, hi):
 
 def _warp_block(block, src_transform=None, src_epsg=None, dst_transform=None,
                 dst_epsg=None, dst_shape=None, resampling=None):
-    """``map_blocks`` kernel: warp one ``(1, ny, nx)`` date onto the target."""
+    """``map_blocks`` kernel: warp one ``(1, ny, nx)`` slice onto the target."""
     out = geo.warp_to_grid(
         block[0], src_transform, src_epsg, dst_transform, dst_epsg,
         dst_shape, resampling,
     )
     return out[None].astype(block.dtype, copy=False)
+
+
+def warp_target_lattice(x_ref, y_ref, sx, sy, src_epsg, dst_epsg):
+    """Lattice on ``x_ref``/``y_ref``'s grid, extended to cover a source footprint.
+
+    Keeping the reference spacing *and grid phase* is what lets the union in a
+    merge be reached by padding: warping onto an arbitrary grid would interleave
+    floating-point near-duplicates along the seam instead of lining the overlap up
+    exactly.
+    """
+    sdx = float(sx[1] - sx[0])
+    sdy = float(sy[1] - sy[0])
+    x_min, x_max, y_min, y_max = geo.transform_native_bbox(
+        min(sx[0], sx[-1]) - abs(sdx) / 2,
+        max(sx[0], sx[-1]) + abs(sdx) / 2,
+        min(sy[0], sy[-1]) - abs(sdy) / 2,
+        max(sy[0], sy[-1]) + abs(sdy) / 2,
+        src_epsg,
+        dst_epsg,
+    )
+    tx = _extend_lattice(x_ref, float(x_ref[1] - x_ref[0]), x_min, x_max)
+    ty = _extend_lattice(y_ref, float(y_ref[1] - y_ref[0]), y_min, y_max)
+    return tx, ty
+
+
+def warp_onto_lattice(field, tx, ty, src_epsg, dst_epsg, resampling="bilinear"):
+    """Lazily warp a ``(stack, y, x)`` DataArray onto the ``(ty, tx)`` lattice.
+
+    One slice per dask task warping a whole frame, so peak memory per task is one
+    source frame plus one target frame. The stack dimension is taken from
+    ``field.dims[0]``, so this serves a ``time`` axis and a ``pair`` axis alike.
+
+    **Integer layers are warped as float32 with nearest resampling and refilled
+    with 0.** A connected-component or subswath label must never be blended -- an
+    interpolated label is not a label -- and the reprojection's out-of-coverage
+    fill is NaN, which no integer dtype can hold. float32 represents integers
+    exactly to 2**24, far above any label these products carry. Same reasoning as
+    :func:`nisar_tools.geo.write_grd`.
+    """
+    geo.resampling_from_name(resampling)  # fail now, not at compute time
+
+    stack_dim = field.dims[0]
+    sx, sy = field["x"].values, field["y"].values
+    integer = np.issubdtype(field.dtype, np.integer)
+    work = field.astype(np.float32) if integer else field
+    if integer:
+        resampling = "nearest"
+
+    src = work.chunk({stack_dim: 1, "y": -1, "x": -1}).data
+    warped = src.map_blocks(
+        _warp_block,
+        dtype=src.dtype,
+        chunks=(1, len(ty), len(tx)),
+        src_transform=geo.grid_transform(sx, sy),
+        src_epsg=src_epsg,
+        dst_transform=geo.grid_transform(tx, ty),
+        dst_epsg=dst_epsg,
+        dst_shape=(len(ty), len(tx)),
+        resampling=resampling,
+    )
+    out = xr.DataArray(
+        warped,
+        dims=(stack_dim, "y", "x"),
+        coords={stack_dim: field[stack_dim].values, "y": ty, "x": tx},
+        name=field.name,
+    )
+    if integer:
+        out = out.fillna(0).astype(field.dtype)
+    return out.rio.write_crs(f"EPSG:{int(dst_epsg)}")

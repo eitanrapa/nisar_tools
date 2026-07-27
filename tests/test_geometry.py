@@ -6,6 +6,7 @@ cube (``gslc_factory(write_geometry=True)``).
 """
 
 import numpy as np
+import pyproj
 import pytest
 import xarray as xr
 
@@ -45,6 +46,50 @@ def _cube(inc_func, nx=6, ny=5, heights=(-500.0, 0.0, 500.0, 1000.0),
 
 
 # -- sample_look_geometry ----------------------------------------------------
+@pytest.mark.parametrize("workers", [1, 2, 4, 10])
+def test_banded_sampling_is_bit_identical(workers):
+    """The sampling is pointwise in (x, y, height), so splitting it into row
+    bands across threads cannot move a single value. Guards the banding that
+    replaced the whole-grid version (202 -> 71 bytes/pixel of peak)."""
+    cube = _cube(lambda h, x: 32.0 + 0.002 * (x - 4e5) + 0.005 * h, nx=8, ny=7)
+    ox = np.linspace(4e5 + 300, 4e5 + 6500, 37)
+    oy = np.linspace(4e6 - 5500, 4e6 - 300, 29)
+    rng = np.random.default_rng(0)
+    height = rng.uniform(-400.0, 900.0, (len(oy), len(ox)))
+
+    ref = G.sample_look_geometry(cube, ox, oy, 32611, height=height, workers=1)
+    got = G.sample_look_geometry(cube, ox, oy, 32611, height=height,
+                                 workers=workers)
+    assert set(got.data_vars) == set(ref.data_vars)
+    for var in ref.data_vars:
+        np.testing.assert_array_equal(
+            got[var].values, ref[var].values,
+            err_msg=f"{var} moved at workers={workers}",
+        )
+
+
+def test_banded_sampling_is_bit_identical_across_epsg():
+    """The cross-EPSG path transforms each band's grid with pyproj, so it needs
+    its own check -- a same-EPSG call skips the transformer entirely."""
+    # Cube in zone 11, target grid declared in zone 12: the transformer runs.
+    cube = _cube(lambda h, x: 32.0 + 0.002 * (x - 4e5), nx=40, ny=35, step=5000.0)
+    # Derive the target grid by mapping the cube's own extent into zone 12, so it
+    # is guaranteed to land inside the cube rather than on hand-picked numbers.
+    to_12 = pyproj.Transformer.from_crs("EPSG:32611", "EPSG:32612", always_xy=True)
+    cx, cy = cube["x"].values, cube["y"].values
+    (x0, y0), (x1, y1) = (
+        to_12.transform(cx[2], cy[2]), to_12.transform(cx[-3], cy[-3])
+    )
+    ox = np.linspace(min(x0, x1), max(x0, x1), 31)
+    oy = np.linspace(max(y0, y1), min(y0, y1), 23)
+    ref = G.sample_look_geometry(cube, ox, oy, 32612, workers=1)
+    got = G.sample_look_geometry(cube, ox, oy, 32612, workers=8)
+    # Not vacuous: the transformed grid has to land inside the cube.
+    assert np.isfinite(ref["incidence_angle"].values).any()
+    for var in ref.data_vars:
+        np.testing.assert_array_equal(got[var].values, ref[var].values)
+
+
 def test_interpolates_linear_in_x_exactly():
     # Incidence linear in x, height/y-independent -> linear interp is exact.
     x0, step = 4e5, 1000.0

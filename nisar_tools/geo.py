@@ -97,10 +97,13 @@ def warp_to_grid(arr, src_transform, src_epsg, dst_transform, dst_epsg,
     """
     resampling = resampling_from_name(resampling)
 
-    def _warp_band(band):
-        dst = np.full(dst_shape, np.nan, dtype=np.float32)
+    def _warp(src):
+        """Warp one band, or several stacked on a leading axis, in one call."""
+        src = np.ascontiguousarray(src, dtype=np.float32)
+        shape = dst_shape if src.ndim == 2 else (src.shape[0],) + tuple(dst_shape)
+        dst = np.full(shape, np.nan, dtype=np.float32)
         reproject(
-            np.ascontiguousarray(band, dtype=np.float32),
+            src,
             dst,
             src_transform=src_transform,
             src_crs=f"EPSG:{src_epsg}",
@@ -113,10 +116,12 @@ def warp_to_grid(arr, src_transform, src_epsg, dst_transform, dst_epsg,
         return dst
 
     if np.iscomplexobj(arr):
-        return (_warp_band(arr.real) + 1j * _warp_band(arr.imag)).astype(
-            np.complex64
-        )
-    return _warp_band(arr)
+        # rasterio warps a multi-band array in a single call, so the real and
+        # imaginary parts share one coordinate-transform setup instead of paying
+        # for it twice.
+        bands = _warp(np.stack([arr.real, arr.imag]))
+        return (bands[0] + 1j * bands[1]).astype(np.complex64)
+    return _warp(arr)
 
 
 def project_to_latlon(data, x_coords=None, y_coords=None, epsg_code=None):

@@ -1,12 +1,15 @@
 """Tests for SNAPHU unwrapping, region writes, and per-pair resume."""
 
+import warnings
+
 import numpy as np
 import pytest
 import xarray as xr
 
 from nisar_tools import GSLC, GSLCStack, Workspace
+from nisar_tools import _kernels
 from nisar_tools.interferogram import InterferogramStack
-from nisar_tools.unwrap import UnwrappedStack
+from nisar_tools.unwrap import UnwrappedStack, _snaphu_error_detail
 
 
 def _igram_stack(gslc_factory, ws_dir, ndates=3, ny=80, nx=80):
@@ -97,6 +100,247 @@ def test_unwrap_resumes_after_interruption(gslc_factory, tmp_path, monkeypatch):
     assert ws.pairs_done("unwrapped") == set(range(npair))
     # Deterministic: the recomputed result matches the original.
     np.testing.assert_array_equal(unw2.ds["unw"].compute().values, first.values)
+
+
+# -- pair-level concurrency -------------------------------------------------
+
+def test_unwrap_concurrent_pairs_match_the_serial_result(gslc_factory, tmp_path):
+    """Pairs are independent, and each writes a Zarr region 1 deep along `pair`,
+    so running them concurrently must be bit-identical to the serial loop."""
+    igrams = _igram_stack(gslc_factory, tmp_path / "ws0")
+    igrams = igrams.persist(Workspace(tmp_path / "ws0"), "igrams")
+    npair = igrams.sizes["pair"]
+    assert npair >= 3
+
+    serial = igrams.unwrap(Workspace(tmp_path / "serial"), nproc=1)
+    concurrent = igrams.unwrap(
+        Workspace(tmp_path / "concurrent"), nproc=4, pairs_in_flight=3
+    )
+
+    for var in ("unw", "conncomp", "coherence"):
+        np.testing.assert_array_equal(
+            concurrent.ds[var].values, serial.ds[var].values
+        )
+    # Every marker survived the concurrent read-modify-write.
+    assert Workspace(tmp_path / "concurrent").pairs_done("unwrapped") == set(
+        range(npair)
+    )
+
+
+def test_unwrap_prefetches_the_next_pair(gslc_factory, tmp_path, monkeypatch):
+    """At pairs_in_flight=1 the loads still overlap: pair i+1 must already be
+    read by the time SNAPHU is asked for pair i+1."""
+    import snaphu
+
+    igrams = _igram_stack(gslc_factory, tmp_path / "ws0")
+    igrams = igrams.persist(Workspace(tmp_path / "ws0"), "igrams")
+    ws = Workspace(tmp_path / "ws1")
+
+    events = []
+    real_unwrap = snaphu.unwrap
+
+    def tracking_unwrap(*args, **kwargs):
+        events.append("unwrap")
+        return real_unwrap(*args, **kwargs)
+
+    monkeypatch.setattr("nisar_tools.unwrap.snaphu.unwrap", tracking_unwrap)
+
+    real_isel = xr.DataArray.isel
+
+    def tracking_isel(self, *args, **kwargs):
+        if self.name == "igram":
+            events.append("load")
+        return real_isel(self, *args, **kwargs)
+
+    monkeypatch.setattr(xr.DataArray, "isel", tracking_isel)
+    igrams.unwrap(ws, nproc=1)
+    monkeypatch.undo()
+
+    # A strictly serial loop gives load,unwrap,load,unwrap,...; prefetching means
+    # at least one load lands before the preceding unwrap has been requested.
+    assert events.count("unwrap") == igrams.sizes["pair"]
+    assert events[:2] == ["load", "load"]
+
+
+def test_prefetch_bounds_its_window():
+    """The lookahead is what keeps peak memory off the stack length."""
+    from nisar_tools.unwrap import _prefetch
+
+    started, live, peak = [], 0, 0
+    import threading
+
+    lock = threading.Lock()
+
+    def load(i):
+        nonlocal live, peak
+        with lock:
+            started.append(i)
+            live += 1
+            peak = max(peak, live)
+        try:
+            return i * 10
+        finally:
+            with lock:
+                live -= 1
+
+    got = list(_prefetch(load, range(20), lookahead=2))
+    assert [item for item, _ in got] == list(range(20))
+    assert [value for _, value in got] == [i * 10 for i in range(20)]
+    # Never more than lookahead + 1 loads outstanding at once.
+    assert peak <= 3
+    assert sorted(started) == list(range(20))
+
+
+def test_mark_pair_done_is_thread_safe(tmp_path):
+    """An unsynchronised read-modify-write loses markers, and with them the
+    per-pair resume."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    ws = Workspace(tmp_path / "ws")
+    ws._done_path("stage").write_text('{"pairs_done": []}')
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda i: ws.mark_pair_done("stage", i), range(200)))
+    assert ws.pairs_done("stage") == set(range(200))
+
+
+# -- SNAPHU tile sizing -----------------------------------------------------
+#
+# The rules these pin (see nisar_tools/_kernels.py):
+#   * tile geometry depends on the raster, never on nproc;
+#   * every tiling SNAPHU is handed satisfies its own CheckParams preconditions
+#     AND stays under the per-tile region ceiling that made unwrap abort with
+#     "Number of regions in tile exceeds max allowed" at small nproc.
+
+SHAPES = [
+    (11, 11), (64, 64), (300, 900), (522, 474), (903, 1112), (2000, 3000),
+    (4000, 4000), (12000, 3000), (3000, 12000), (10000, 400), (2500, 40),
+    (40000, 40000),
+]
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_snaphu_params_is_always_legal(shape):
+    """Whatever nproc asks for, SNAPHU can actually run it."""
+    for nproc in (1, 2, 3, 4, 8, 10, 20, 40, 64):
+        ntiles, overlap = _kernels.snaphu_params(shape, nproc)
+        # Raises if SNAPHU would reject the tiling or choke on the tile size.
+        _kernels.snaphu_params_check(shape, ntiles, overlap)
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_snaphu_params_is_independent_of_nproc(shape):
+    """Tiling is part of the answer, so nproc must not move it.
+
+    The old formula derived ntiles from nproc, which silently changed the
+    unwrapped phase between runs while leaving the params hash untouched.
+    """
+    geometries = {_kernels.snaphu_params(shape, n) for n in range(1, 65)}
+    assert len(geometries) == 1
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_snaphu_params_respects_the_tile_budget(shape):
+    """The budget is measured on SNAPHU's own tile size, overlap included."""
+    ntiles, overlap = _kernels.snaphu_params(shape)
+    (ni, nj), _ = _kernels.snaphu_tile_shape(shape, ntiles, overlap)
+    if ntiles != (1, 1):
+        assert ni * nj <= _kernels.DEFAULT_MAX_TILE_PIXELS
+    else:
+        # A single tile has no region ceiling, and snaphu ignores the overlap --
+        # so it is set to 0 to keep the "disregarding" line off stderr.
+        assert overlap == 0
+
+
+def test_snaphu_params_check_warns_about_the_region_ceiling():
+    """The exact configuration that used to abort inside SNAPHU.
+
+    A warning, not an error: the ceiling is on the region *count*, and
+    ``tile_area / min_region_size`` is only the worst case -- a 600x332 tile with a
+    32000 budget was measured forming 6566 regions and unwrapping fine. Refusing
+    outright would block a coarse tiling that would have worked.
+    """
+    # 4000x4000 at the old nproc=2 mapping: one 4000x2128 tile, 8.5 M pixels.
+    with pytest.warns(RuntimeWarning, match="Number of regions in tile exceeds"):
+        _kernels.snaphu_params_check((4000, 4000), (1, 2), 256)
+    # A finer grid on the same raster is silent.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _kernels.snaphu_params_check((4000, 4000), (4, 4), 250)
+
+
+def test_snaphu_params_check_reports_checkparams_conditions():
+    # ntilerow^2 > nlines
+    with pytest.raises(ValueError, match=r"ntilerow\^2"):
+        _kernels.snaphu_params_check((100, 4000), (11, 2), 4)
+    # ntilecol + colovrlp > linelen -- the hole the old max(10, ...) floor left.
+    with pytest.raises(ValueError, match="ntilecol \\+ colovrlp"):
+        _kernels.snaphu_params_check((400, 11), (2, 2), 10)
+    # A single tile is exempt: snaphu ignores the tiling entirely.
+    _kernels.snaphu_params_check((11, 11), (1, 1), 10)
+
+
+def test_snaphu_params_honours_explicit_overrides():
+    assert _kernels.snaphu_params((4000, 4000), 8, ntiles=(3, 3))[0] == (3, 3)
+    assert _kernels.snaphu_params((4000, 4000), 8, tile_overlap=400)[1] == 400
+    # A tighter budget buys more tiles.
+    coarse, _ = _kernels.snaphu_params((4000, 4000), max_tile_pixels=8_000_000)
+    fine, _ = _kernels.snaphu_params((4000, 4000), max_tile_pixels=250_000)
+    assert fine[0] * fine[1] > coarse[0] * coarse[1]
+
+
+def test_snaphu_error_detail_strips_the_constant_overlap_warning():
+    """SNAPHU writes warnings and errors to the same stream, and snaphu-py
+    re-raises the whole buffer -- so the overlap warning always led the message
+    and made every failure look like an overlap problem."""
+    stderr = (
+        "WARNING: Tile overlap is small (may give bad results)\n"
+        "Number of regions in tile exceeds max allowed\n"
+        "Abort\n"
+    )
+    detail = _snaphu_error_detail(stderr)
+    assert "Tile overlap is small" not in detail
+    assert detail.startswith("Number of regions in tile exceeds max allowed")
+    # A message that is *only* noise still says something.
+    assert _snaphu_error_detail(
+        "WARNING: Tile overlap is small (may give bad results)"
+    )
+
+
+def test_unwrap_tiling_is_in_the_params_hash_but_nproc_is_not(
+    gslc_factory, tmp_path
+):
+    igrams = _igram_stack(gslc_factory, tmp_path / "ws0")
+    igrams = igrams.persist(Workspace(tmp_path / "ws0"), "igrams")
+    ws = Workspace(tmp_path / "ws1")
+
+    igrams.unwrap(ws, name="a", nproc=1)
+    base = ws.stored_params_hash("a")
+
+    # nproc no longer changes the result, so it must not invalidate the store.
+    igrams.unwrap(ws, name="a", nproc=4)
+    assert ws.stored_params_hash("a") == base
+
+    # Tiling does change the result, so it must. (The test raster is 16x16, so
+    # (2, 1) is the finest grid whose last tile still clears min_region_size.)
+    igrams.unwrap(ws, name="b", nproc=1, ntiles=(2, 1))
+    assert ws.stored_params_hash("b") != base
+
+
+def test_unwrap_rejects_an_illegal_tiling_before_calling_snaphu(
+    gslc_factory, tmp_path, monkeypatch
+):
+    import snaphu
+
+    igrams = _igram_stack(gslc_factory, tmp_path / "ws0")
+    igrams = igrams.persist(Workspace(tmp_path / "ws0"), "igrams")
+    ws = Workspace(tmp_path / "ws1")
+
+    def fail(*args, **kwargs):
+        raise AssertionError("snaphu.unwrap should not have been reached")
+
+    monkeypatch.setattr("nisar_tools.unwrap.snaphu.unwrap", fail)
+    with pytest.raises(ValueError, match="SNAPHU tiling is invalid"):
+        igrams.unwrap(ws, nproc=1, ntiles=(40, 40))
 
 
 # -- 2*pi ambiguity ---------------------------------------------------------

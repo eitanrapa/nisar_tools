@@ -13,7 +13,12 @@ import rioxarray  # noqa: F401
 import xarray as xr
 
 from . import _kernels
-from ._base import RasterStackMixin, open_stage, wrapped_phase
+from ._base import (
+    RasterStackMixin,
+    compute_chunks,
+    open_stage,
+    wrapped_phase,
+)
 
 
 def make_pairs(spec, n):
@@ -158,7 +163,8 @@ class InterferogramStack(RasterStackMixin):
         ds.attrs["water_mask"] = {"resolution": resolution, "spacing": spacing}
         return InterferogramStack(ds)
 
-    def filter_goldstein(self, alpha=0.5, patch_size=32, overlap=0.75, psd_smooth=3):
+    def filter_goldstein(self, alpha=0.5, patch_size=32, overlap=0.75, psd_smooth=3,
+                         target_blocks=None):
         """Goldstein-Werner phase-filter every pair's igram. Returns a new stack.
 
         A lazy, per-pair adaptive spectral filter applied after multilooking and
@@ -173,43 +179,53 @@ class InterferogramStack(RasterStackMixin):
         with ``-amp1/-amp2``. The adaptive mode reads this stack's ``coherence``.
 
         Only ``igram`` is filtered; ``coherence`` (a separate quality measure) is
-        left untouched. The filter is a whole-plane FFT operation, so each pair's
-        spatial plane is processed as a single chunk -- the same one-pair-in-memory
-        footprint the unwrap stage already assumes.
+        left untouched. The filter's support is one ``patch_size``, so it runs chunk
+        by chunk with a matching halo rather than a whole plane at a time -- the
+        patch lattice stays global, so the result is identical either way (see
+        :func:`nisar_tools._kernels.goldstein_filter_dask`).
         """
         adaptive = isinstance(alpha, str)
-        chunks = {"pair": 1, "y": -1, "x": -1}
-        igram = self.ds["igram"].chunk(chunks)
+        igram = self.ds["igram"]
         kwargs = dict(
             patch_size=int(patch_size), overlap=float(overlap),
             psd_smooth=int(psd_smooth),
         )
 
+        # A persisted interferogram arrives on the 2048-px *disk* chunk, and a
+        # multilooked one is usually smaller than that in both directions -- so it
+        # is one spatial chunk and there is nothing to spread over the cores.
+        # Rechunk to a working size first; the halo is one patch_size.
+        if _kernels._is_dask(igram.data):
+            working = compute_chunks(
+                igram.sizes["y"], igram.sizes["x"], patch_size, target_blocks
+            )
+            if working is not None:
+                igram = igram.chunk(
+                    {"pair": 1, "y": working[0], "x": working[1]}
+                )
+
         if adaptive:
-            # Pass coherence as a second core-dims input so it is blocked
-            # per-pair alongside the igram.
-            coherence = self.ds["coherence"].chunk(chunks)
-            filtered = xr.apply_ufunc(
-                _kernels.goldstein_filter_planes,
-                igram, coherence,
-                kwargs=dict(alpha=alpha, **kwargs),
-                input_core_dims=[["y", "x"], ["y", "x"]],
-                output_core_dims=[["y", "x"]],
-                dask="parallelized",
-                output_dtypes=[igram.dtype],
+            # Overlapped alongside the igram, so each block filters against the
+            # coherence of the same window.
+            coherence = self.ds["coherence"]
+            if _kernels._is_dask(igram.data):
+                coherence = coherence.chunk(
+                    dict(zip(igram.dims, igram.chunks))
+                )
+            data = _kernels.goldstein_filter_dask(
+                igram.data, coherence.data, alpha=alpha, **kwargs
             )
             alpha_attr = alpha
         else:
-            filtered = xr.apply_ufunc(
-                _kernels.goldstein_filter_planes,
-                igram,
-                kwargs=dict(alpha=float(alpha), **kwargs),
-                input_core_dims=[["y", "x"]],
-                output_core_dims=[["y", "x"]],
-                dask="parallelized",
-                output_dtypes=[igram.dtype],
+            data = _kernels.goldstein_filter_dask(
+                igram.data, alpha=float(alpha), **kwargs
             )
             alpha_attr = float(alpha)
+
+        filtered = xr.DataArray(
+            data, dims=igram.dims, coords=igram.coords, attrs=igram.attrs,
+            name=igram.name,
+        )
 
         ds = self.ds.copy()
         ds["igram"] = filtered
@@ -223,8 +239,12 @@ class InterferogramStack(RasterStackMixin):
         return InterferogramStack(ds)
 
     def unwrap(self, workspace, name="unwrapped", nproc=1, res_az=8, res_rg=3,
-               overwrite=False):
-        """Unwrap every pair with SNAPHU. See :class:`UnwrappedStack`."""
+               overwrite=False, **kwargs):
+        """Unwrap every pair with SNAPHU. See
+        :meth:`~nisar_tools.unwrap.UnwrappedStack.from_interferograms` for the
+        tiling (``ntiles``, ``tile_overlap``, ``max_tile_pixels``) and concurrency
+        (``nproc``, ``pairs_in_flight``) knobs.
+        """
         from .unwrap import UnwrappedStack
 
         return UnwrappedStack.from_interferograms(
@@ -235,6 +255,7 @@ class InterferogramStack(RasterStackMixin):
             res_az=res_az,
             res_rg=res_rg,
             overwrite=overwrite,
+            **kwargs,
         )
 
     # -- persistence -------------------------------------------------------

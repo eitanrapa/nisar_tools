@@ -1,12 +1,39 @@
 """Shared base for stack-like objects wrapping a lazy xarray Dataset."""
 
+import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
 
-# On-disk / in-memory spatial chunk size (complex64 2048^2 ~= 32 MB).
+# On-disk spatial chunk size (complex64 2048^2 ~= 32 MB).
 SPATIAL_CHUNK = 2048
+
+
+def compute_chunks(ny, nx, halo, target_blocks=None):
+    """Spatial chunk size for a halo-decomposed compute stage.
+
+    The *disk* chunk (:data:`SPATIAL_CHUNK`) is about write efficiency, and a
+    persisted stage arrives chunked that way -- so a multilooked interferogram,
+    typically well under 2048 px on a side, comes back as a **single** spatial
+    chunk and a halo-decomposed kernel has nothing to spread across cores.
+
+    This picks a working chunk that splits the raster into roughly
+    ``target_blocks`` pieces (default two per core, enough to balance without
+    over-fragmenting), floored at ``4 * halo`` so the overlap stays a minority of
+    each block's work. Returns ``None`` when the raster is too small to be worth
+    splitting, meaning "leave the chunking alone".
+    """
+    if target_blocks is None:
+        target_blocks = 2 * (os.cpu_count() or 1)
+    floor = max(1, 4 * int(halo))
+    side = math.isqrt(max(1, (int(ny) * int(nx)) // max(1, target_blocks)))
+    side = max(floor, side)
+    if side >= max(ny, nx):
+        return None  # one block either way
+    return (min(int(ny), side), min(int(nx), side))
 
 
 def wrapped_phase(da):
@@ -93,7 +120,7 @@ class RasterStackMixin:
         return {stack_dim: 1, "y": SPATIAL_CHUNK, "x": SPATIAL_CHUNK}
 
     # -- export ------------------------------------------------------------
-    def to_grd(self, outdir, fields=None, indices=None):
+    def to_grd(self, outdir, fields=None, indices=None, workers=None):
         """Export this stack's fields to GMT-readable ``.grd`` grids.
 
         Each field is reprojected to lon/lat and written as a single-variable
@@ -108,18 +135,35 @@ class RasterStackMixin:
         per stage (see each class's :meth:`_grd_specs`), and passing an unknown
         name raises with the available menu. ``indices`` selects which slices
         along the stack dimension to write for the stacked fields (default:
-        all). ``outdir`` is created if needed. Returns the written paths.
+        all). ``outdir`` is created if needed. Returns the written paths, in
+        field order.
+
+        Each layer is an independent reproject-and-write, so they run on a small
+        thread pool -- rasterio's warp releases the GIL (see
+        :mod:`nisar_tools.geo`), and one layer per core beats one at a time once a
+        stack has several pairs. ``workers=1`` restores the serial path.
         """
         from . import geo  # local: geo pulls in rioxarray (registers .rio)
 
         outdir = Path(outdir)
         outdir.mkdir(parents=True, exist_ok=True)
-        written = []
+
+        layers = []
         for stem, da in self._grd_layers(fields, indices):
             if da.rio.crs is None:  # derived amp/phase can drop the CRS coord
                 da = da.rio.write_crs(f"EPSG:{self.epsg}")
-            written.append(geo.write_grd(da, outdir / f"{stem}.grd"))
-        return written
+            layers.append((stem, da))
+
+        def _write(layer):
+            stem, field = layer
+            return geo.write_grd(field, outdir / f"{stem}.grd")
+
+        if workers is None:
+            workers = min(len(layers), os.cpu_count() or 1)
+        if workers <= 1 or len(layers) <= 1:
+            return [_write(layer) for layer in layers]
+        with ThreadPoolExecutor(workers, thread_name_prefix="to_grd") as pool:
+            return list(pool.map(_write, layers))
 
     def _grd_layers(self, fields, indices):
         """Yield ``(filename_stem, 2-D DataArray)`` for each field to export."""
