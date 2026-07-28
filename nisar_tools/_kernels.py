@@ -327,6 +327,36 @@ def downsampled_coords(coords, looks, max_n):
     return coords[:max_n].reshape(-1, looks).mean(axis=1)
 
 
+def lattice_lead(coords, looks):
+    """Leading samples to drop so multilook blocks land on the absolute lattice.
+
+    Multilooking block-means ``looks`` consecutive samples starting at index 0
+    of whatever array it is handed, so the *phase* of the multilooked grid is
+    set by where the crop began. Two frames of one track cropped to different
+    extents then come out on lattices offset by a fraction of a multilooked
+    pixel -- which is not a lattice they share, so :meth:`UnwrappedStack.merge`
+    can no longer reach their union by padding.
+
+    Anchoring removes that dependence: ``coords[0] / d`` is this crop's position
+    on the absolute native lattice, so dropping ``s = -coords[0]/d (mod looks)``
+    samples makes every block boundary a whole multiple of ``looks`` native
+    samples from the lattice origin. Every frame on one native lattice then
+    multilooks onto the same grid, whatever it was cropped to, and merges need
+    no resampling at all.
+
+    Rounded with ``floor(v + 0.5)``, not :func:`round`: NISAR grids put pixel
+    *centres* on half-integer multiples of the spacing, so ``v`` lands exactly
+    on a tie and :func:`round`'s round-half-to-even would break it *upwards or
+    downwards depending on the crop*, reintroducing the very offset this removes.
+
+    Costs at most ``looks - 1`` samples off the near edge of each axis.
+    """
+    if len(coords) < 2:  # no spacing to read; nothing to anchor to
+        return 0
+    d = float(coords[1] - coords[0])
+    return int(np.floor(-float(coords[0]) / d + 0.5)) % int(looks)
+
+
 def _patch_origins(n, ps, step):
     """Start indices of length-``ps`` patches tiling ``[0, n)`` with stride ``step``.
 

@@ -266,6 +266,47 @@ def test_merge_across_epsg(gslc_factory):
     g2.close()
 
 
+def test_multilook_grid_is_lattice_anchored(gslc_factory):
+    """The multilooked grid must depend on the native lattice and ``looks``
+    only -- never on where the crop that fed it began.
+
+    Multilooking block-means from index 0 of whatever array it is given, so
+    without anchoring, two frames of one track cropped to different extents come
+    out a fraction of a multilooked pixel apart and no longer share a lattice.
+    That is what made `UnwrappedStack.merge` refuse them downstream.
+    """
+    looks = 10
+    grid = dict(ny=64, nx=64, x0=400000.0, y0=4_000_000.0, dx=10.0, dy=10.0)
+    g1 = GSLC(gslc_factory(seed=1, **grid))
+    g2 = GSLC(gslc_factory(
+        seed=2, datetime_str="2025-12-10T02:32:50.000000000", **grid))
+    full = GSLCStack.from_gslcs([g1, g2])
+
+    grids = {}
+    for lead in (0, 3, 7):
+        for align in (True, False):
+            sub = GSLCStack(full.ds.isel(x=slice(lead, None), y=slice(lead, None)))
+            ig = sub.form_interferograms(looks=looks, align_looks=align)
+            grids[(lead, align)] = (ig.x, ig.y)
+
+    ref_x, ref_y = grids[(0, True)]
+    for lead in (3, 7):
+        # Anchored: every crop lands on the same lattice -- the coordinates that
+        # survive the trim are identical values, not merely evenly spaced.
+        ax, ay = grids[(lead, True)]
+        assert np.all(np.isin(np.round(ax, 6), np.round(ref_x, 6)))
+        assert np.all(np.isin(np.round(ay, 6), np.round(ref_y, 6)))
+
+        # Unanchored: offset by exactly lead/looks of a multilooked pixel --
+        # which at looks=10 is the 0.3 px that made merge refuse the real frames.
+        ux, _ = grids[(lead, False)]
+        off = (float(ux[0]) - float(ref_x[0])) / (10.0 * looks) % 1.0
+        assert np.isclose(off, lead / looks, atol=1e-9)
+
+    g1.close()
+    g2.close()
+
+
 def test_merge_rejects_offset_lattice(gslc_factory):
     # Same CRS but grids offset by half a pixel: an outer join would silently
     # interleave near-duplicate coordinates, so merge must refuse.

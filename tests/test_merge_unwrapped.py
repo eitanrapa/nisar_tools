@@ -271,11 +271,170 @@ def test_cross_zone_merge_then_to_los(gslc_factory):
     assert np.isfinite(inc)[only_b].mean() > 0.5
 
 
+def test_different_dates_merge_then_to_los(gslc_factory):
+    """The route to a continuous LOS map from two independent interferograms:
+    mosaic at the unwrapped stage, then `to_los` with one granule per frame.
+
+    There is deliberately no `LOSStack.merge` -- this is the same stitch one stage
+    earlier, and for a slip inversion the scenes should stay apart anyway (each
+    needs its own offset/ramp columns, which `Observations.concat` preserves)."""
+    from nisar_tools import GSLC
+
+    kw = dict(ny=64, nx=64, dx=100.0, dy=100.0, epsg=ZONE_A, write_geometry=True)
+    pa = gslc_factory(x0=700_000.0, y0=3_900_000.0, **kw)
+    pb = gslc_factory(x0=700_000.0, y0=3_896_000.0, **kw)   # 40 rows south
+
+    def _from_granule(path, cc):
+        g = GSLC(path)
+        x, y, epsg = g.x_coords, g.y_coords, g.epsg
+        g.close()
+        xx, yy = np.meshgrid(x, y)
+        return _stack(_ground_phase(xx, yy).astype(np.float32), x, y, epsg, cc)
+
+    a = _from_granule(pa, cc=1)
+    b = _dates(_from_granule(pb, cc=5),
+               np.datetime64("2025-12-22T02:32:16"),
+               np.datetime64("2026-01-03T02:32:16"))
+
+    with pytest.warns(RuntimeWarning, match="different intervals"):
+        merged = a.merge(b, time_tolerance=None)
+
+    los = merged.to_los([str(pa), str(pb)], dem=None)
+    inc = np.deg2rad(los.ds["incidence_angle"].values)
+    up = los.ds["los_up"].values
+    ok = np.isfinite(inc) & np.isfinite(up)
+    assert ok.mean() > 0.5
+    np.testing.assert_allclose(up[ok], np.cos(inc[ok]), rtol=1e-3, atol=1e-3)
+
+    # The second frame's own cube covered the rows only it supplies.
+    only_b = ~np.isin(merged.y, a.y)
+    assert only_b.sum() > 5
+    assert np.isfinite(inc)[only_b].mean() > 0.5
+
+
 def test_same_zone_merge_records_no_resampling():
     """A same-zone merge runs no warp, so its provenance -- and therefore its
     persist hash -- is unchanged from before cross-zone support existed."""
     m = _frame().merge(_frame(row_shift=4, cycle_offset=3))
     assert "resampling" not in m.ds.attrs["merged"][-1]
+
+
+def test_merge_resamples_an_off_lattice_frame_instead_of_refusing():
+    """Two frames in one CRS whose grids are offset by a fraction of a pixel.
+
+    That is what an interferogram multilooked without ``align_looks`` looks like:
+    it anchored its grid phase to its own crop origin, so two frames of one track
+    can land a sub-pixel amount apart. Merge warns and resamples rather than
+    refusing, since resampling smooth unwrapped phase is harmless.
+    """
+    a = _frame(ny=16, nx=12)
+    # Shift other's whole grid by 0.3 px in both axes -- no shared lattice.
+    b = _frame(ny=16, nx=12, row_shift=8, cycle_offset=3)
+    b.ds = b.ds.assign_coords(x=b.ds["x"].values + 3.0, y=b.ds["y"].values - 3.0)
+
+    with pytest.warns(RuntimeWarning, match="sub-pixel"):
+        m = a.merge(b)
+
+    # Self's lattice is what survives, and the warp is recorded in provenance.
+    assert set(np.round(m.x, 6)) >= set(np.round(a.x, 6))
+    np.testing.assert_allclose(np.diff(m.x), 10.0)
+    assert m.ds.attrs["merged"][-1]["resampling"] == "bilinear"
+
+    # The 2*pi step is still removed: the merged field is one continuous phi,
+    # read on self's grid, with no cycle jump across the seam.
+    got = m.ds["unw"].isel(pair=0).values
+    ok = np.isfinite(got)
+    np.testing.assert_allclose(got[ok], _phi(m.y, m.x)[ok], atol=0.2)
+    steps = np.abs(np.diff(got, axis=0))
+    assert np.nanmax(steps[np.isfinite(steps)]) < 1.0
+
+
+def _dates(stack, ref, sec):
+    """Relabel a frame's acquisition dates -- a different interferogram."""
+    stack.ds = stack.ds.assign_coords(
+        ref_time=("pair", np.array([ref])), sec_time=("pair", np.array([sec]))
+    )
+    return stack
+
+
+def test_merge_by_time_names_the_escape_hatch():
+    """Different dates is the common reason a merge is refused, so the message
+    has to say how to proceed rather than just what went wrong."""
+    a = _frame()
+    b = _dates(_frame(row_shift=4),
+               np.datetime64("2025-12-22T02:32:16"),
+               np.datetime64("2026-01-03T02:32:16"))
+    with pytest.raises(ValueError, match="time_tolerance=None"):
+        a.merge(b)
+
+
+def test_merge_different_dates_ties_by_real_offset():
+    """Two independent interferograms mosaicked into one field.
+
+    Their overlap difference is *not* an integer number of cycles -- they measure
+    different intervals -- so rounding it to one would leave a residual step of up
+    to pi. ``tie="auto"`` picks the real-valued median instead.
+    """
+    a = _frame(ny=16, nx=12)
+    # Same ground phase, different dates, plus a non-integer-cycle datum shift.
+    step = 2.5 * TWO_PI + 1.4
+    b = _dates(_frame(ny=16, nx=12, row_shift=8),
+               np.datetime64("2025-12-22T02:32:16"),
+               np.datetime64("2026-01-03T02:32:16"))
+    b.ds["unw"] = b.ds["unw"] - step
+
+    with pytest.warns(RuntimeWarning, match="different intervals"):
+        m = a.merge(b, time_tolerance=None)
+
+    got = m.ds["unw"].isel(pair=0).values
+    # The datum shift is removed in full, not rounded to the nearest cycle.
+    np.testing.assert_allclose(got, _phi(m.y, m.x), atol=1e-3)
+    assert np.nanmax(np.abs(np.diff(got, axis=0))) < 1.0
+
+    rec = m.ds.attrs["merged"][-1]
+    assert rec["tie"] == "offset"
+    assert rec["other_ref_time"][0].startswith("2025-12-22T02:32:16")
+
+
+def test_merge_different_dates_can_still_force_whole_cycles():
+    """``tie="cycles"`` stays available for a mosaic known to differ by an
+    integer ambiguity only -- and then it must round, leaving the sub-cycle
+    part of a deliberately non-integer shift behind."""
+    a = _frame(ny=16, nx=12)
+    b = _dates(_frame(ny=16, nx=12, row_shift=8),
+               np.datetime64("2025-12-22T02:32:16"),
+               np.datetime64("2026-01-03T02:32:16"))
+    b.ds["unw"] = b.ds["unw"] - (2.0 * TWO_PI + 1.4)
+
+    with pytest.warns(RuntimeWarning):
+        m = a.merge(b, time_tolerance=None, tie="cycles")
+
+    resid = m.ds["unw"].isel(pair=0).values - _phi(m.y, m.x)
+    south = resid[a.sizes["y"]:]          # rows only the other frame supplies
+    np.testing.assert_allclose(south, -1.4, atol=1e-3)
+
+
+def test_merge_tie_none_leaves_the_step_in_place():
+    a = _frame(ny=16, nx=12)
+    b = _frame(ny=16, nx=12, row_shift=8, cycle_offset=3)
+    m = a.merge(b, tie="none")
+    resid = m.ds["unw"].isel(pair=0).values - _phi(m.y, m.x)
+    np.testing.assert_allclose(resid[a.sizes["y"]:], 3 * TWO_PI, atol=1e-3)
+    assert m.ds.attrs["merged"][-1]["tie"] == "none"
+
+
+def test_merge_rejects_an_unknown_tie():
+    with pytest.raises(ValueError, match="tie must be"):
+        _frame().merge(_frame(row_shift=4), tie="nearest")
+
+
+def test_merge_still_rejects_differing_spacing():
+    """A grid-phase offset is regriddable; a different pixel size is not -- it
+    means the two stacks were multilooked with different ``looks``."""
+    a = _frame(ny=16, nx=12, dx=10.0)
+    b = _frame(ny=16, nx=12, dx=20.0, row_shift=8)
+    with pytest.raises(ValueError, match="spacings differ"):
+        a.merge(b)
 
 
 def test_merge_rejects_mismatches():

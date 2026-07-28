@@ -22,6 +22,7 @@ or ``"gunw"``) records which path built it and drives :meth:`to_los`'s geometry.
 
 import itertools
 import os
+import warnings
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
@@ -73,8 +74,11 @@ def _match_pairs(self_ds, other_ds, tolerance_s):
     nearest ``(ref_time, sec_time)`` within ``tolerance_s`` rather than by exact
     time. Returns an index array ``order`` with ``other.isel(pair=order)`` in
     ``self``'s pair order. Raises if the pair sets do not correspond one-to-one.
+
+    ``tolerance_s=None`` skips the matching entirely and pairs by position --
+    for two stacks built from *different* acquisition dates, which define
+    genuinely different interferograms and so have no correspondence to find.
     """
-    tol = np.timedelta64(int(round(tolerance_s * 1e9)), "ns")
     sr = np.asarray(self_ds["ref_time"].values)
     ss = np.asarray(self_ds["sec_time"].values)
     orr = np.asarray(other_ds["ref_time"].values)
@@ -84,6 +88,10 @@ def _match_pairs(self_ds, other_ds, tolerance_s):
             f"Cannot merge: stacks have different pair counts ({len(sr)} vs "
             f"{len(orr)})"
         )
+    if tolerance_s is None:
+        return np.arange(len(sr))
+
+    tol = np.timedelta64(int(round(tolerance_s * 1e9)), "ns")
     order = np.empty(len(sr), dtype=int)
     for i in range(len(sr)):
         dr, dsec = np.abs(orr - sr[i]), np.abs(ors - ss[i])
@@ -91,7 +99,10 @@ def _match_pairs(self_ds, other_ds, tolerance_s):
         if dr[j] > tol or dsec[j] > tol:
             raise ValueError(
                 f"Cannot merge: no pair in the other stack matches self pair {i} "
-                f"({sr[i]} / {ss[i]}) within {tolerance_s}s"
+                f"({sr[i]} / {ss[i]}) within {tolerance_s}s. If the two stacks "
+                "really are different acquisitions -- independent "
+                "interferograms covering neighbouring ground -- pass "
+                "time_tolerance=None to pair them by position instead."
             )
         order[i] = j
     if len(set(order.tolist())) != len(order):
@@ -670,7 +681,8 @@ class UnwrappedStack(RasterStackMixin):
         ds.attrs["cycle_shifts"] = applied
         return UnwrappedStack(ds)
 
-    def merge(self, other, resampling="bilinear", time_tolerance=600.0):
+    def merge(self, other, resampling="bilinear", time_tolerance=600.0,
+              tie="auto"):
         """Stitch an adjacent same-track :class:`UnwrappedStack` onto the union grid.
 
         The same lattice-padding machinery as :meth:`~nisar_tools.stack.GSLCStack.merge`
@@ -695,13 +707,52 @@ class UnwrappedStack(RasterStackMixin):
         :meth:`~nisar_tools.stack.GSLCStack.merge` does; :meth:`crop` trims a ragged
         edge if it matters.
 
-        The two stacks must share a lattice (or differ only by CRS, handled above)
-        and cover the same acquisitions (pairs are matched by reference/secondary
-        time within ``time_tolerance`` seconds, so per-frame
-        ``zeroDopplerStartTime`` jitter is tolerated). ``coherence`` -- and, for a
-        GUNW, ``phase_screen`` / ``subswath_mask`` -- are carried through with the
-        same ``self`` precedence; ``other``'s ``conncomp`` labels are shifted clear
-        of ``self``'s so the two frames' components stay distinct.
+        The same warp also rescues two stacks in **one** CRS whose grids are offset
+        by a sub-pixel amount -- which is what an interferogram multilooked before
+        ``align_looks`` existed looks like, since it anchored its grid phase to its
+        own crop origin rather than to the native lattice. That case is a
+        ``RuntimeWarning``, not an error: resampling smooth unwrapped phase is
+        harmless, but re-forming both frames' interferograms with
+        ``align_looks=True`` avoids it entirely and is exact. Differing pixel
+        *spacing* (two stages multilooked with different ``looks``) still raises --
+        no regridding here would make them one product.
+
+        By default the two stacks must cover the **same acquisitions** (pairs are
+        matched by reference/secondary time within ``time_tolerance`` seconds, so
+        per-frame ``zeroDopplerStartTime`` jitter is tolerated). ``coherence`` --
+        and, for a GUNW, ``phase_screen`` / ``subswath_mask`` -- are carried through
+        with the same ``self`` precedence; ``other``'s ``conncomp`` labels are
+        shifted clear of ``self``'s so the two frames' components stay distinct.
+
+        **Different dates.** ``time_tolerance=None`` pairs by position instead of
+        by time, which is how two *independent* interferograms -- neighbouring
+        ground, but different acquisition dates -- are mosaicked into one field.
+        That changes what the overlap means, and so what ``tie`` may be:
+
+        ``"cycles"``
+            the offset is a whole number of 2*pi, read as
+            ``round(median((self - other) / 2*pi))``. Correct **only** for one
+            interferogram unwrapped separately per frame, where the two frames
+            carry the identical wrapped phase in the overlap and can differ by
+            nothing but an integer ambiguity.
+        ``"offset"``
+            the offset is the real-valued ``median(self - other)``. Two different
+            date pairs measure different deformation, so their difference in the
+            overlap is *not* an integer number of cycles -- rounding it to one
+            would leave a residual step up to pi. This ties the two to a common
+            datum; the leftover disagreement is real signal plus atmosphere.
+        ``"none"``
+            leave ``other`` as it is.
+        ``"auto"`` (default)
+            ``"cycles"`` when the pairs matched by time, ``"offset"`` when they
+            did not -- so the existing same-acquisition behaviour is unchanged.
+
+        A different-dates mosaic is one raster with **one** arbitrary constant and
+        one ramp, so for a slip inversion prefer keeping the scenes apart and
+        combining them at :meth:`nisar_tools.slip.Observations.concat`, which gives
+        each its own nuisance columns via ``SlipInversion(..., ramp=...)``. Merge
+        them here for a continuous map, an export, or when each frame covers a
+        different piece of the fault and there is only one interferogram per frame.
 
         The offset is one value per pair over the *whole* overlap. If SNAPHU split
         the overlap into components sitting at different cycle offsets, the median
@@ -709,13 +760,16 @@ class UnwrappedStack(RasterStackMixin):
         :meth:`add_cycles` (``conncomp=``). Lazy, like the other operations.
         """
         from .stack import (
-            _check_same_lattice,
+            LATTICE_TOL_PX,
             _pad_onto,
             _union_lattice,
+            lattice_offset,
             warp_onto_lattice,
             warp_target_lattice,
         )
 
+        if tie not in ("auto", "cycles", "offset", "none"):
+            raise ValueError("tie must be 'auto', 'cycles', 'offset' or 'none'")
         if (self.direction is not None and other.direction is not None
                 and self.direction != other.direction):
             raise ValueError("Cannot merge stacks with different pass directions")
@@ -726,6 +780,24 @@ class UnwrappedStack(RasterStackMixin):
         # Line other's pairs up with self's (same acquisitions, maybe reordered),
         # then relabel them with self's pair identity for the shared union grid.
         order = _match_pairs(self.ds, other.ds, time_tolerance)
+        if tie == "auto":
+            # Only the same acquisitions can differ by a pure integer ambiguity.
+            tie = "cycles" if time_tolerance is not None else "offset"
+        if time_tolerance is None:
+            warnings.warn(
+                "Merging by pair position without matching acquisition times: "
+                f"self pair 0 is {self.ds['ref_time'].values[0]} -> "
+                f"{self.ds['sec_time'].values[0]} and other pair 0 is "
+                f"{other.ds['ref_time'].values[0]} -> "
+                f"{other.ds['sec_time'].values[0]}. These measure different "
+                f"intervals, so the merged field is a mosaic tied by {tie!r}, "
+                "not one interferogram; the merged stack keeps self's times. "
+                "For a slip inversion prefer sampling each scene separately "
+                "and combining with Observations.concat, which gives each its "
+                "own offset/ramp columns.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         o = other.ds.isel(pair=order).assign_coords(
             pair=self.ds["pair"].values,
             ref_time=("pair", np.asarray(self.ds["ref_time"].values)),
@@ -734,6 +806,29 @@ class UnwrappedStack(RasterStackMixin):
 
         cross_zone = int(self.epsg) != int(other.epsg)
         if cross_zone:
+            offsets = ()
+        else:
+            # Raises if the spacings differ -- two stages multilooked with
+            # different ``looks`` are not the same product and no regridding
+            # here would make them one.
+            offsets = lattice_offset(self.x, self.y, o)
+        offset_lattice = any(off > LATTICE_TOL_PX for off in offsets)
+        if offset_lattice:
+            warnings.warn(
+                "Merging stacks whose grids are offset by a sub-pixel amount "
+                f"(x {offsets[0]:.3g} px, y {offsets[1]:.3g} px): the second "
+                f"stack is being resampled onto the first's grid with "
+                f"{resampling!r}. Frames of one track share a lattice by "
+                "construction when the interferograms are formed with "
+                "align_looks=True (the default since 2026-07-27); a stack "
+                "multilooked before that anchored its grid to its own crop "
+                "origin. Re-forming both frames' interferograms avoids the "
+                "resampling entirely.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        if cross_zone or offset_lattice:
             # One target lattice for every layer, or the padded grids would not
             # line up with each other.
             tx, ty = warp_target_lattice(
@@ -754,20 +849,26 @@ class UnwrappedStack(RasterStackMixin):
                     "sec_time": ("pair", np.asarray(o["sec_time"].values)),
                 },
             )
-        else:
-            _check_same_lattice(self.x, self.y, o)
 
         union_y = _union_lattice(self.y, o["y"].values)
         union_x = _union_lattice(self.x, o["x"].values)
 
-        # Pad both onto the union grid (identical coords), read the per-pair cycle
-        # offset from the overlap, and shift other to close the 2*pi step.
+        # Pad both onto the union grid (identical coords), read the per-pair
+        # offset from the overlap, and shift other to close the step.
         two_pi = 2.0 * np.pi
         a_unw = _pad_onto(self.ds["unw"], union_y, union_x)
         b_unw = _pad_onto(o["unw"], union_y, union_x)
-        diff = ((a_unw - b_unw) / two_pi).chunk({"y": -1, "x": -1})
-        cycles = np.round(diff.median(dim=("y", "x"), skipna=True)).fillna(0.0)
-        b_unw = b_unw + cycles * two_pi
+        if tie != "none":
+            diff = (a_unw - b_unw).chunk({"y": -1, "x": -1})
+            shift = diff.median(dim=("y", "x"), skipna=True)
+            if tie == "cycles":
+                # One interferogram unwrapped per frame: the two can differ by
+                # nothing but an integer ambiguity, so rounding is a correction,
+                # not an approximation.
+                shift = np.round(shift / two_pi) * two_pi
+            # No overlap (or an all-NaN one) leaves the median undefined; a zero
+            # shift is the only defensible answer and keeps the merge lazy.
+            b_unw = b_unw + shift.fillna(0.0)
         self_has = a_unw.notnull()  # every layer follows the phase footprint
 
         merged = {"unw": xr.where(self_has, a_unw, b_unw).astype(np.float32)}
@@ -810,10 +911,25 @@ class UnwrappedStack(RasterStackMixin):
             "other_y": [float(np.min(o["y"].values)), float(np.max(o["y"].values))],
             "other_x": [float(np.min(o["x"].values)), float(np.max(o["x"].values))],
         }
-        if cross_zone:
-            # Only recorded when a warp actually ran, so a same-zone merge keeps
-            # the hash it had before cross-zone support existed.
+        if cross_zone or offset_lattice:
+            # Only recorded when a warp actually ran, so a merge of two stacks
+            # that already shared a lattice keeps the hash it had before
+            # cross-zone (and now off-lattice) support existed.
             record["resampling"] = str(resampling)
+        if tie != "cycles":
+            # Same reasoning: the default tie stays out of the record, so a
+            # same-acquisition merge keeps its pre-existing hash.
+            record["tie"] = tie
+        if time_tolerance is None:
+            # The merged stack carries self's times, so the other frame's dates
+            # would otherwise be lost -- and they are what makes this a mosaic
+            # of two interferograms rather than one.
+            record["other_ref_time"] = [
+                str(t) for t in np.asarray(other.ds["ref_time"].values)
+            ]
+            record["other_sec_time"] = [
+                str(t) for t in np.asarray(other.ds["sec_time"].values)
+            ]
         merges.append(record)
         ds.attrs["merged"] = merges
         return UnwrappedStack(ds)

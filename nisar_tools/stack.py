@@ -149,6 +149,7 @@ class GSLCStack(RasterStackMixin):
     def form_interferograms(
         self, pairs="sequential", looks=5, downsample=True,
         convolution="Uniform", nan_aware=True, min_valid_fraction=0.5,
+        align_looks=True,
     ):
         """Form an :class:`InterferogramStack` from pairs of acquisitions.
 
@@ -157,6 +158,12 @@ class GSLCStack(RasterStackMixin):
         the filter footprint. ``min_valid_fraction`` is how much of an output
         pixel's filter weight must come from valid input for it to be kept.
         See :func:`nisar_tools._kernels.igram_coherence`.
+
+        ``align_looks`` (default) anchors the multilook blocks to the absolute
+        native lattice rather than to index 0 of this crop, so every frame of a
+        track multilooks onto one shared grid and the downstream frame merges
+        line up exactly. It costs at most ``looks - 1`` samples off the near
+        edge of each axis. See :func:`nisar_tools._kernels.lattice_lead`.
         """
         return InterferogramStack.from_slc_stack(
             self,
@@ -166,6 +173,7 @@ class GSLCStack(RasterStackMixin):
             convolution=convolution,
             nan_aware=nan_aware,
             min_valid_fraction=min_valid_fraction,
+            align_looks=align_looks,
         )
 
     # -- persistence -------------------------------------------------------
@@ -294,15 +302,24 @@ def _match_times(ref_times, other_times, tolerance):
     return np.asarray(mapped)
 
 
-def _check_same_lattice(x_ref, y_ref, slc):
-    """Require a same-CRS grid to lie on the reference lattice.
+#: Grid phases closer than this (in pixels) count as the same lattice.
+LATTICE_TOL_PX = 1e-3
 
-    The outer join in :meth:`GSLCStack.merge` matches coordinates exactly, so
-    a grid offset by a sub-pixel amount would silently interleave
-    near-duplicate coordinates into a NaN checkerboard instead of merging.
+
+def lattice_offset(x_ref, y_ref, field):
+    """Sub-pixel grid-phase offset of a same-CRS ``field`` from the reference.
+
+    Returns ``(off_x, off_y)`` in pixels, each in ``[0, 0.5]``: how far the two
+    grids' sample positions sit apart *modulo* the spacing. Zero means the two
+    lattices interleave exactly and their union is reachable by padding.
+
+    Differing *spacing* is a different problem -- two stages multilooked with
+    different ``looks`` -- and raises rather than returning a number, since no
+    amount of grid-phase alignment reconciles it.
     """
-    for name, ref, vals in (("x", x_ref, slc["x"].values),
-                            ("y", y_ref, slc["y"].values)):
+    offsets = []
+    for name, ref, vals in (("x", x_ref, field["x"].values),
+                            ("y", y_ref, field["y"].values)):
         d_ref = float(ref[1] - ref[0])
         d = float(vals[1] - vals[0])
         if not np.isclose(d, d_ref, rtol=1e-6, atol=0.0):
@@ -310,11 +327,26 @@ def _check_same_lattice(x_ref, y_ref, slc):
                 f"Cannot merge: {name} spacings differ ({d} vs {d_ref})"
             )
         off = (float(vals[0]) - float(ref[0])) / d_ref
-        if abs(off - round(off)) > 1e-3:
+        offsets.append(abs(off - round(off)))
+    return tuple(offsets)
+
+
+def _check_same_lattice(x_ref, y_ref, slc):
+    """Require a same-CRS grid to lie on the reference lattice.
+
+    The outer join in :meth:`GSLCStack.merge` matches coordinates exactly, so
+    a grid offset by a sub-pixel amount would silently interleave
+    near-duplicate coordinates into a NaN checkerboard instead of merging.
+    Resampling one side onto the other is *not* an option here the way it is
+    for real unwrapped phase: interpolating a complex SLC's carrier aliases
+    the fringe. A misaligned SLC pair has to be re-cropped, not resampled.
+    """
+    off_x, off_y = lattice_offset(x_ref, y_ref, slc)
+    for name, off in (("x", off_x), ("y", off_y)):
+        if off > LATTICE_TOL_PX:
             raise ValueError(
                 f"Cannot merge: {name} grids are offset by a sub-pixel amount "
-                f"({abs(off - round(off)):.3g} px); the granules do not share "
-                "a lattice"
+                f"({off:.3g} px); the granules do not share a lattice"
             )
 
 

@@ -55,6 +55,7 @@ class InterferogramStack(RasterStackMixin):
     def from_slc_stack(
         cls, stack, pairs="sequential", looks=5, downsample=True,
         convolution="Uniform", nan_aware=True, min_valid_fraction=0.5,
+        align_looks=True,
     ):
         if convolution not in _kernels.VALID_CONVOLUTIONS:
             raise ValueError("convolution must be Uniform or Gaussian")
@@ -74,8 +75,26 @@ class InterferogramStack(RasterStackMixin):
 
         x = stack.x
         y = stack.y
+        # Drop the few leading samples that would put the multilook blocks off
+        # the absolute lattice, so this frame's multilooked grid depends only on
+        # the native grid and ``looks`` -- never on the crop it came from. Two
+        # frames of one track then land on a shared lattice and merge exactly.
+        lead_x = _kernels.lattice_lead(x, looks) if (align_looks and downsample) else 0
+        lead_y = _kernels.lattice_lead(y, looks) if (align_looks and downsample) else 0
+        if lead_x or lead_y:
+            ref = ref.isel(x=slice(lead_x, None), y=slice(lead_y, None))
+            sec = sec.isel(x=slice(lead_x, None), y=slice(lead_y, None))
+            x = x[lead_x:]
+            y = y[lead_y:]
+
         max_x = len(x) // looks * looks
         max_y = len(y) // looks * looks
+        if downsample and (max_x == 0 or max_y == 0):
+            raise ValueError(
+                f"Not enough samples to multilook by {looks} after aligning to "
+                f"the lattice (y: {len(y)}, x: {len(x)}); use a smaller looks "
+                "or align_looks=False"
+            )
 
         # The kernel batches over the leading (pair) axis and multilooks the
         # trailing spatial axes, so 3D dask arrays go straight through.
@@ -110,6 +129,7 @@ class InterferogramStack(RasterStackMixin):
             direction=stack.direction,
             looks=int(looks),
             downsample=bool(downsample),
+            align_looks=bool(align_looks),
             convolution=convolution,
             nan_aware=bool(nan_aware),
             min_valid_fraction=float(min_valid_fraction),
@@ -267,6 +287,7 @@ class InterferogramStack(RasterStackMixin):
             "epsg": self.epsg,
             "looks": self.ds.attrs.get("looks"),
             "downsample": self.ds.attrs.get("downsample"),
+            "align_looks": self.ds.attrs.get("align_looks"),
             "convolution": self.ds.attrs.get("convolution"),
             "nan_aware": self.ds.attrs.get("nan_aware"),
             "min_valid_fraction": self.ds.attrs.get("min_valid_fraction"),
