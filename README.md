@@ -82,6 +82,243 @@ result writes straight to NetCDF, which is what a `.grd` is — GMT's `grdinfo`
 and `grdimage` read the output directly. See the notebook's "Export to GMT
 `.grd`" section for a `to_grd` helper and a re-import.
 
+## Merging frames
+
+A track is delivered as a series of frames, and one earthquake rarely sits
+inside a single one. Two frames can be joined at either of two stages.
+
+**Before interferograms** — `GSLCStack.merge` gives one continuous complex
+stack, which is the simpler route when both frames have the same acquisitions:
+
+```python
+stack = (GSLCStack.from_gslcs(frame1, bbox=bbox)
+         .merge(GSLCStack.from_gslcs(frame2, bbox=bbox)))
+```
+
+**After unwrapping** — `UnwrappedStack.merge` additionally removes the 2π seam
+between frames that were unwrapped independently, and is the only route when the
+frames come from different tracks or different dates:
+
+```python
+unw = unw_a.merge(unw_b)          # self wins in the overlap; the 2π step is removed
+los = unw.to_los([granule_a, granule_b])   # one granule per frame
+```
+
+Both grids must lie on the same lattice. Interferograms formed with
+`align_looks=True` (the default) do so automatically: multilook blocks are
+anchored to the absolute native grid rather than to whatever the crop happened
+to start at. Without it, two frames cropped to different extents come out a
+fraction of a multilooked pixel apart — at `looks=10`, three native pixels of
+difference is exactly 0.3 px, and no amount of padding will line them up.
+`UnwrappedStack.merge` will resample an off-lattice frame onto the first's grid
+and warn; re-forming both interferograms avoids the resampling and is exact.
+
+Merging across a **UTM zone boundary** works — a track crossing 114°W is gridded
+in two zones, and the second frame is warped onto the first's grid first.
+
+### Different dates
+
+Two frames from different acquisition dates are *different interferograms*, not
+one interferogram in two pieces. Pass `time_tolerance=None` to pair them by
+position, and `tie` decides how the overlap is reconciled:
+
+```python
+unw = unw_a.merge(unw_b, time_tolerance=None)   # tie="auto" → "offset"
+```
+
+`tie="cycles"` (the default for same-date frames) removes a whole number of 2π,
+which is the *only* thing two frames of one interferogram can differ by.
+Different date pairs measure different deformation, so their overlap difference
+is not an integer number of cycles and `tie="offset"` removes the real-valued
+median instead — rounding it would leave a step of up to π.
+
+> **For a slip inversion, do not merge different-date scenes.** A mosaic is one
+> raster with one arbitrary constant and one ramp, so a second scene's
+> independent nuisance gets absorbed as fictitious slip. Measured on a synthetic
+> recovery: two scenes kept apart and combined with `Observations.concat` gave a
+> slip correlation of **0.979** and a moment ratio of **1.001**, while the same
+> data mosaicked into one raster gave **0.553** and **1.671** — with a peak slip
+> 3.5× the truth. Variance reduction stayed at 98.4% in both, so it does not
+> warn you. Merge for a continuous map or an export; keep the scenes separate
+> for the inversion.
+
+## Slip inversion
+
+`nisar_tools.slip` inverts line-of-sight displacement for coseismic slip on a
+fault: a vertical fault discretised into triangular dislocation elements in a
+homogeneous elastic half-space, solved as a bounded, smoothed linear
+least-squares problem. It consumes a `LOSStack`, so it picks up exactly where
+the InSAR pipeline leaves off.
+
+```python
+from nisar_tools.slip import FaultTrace, FaultMesh, Observations, SlipInversion
+
+trace = FaultTrace.from_file("fault.kml")     # .kml or two-column ASCII
+frame = trace.local_frame()                   # ONE frame shared by everything
+mesh  = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=3e3)
+
+obs = Observations.concat([
+    Observations.from_los(los_desc, name="D126", frame=frame, trace=trace,
+                          exclude_within=5000.0),
+    Observations.from_los(los_asc,  name="A014", frame=frame, trace=trace,
+                          exclude_within=5000.0),
+])
+
+model = SlipInversion(mesh, obs, ramp="linear").solve(
+    smoothing=0.3, polarity=(-1, 0, 0))       # right-lateral
+print(model)          # <SlipModel VR=... max_slip=...m Mw=... roughness=...>
+model.save("venezuela.slip.zip")
+```
+
+Four things that are easy to get wrong:
+
+- **One `LocalFrame` for everything.** A transverse Mercator centred on the study
+  area, not UTM, so two tracks in different zones share one x/y. Every object
+  stores its frame and checks it; mixing frames is a silent kilometre-scale
+  error.
+- **Positive `strike_slip` is left-lateral.** A right-lateral fault — San
+  Sebastián, Sagaing — needs `polarity=(-1, 0, 0)`.
+- **Exclude observations near the trace.** Dislocation solutions are singular on
+  the fault surface, so `exclude_within` is required; without a buffer the
+  Green's function is non-finite and the inversion refuses to run.
+- **One track per scene, with `ramp=`.** An unwrapped interferogram has an
+  arbitrary constant and usually an orbital or ionospheric ramp.
+  `ramp="linear"` gives each named track its own offset plus `x`/`y` gradients;
+  without it those end up in the slip.
+
+### Choosing the smoothing weight
+
+`l_curve` solves at many weights over the same Green's matrix and tabulates
+misfit against roughness; the corner of the curve is the conventional choice.
+Each weight is independent, so they can run on a thread pool:
+
+```python
+inv = SlipInversion(mesh, obs, ramp="linear")
+curve, models = inv.l_curve([2.0, 1.0, 0.5, 0.3, 0.1, 0.05, 0.02, 0.01],
+                            workers=0,        # 0 = one thread per CPU
+                            polarity=(-1, 0, 0))
+```
+
+**Expect very little from `workers`.** Measured on an 8-weight sweep: threads
+gave **1.02×** at 2 workers and got *worse* above (0.90× at 8); a process pool
+managed **1.10×**. Two measured reasons:
+
+- **Load imbalance dominates.** The weights cost
+  0.78 / 0.75 / 0.54 / 0.84 / 0.61 / 0.91 / **12.15** / 1.59 s — `λ=0.02` ran to
+  the iteration cap and was **67% of the whole sweep**. No scheduler beats 1.50×
+  against that, and that weight's result is meaningless anyway
+  (`converged=False`).
+- **Threads can't overlap the solver.** scipy's `lsmr` is pure Python, so its
+  iteration loop holds the GIL between matrix-vector products. Capping
+  `OMP_NUM_THREADS=1` to rule out BLAS oversubscription changed nothing, which
+  is what points at the GIL rather than core contention.
+
+The things that *do* make a sweep fast are the inner tolerance (`lsmr_tol="auto"`,
+now the default — a measured **5.8×** on one solve) and not paying for weights
+that never converge. Green's assembly is not parallelisable either: threading
+over elements measured uniformly worse (1 worker 24.6 s, 10 workers 62–79 s),
+because each element is ~50 small numpy calls and dispatch overhead swamps the
+GIL-free stretch.
+
+### Runtime, and checking convergence
+
+Runtime tracks **conditioning far more than size**. On the reference problem
+(1106 elements, 8000 observations, 10 cores) Green's assembly is ~25 s and the
+solve a few seconds — but an underdetermined or badly scaled setup can spend
+minutes in the solver. Two things follow:
+
+- **Always check `model.converged`.** An iteration-capped solve returns a
+  plausible-looking model whose variance reduction is meaningless; `to_text`
+  refuses to write one.
+- **More quadtree samples are not free.** 19 562 samples cost 59 s in the solve
+  against 0.8 s for 860, and cannot constrain a mesh that only has a few hundred
+  elements. Keep samples in the low thousands — that is what the quadtree is for.
+
+### Saving a result
+
+`model.save(path)` writes one self-contained file — the slip vector, the fit,
+the mesh and the observations — that can be copied off the machine that ran it:
+
+```python
+model.save("venezuela.slip.zip")
+
+from nisar_tools.slip import SlipModel
+model = SlipModel.load("venezuela.slip.zip")
+model.variance_reduction, model.max_slip, model.moment_magnitude
+model.to_text("model.txt")        # the ten-column GMT-ready element table
+```
+
+A loaded model reports every statistic, re-exports, plots, and forward-models
+new points. The Green's matrix is deliberately *not* saved — it is the largest
+object in the problem and nothing downstream of a solved model needs it, so a
+loaded model cannot be re-solved at a new weight. Rebuild the `SlipInversion`
+for that.
+
+### Running a long inversion in the background
+
+A large mesh against a dense quadtree can run for a long time, so it is worth
+detaching it from the terminal. Write a small script that ends in a `save`:
+
+```python
+# run_inversion.py
+from nisar_tools import LOSStack, Workspace
+from nisar_tools.slip import FaultTrace, FaultMesh, Observations, SlipInversion
+
+ws    = Workspace("workdir/", create=False)
+trace = FaultTrace.from_file("fault.kml")
+frame = trace.local_frame()
+mesh  = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=3e3)
+
+obs = Observations.concat([
+    Observations.from_los(LOSStack.from_zarr(ws.path(name)), name=name,
+                          frame=frame, trace=trace, exclude_within=5000.0)
+    for name in ("los_D126", "los_A014")
+])
+
+model = SlipInversion(mesh, obs, ramp="linear").solve(
+    smoothing=0.3, polarity=(-1, 0, 0))
+print(model, flush=True)
+if not model.converged:
+    raise SystemExit("solver hit the iteration cap; raise max_iter or smoothing")
+model.save("venezuela.slip.zip")
+```
+
+Then launch it detached:
+
+```bash
+cd /path/to/nisar_tools
+KMP_DUPLICATE_LIB_OK=TRUE \
+nohup /path/to/envs/remote_sensing/bin/python -u run_inversion.py \
+      > inversion.log 2>&1 &
+echo $! > inversion.pid          # so you can check on or kill it later
+```
+
+- **`-u`** is the important flag: without it Python buffers stdout and the log
+  stays empty until the process exits, which makes a long run look hung.
+- **`KMP_DUPLICATE_LIB_OK=TRUE`** is required in this environment (duplicate
+  OpenMP runtimes) — the shell that launches the job must set it.
+- Use the env's **absolute** interpreter path; `nohup` does not run your shell
+  profile, so a bare `python` will be the system one.
+
+Watch it, and pick the result up afterwards:
+
+```bash
+tail -f inversion.log            # progress
+ps -p $(cat inversion.pid)       # still alive?
+kill $(cat inversion.pid)        # give up on it
+```
+
+```python
+from nisar_tools.slip import SlipModel
+model = SlipModel.load("venezuela.slip.zip")     # back in the notebook
+```
+
+An L-curve sweep needs nothing extra — `workers` buys little (above), so the
+usual launch is the same one. If a sweep is slow, the weights that hit the
+iteration cap are almost certainly why; print `curve["iterations"]` and
+`curve["converged"]` and drop those weights rather than trying to parallelise
+around them.
+
 ## Workspaces
 
 A `Workspace` is a directory of per-stage Zarr stores. Each `persist()` writes

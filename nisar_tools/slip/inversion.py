@@ -26,6 +26,10 @@ plausible-looking model with a meaningless variance reduction -- so
 :class:`SlipModel` carries the solver's status and refuses to pretend.
 """
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
 import numpy as np
 import scipy.sparse as sp
 from scipy.optimize import lsq_linear
@@ -52,6 +56,27 @@ DEFAULT_SHEAR_MODULUS = 30e9
 #: well-conditioned solve stops long before the cap, raising it costs nothing
 #: where it is not needed.
 DEFAULT_MAX_ITER = 400
+
+#: Inner-solver tolerance handed to ``lsq_linear``'s ``lsmr`` sub-problem.
+#:
+#: ``"auto"`` lets scipy tighten the inner tolerance as the outer trust-region
+#: iteration converges, instead of solving every sub-problem to ``atol=btol=0``
+#: -- which is what scipy's ``None`` default does, and which makes ``lsmr`` run
+#: to its own iteration cap on every single outer step.
+#:
+#: Measured on the reference problem (590 elements, 860 observations, 1186
+#: parameters): ``None`` takes 162 outer iterations and **174 809** matrix-vector
+#: products in 22.3 s; ``"auto"`` takes 28 outer iterations and **26 359** in
+#: 3.9 s -- a **5.8x** speed-up for the same variance reduction (90.06%), the two
+#: slip models agreeing to 6.6 mm. Since roughly 89% of a solve is spent inside
+#: those products, cutting their number is by far the largest available win.
+#:
+#: Do **not** reach for ``lsmr_maxiter`` instead. A hard cap is not monotone:
+#: caps of 100 and 200 both drove the outer loop into ``DEFAULT_MAX_ITER`` and
+#: returned materially different, *worse* models (4.15 m and 2.47 m from the
+#: converged answer) while a cap of 25 was fine. The adaptive tolerance has no
+#: such cliff.
+DEFAULT_LSMR_TOL = "auto"
 
 
 class SlipInversion:
@@ -90,8 +115,15 @@ class SlipInversion:
     def solve(self, smoothing=0.3, ss_ratio=1.0, ds_ratio=3.0,
               boundary_ratio=1.0, sides=("bottom", "left", "right"),
               polarity=None, strike=(-10.0, 10.0), dip=(-10.0, 10.0),
-              max_iter=DEFAULT_MAX_ITER, tol=1e-10, verbose=0):
-        """Solve for slip at one smoothing weight; returns a :class:`SlipModel`."""
+              max_iter=DEFAULT_MAX_ITER, tol=1e-10,
+              lsmr_tol=DEFAULT_LSMR_TOL, verbose=0):
+        """Solve for slip at one smoothing weight; returns a :class:`SlipModel`.
+
+        ``lsmr_tol`` is the inner least-squares tolerance; see
+        :data:`DEFAULT_LSMR_TOL` for why the default is ``"auto"`` and not
+        scipy's ``None``. Pass ``lsmr_tol=None`` to reproduce a pre-2026-07-27
+        run exactly.
+        """
         smooth = neighbor_smoothing(self.mesh.neighbors, ss_ratio, ds_ratio)
         boundary = zero_slip_boundary(self.mesh, sides, boundary_ratio)
         lo, hi = slip_bounds(self.mesh.n_elements, strike, dip, polarity)
@@ -121,7 +153,8 @@ class SlipInversion:
         operator = _StackedOperator(weighted, scaled_smooth, boundary)
         result = lsq_linear(
             operator, rhs, bounds=(lo, hi),
-            lsq_solver="lsmr", max_iter=max_iter, tol=tol, verbose=verbose,
+            lsq_solver="lsmr", max_iter=max_iter, tol=tol,
+            lsmr_tol=lsmr_tol, verbose=verbose,
         )
 
         return SlipModel(
@@ -133,10 +166,11 @@ class SlipInversion:
                 "boundary_ratio": float(boundary_ratio), "sides": list(sides),
                 "polarity": None if polarity is None else list(polarity),
                 "strike": list(strike), "dip": list(dip), "max_iter": int(max_iter),
+                "lsmr_tol": lsmr_tol,
             },
         )
 
-    def l_curve(self, smoothing_values, **kwargs):
+    def l_curve(self, smoothing_values, workers=None, **kwargs):
         """Solve at each smoothing weight and tabulate misfit against roughness.
 
         The corner of the resulting curve is the conventional choice of weight --
@@ -147,14 +181,55 @@ class SlipInversion:
         Swept from **large to small** smoothing deliberately: a smoother problem
         is better conditioned and converges in fewer iterations, and the sweep's
         total cost is dominated by its roughest end.
+
+        Every weight is an independent solve over the *same* Green's matrix, so
+        ``workers`` runs them on a thread pool (``None``, the default, stays
+        serial; ``0`` uses one thread per CPU). Nothing here mutates ``self`` and
+        ``solve`` builds its own regularization matrices per call, so the pool
+        needs no locking, and the results are identical to the serial sweep.
+
+        **Expect very little from it.** Measured on an 8-weight sweep (240
+        elements, 578 observations, 10 cores): threads gave **1.02x** at 2
+        workers and got *worse* above that (0.96x at 4, 0.90x at 8), and a
+        process pool -- pickling ``G`` once per worker -- managed only **1.10x**.
+        Two independent reasons, both measured rather than assumed:
+
+        * **Load imbalance dominates.** The sweep is not eight equal solves. On
+          that run the weights cost 0.78/0.75/0.54/0.84/0.61/0.91/**12.15**/1.59
+          seconds: ``lam=0.02`` ran to :data:`DEFAULT_MAX_ITER` and was **67% of
+          the entire sweep** on its own. No scheduler beats 1.50x against that,
+          and the expensive weight is precisely the one whose result is
+          meaningless (``converged`` is False).
+        * **Threads cannot overlap the solver.** scipy's ``lsmr`` is pure Python,
+          so its iteration loop holds the GIL between matrix-vector products.
+          Capping ``OMP_NUM_THREADS=1`` to rule out BLAS oversubscription changed
+          nothing (1.03x at 2 workers), which is what identifies the GIL rather
+          than core contention as the limit.
+
+        So ``workers`` is offered because the weights genuinely are independent
+        and it costs nothing when the costs happen to be balanced -- not because
+        it is the way to make a sweep fast. The two things that actually are:
+        :data:`DEFAULT_LSMR_TOL` (a measured **5.8x** on one solve) and dropping
+        or reporting the weights that never converge instead of paying for them.
+
+        Green's assembly is not parallelisable either -- see
+        :mod:`nisar_tools.slip.greens`, where threading over elements measured
+        uniformly worse for a different reason again (numpy dispatch overhead).
         """
         import xarray as xr
 
         values = np.sort(np.asarray(smoothing_values, dtype=float))[::-1]
-        models, rows = [], []
-        for value in values:
-            model = self.solve(smoothing=value, **kwargs)
-            models.append(model)
+
+        if workers is None or len(values) < 2:
+            models = [self.solve(smoothing=v, **kwargs) for v in values]
+        else:
+            n = (os.cpu_count() or 1) if workers == 0 else int(workers)
+            with ThreadPoolExecutor(max(1, min(n, len(values)))) as pool:
+                models = list(pool.map(
+                    lambda v: self.solve(smoothing=v, **kwargs), values))
+
+        rows = []
+        for model in models:
             rows.append((model.rms_misfit, model.roughness, model.variance_reduction,
                          model.max_slip, model.moment_magnitude,
                          int(model.result.nit), int(model.result.status),
@@ -375,6 +450,116 @@ class SlipModel:
             **params,
         }
         return workspace.store(name, self.to_dataset(), full, overwrite=overwrite)
+
+    # -- save / load -------------------------------------------------------
+    def save(self, path):
+        """Write the whole model to one self-contained netCDF file.
+
+        Everything needed to work with the result later travels with it -- the
+        slip vector, the fit, the mesh, and the observations -- in three netCDF
+        groups (``model``, ``mesh``, ``observations``). :meth:`load` gives back a
+        :class:`SlipModel` that reports every statistic, re-exports with
+        :meth:`to_text`, plots, and can :meth:`forward`-model new points.
+
+        This is the counterpart to a long run: solve under ``nohup``, save, and
+        come back to it in a notebook. Unlike :meth:`persist` it needs no
+        :class:`~nisar_tools.workspace.Workspace` and produces a single file that
+        can just be copied off the machine that ran it.
+
+        The container is a **zipped Zarr store** rather than netCDF: netCDF
+        groups need a backend the environment does not have (only scipy's
+        group-less one is installed), while ``zarr`` is already a hard dependency
+        -- and its attributes are JSON, so the provenance dicts (``options``,
+        ``frame``, ``quadtree``) round-trip natively instead of needing an
+        encoding layer.
+
+        The **Green's matrix is deliberately not saved** -- it is the largest
+        object in the problem (hundreds of megabytes) and nothing downstream of a
+        solved model needs it. A loaded model therefore cannot be re-solved at a
+        new smoothing weight; rebuild the :class:`SlipInversion` for that.
+        """
+        import zarr
+
+        path = str(path)
+        model = self.to_dataset()
+        # to_dataset() splits the parameter vector into its physical parts; keep
+        # the raw vector too so a load is exact rather than reassembled.
+        model["x"] = ("param", self.x)
+        model.attrs["ramp_labels"] = list(self.ramp_labels)
+        model.attrs["engine_nu"] = float(getattr(self._inversion.engine, "nu", 0.25))
+
+        obs = self.obs.ds.copy()
+        # Zarr has no object dtype; track names ride as fixed-width text.
+        obs["track"] = obs["track"].astype(str)
+
+        store = zarr.ZipStore(path, mode="w")
+        try:
+            model.to_zarr(store, group="model", mode="w", consolidated=False)
+            self.mesh.to_dataset().to_zarr(
+                store, group="mesh", mode="a", consolidated=False)
+            obs.to_zarr(store, group="observations", mode="a", consolidated=False)
+        finally:
+            store.close()
+        return path
+
+    @classmethod
+    def load(cls, path):
+        """Read back a model written by :meth:`save`."""
+        import xarray as xr
+        import zarr
+
+        from .mesh import FaultMesh
+        from .sampling import Observations
+
+        path = str(path)
+        store = zarr.ZipStore(path, mode="r")
+        try:
+            model = xr.open_zarr(store, group="model", consolidated=False).load()
+            mesh = FaultMesh.from_dataset(
+                xr.open_zarr(store, group="mesh", consolidated=False).load())
+            obs = Observations(
+                xr.open_zarr(store, group="observations", consolidated=False).load())
+        finally:
+            store.close()
+
+        options = dict(model.attrs["options"])
+        self = object.__new__(cls)
+        self.mesh = mesh
+        self.obs = obs
+        self.x = np.asarray(model["x"].values, dtype=float)
+        self.result = SimpleNamespace(
+            status=int(model.attrs["solver_status"]),
+            nit=int(model.attrs["solver_iterations"]),
+            x=self.x,
+        )
+        self.smoothing = float(model.attrs["smoothing"])
+        self.options = options
+        self.ramp_labels = [str(s) for s in model.attrs.get("ramp_labels", [])]
+
+        n = mesh.n_elements
+        self.strike_slip = self.x[:n]
+        self.dip_slip = self.x[n:2 * n]
+        self.ramp = self.x[2 * n:]
+        self.data = np.asarray(model["data"].values, dtype=float)
+        self.prediction = np.asarray(model["prediction"].values, dtype=float)
+        self.residual = np.asarray(model["residual"].values, dtype=float)
+
+        # The smoothing operator is a pure function of the mesh and the options,
+        # so `roughness` is recoverable exactly without storing a sparse matrix.
+        smooth = neighbor_smoothing(mesh.neighbors, options["ss_ratio"],
+                                    options["ds_ratio"])
+        n_ramp = self.ramp.size
+        if n_ramp:
+            smooth = sp.hstack([smooth, sp.csr_matrix((smooth.shape[0], n_ramp))],
+                               format="csr")
+        self._smooth = smooth
+        # A stand-in for the inversion: `forward` needs only the engine, and the
+        # Green's matrix is deliberately absent (see `save`).
+        self._inversion = SimpleNamespace(
+            engine=HalfSpaceTDE(float(model.attrs.get("engine_nu", 0.25))),
+            g=None, ramp=None, n_ramp=n_ramp, ramp_labels=self.ramp_labels,
+        )
+        return self
 
     def __repr__(self):
         flag = "" if self.converged else " UNCONVERGED"

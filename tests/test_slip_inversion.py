@@ -223,6 +223,46 @@ def test_l_curve_is_monotone_in_roughness(recovery):
     assert ds.attrs["n_parameters"] == inversion.n_param
 
 
+def test_l_curve_workers_match_the_serial_sweep(recovery):
+    """Parallel weights must give bit-identical results, not merely similar ones.
+
+    Each weight is an independent solve over the same Green's matrix and `solve`
+    builds its own regularization matrices, so a thread pool needs no locking --
+    this is what pins that. (It buys very little wall time; see `l_curve`'s
+    docstring for why, and prefer fixing the weights that hit the cap.)
+    """
+    _, _, _, inversion = recovery
+    values = [0.05, 0.3, 2.0]
+    serial, _ = inversion.l_curve(values, polarity=(-1, 0, 0))
+    threaded, models = inversion.l_curve(values, workers=3, polarity=(-1, 0, 0))
+
+    assert list(threaded["smoothing"].values) == list(serial["smoothing"].values)
+    assert len(models) == len(values)
+    for field in ("rms_misfit", "roughness", "variance_reduction", "max_slip",
+                  "iterations"):
+        np.testing.assert_array_equal(threaded[field].values, serial[field].values,
+                                      err_msg=field)
+
+    # workers=0 means one thread per CPU, and must not change the answer either.
+    auto, _ = inversion.l_curve(values, workers=0, polarity=(-1, 0, 0))
+    np.testing.assert_array_equal(auto["roughness"].values, serial["roughness"].values)
+
+
+def test_lsmr_tol_auto_is_the_default_and_cuts_iterations(recovery):
+    """The shipped default must be the adaptive inner tolerance, and it must
+    actually reduce work versus scipy's `None` -- for the same model."""
+    _, _, _, inversion = recovery
+    fast = inversion.solve(smoothing=0.05, polarity=(-1, 0, 0))
+    slow = inversion.solve(smoothing=0.05, polarity=(-1, 0, 0), lsmr_tol=None)
+
+    assert fast.options["lsmr_tol"] == "auto"
+    assert fast.converged and slow.converged
+    assert fast.result.nit < slow.result.nit
+    # Same answer: the speed-up is in how the sub-problem is solved, not what for.
+    assert fast.variance_reduction == pytest.approx(slow.variance_reduction, abs=0.5)
+    np.testing.assert_allclose(fast.strike_slip, slow.strike_slip, atol=0.05)
+
+
 def test_ramp_absorbs_an_added_offset(recovery):
     """A constant added to one track must land in the nuisance column, not in slip."""
     mesh, _, obs, plain = recovery
