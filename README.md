@@ -190,35 +190,38 @@ Four things that are easy to get wrong:
 
 `l_curve` solves at many weights over the same Green's matrix and tabulates
 misfit against roughness; the corner of the curve is the conventional choice.
-Each weight is independent, so they can run on a thread pool:
 
 ```python
 inv = SlipInversion(mesh, obs, ramp="linear")
 curve, models = inv.l_curve([2.0, 1.0, 0.5, 0.3, 0.1, 0.05, 0.02, 0.01],
-                            workers=0,        # 0 = one thread per CPU
                             polarity=(-1, 0, 0))
+print(curve[["variance_reduction", "roughness", "iterations", "converged"]]
+      .to_dataframe())
 ```
 
-**Expect very little from `workers`.** Measured on an 8-weight sweep: threads
-gave **1.02×** at 2 workers and got *worse* above (0.90× at 8); a process pool
-managed **1.10×**. Two measured reasons:
+**The sweep is serial on purpose, and the inversion has no parallelism knobs.**
+Every weight is an independent solve over the same `G`, which makes a worker pool
+the obvious move — it was written, verified to give identical results, and then
+removed. Measured on an 8-weight sweep: threads **1.02×** at 2 workers and *worse*
+above (0.90× at 8); a process pool **1.10×**. Two reasons:
 
 - **Load imbalance dominates.** The weights cost
   0.78 / 0.75 / 0.54 / 0.84 / 0.61 / 0.91 / **12.15** / 1.59 s — `λ=0.02` ran to
-  the iteration cap and was **67% of the whole sweep**. No scheduler beats 1.50×
-  against that, and that weight's result is meaningless anyway
-  (`converged=False`).
+  the iteration cap and was **67% of the whole sweep**, so no scheduler beats
+  1.50×. That weight's result is meaningless anyway (`converged=False`): the fix
+  is to drop it, not to parallelise it.
 - **Threads can't overlap the solver.** scipy's `lsmr` is pure Python, so its
   iteration loop holds the GIL between matrix-vector products. Capping
   `OMP_NUM_THREADS=1` to rule out BLAS oversubscription changed nothing, which
-  is what points at the GIL rather than core contention.
+  points at the GIL rather than core contention. (The dense matrix-vector product
+  alone already runs at ~34 GFLOP/s — BLAS is threaded.)
 
-The things that *do* make a sweep fast are the inner tolerance (`lsmr_tol="auto"`,
-now the default — a measured **5.8×** on one solve) and not paying for weights
-that never converge. Green's assembly is not parallelisable either: threading
-over elements measured uniformly worse (1 worker 24.6 s, 10 workers 62–79 s),
-because each element is ~50 small numpy calls and dispatch overhead swamps the
-GIL-free stretch.
+What *does* make a sweep fast is the inner tolerance (`lsmr_tol="auto"`, now the
+default — a measured **5.8×** on one solve) and not paying for weights that never
+converge. Green's assembly resists parallelism too, for a different reason again:
+threading over elements measured uniformly worse (1 worker 24.6 s, 10 workers
+62–79 s), because each element is ~50 small numpy calls and dispatch overhead
+swamps the GIL-free stretch.
 
 ### Runtime, and checking convergence
 
@@ -313,11 +316,10 @@ from nisar_tools.slip import SlipModel
 model = SlipModel.load("venezuela.slip.zip")     # back in the notebook
 ```
 
-An L-curve sweep needs nothing extra — `workers` buys little (above), so the
-usual launch is the same one. If a sweep is slow, the weights that hit the
+An L-curve sweep launches exactly the same way — the inversion has no
+parallelism knobs (see above). If a sweep is slow, the weights that hit the
 iteration cap are almost certainly why; print `curve["iterations"]` and
-`curve["converged"]` and drop those weights rather than trying to parallelise
-around them.
+`curve["converged"]` and drop those weights.
 
 ## Workspaces
 

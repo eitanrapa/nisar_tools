@@ -223,29 +223,19 @@ def test_l_curve_is_monotone_in_roughness(recovery):
     assert ds.attrs["n_parameters"] == inversion.n_param
 
 
-def test_l_curve_workers_match_the_serial_sweep(recovery):
-    """Parallel weights must give bit-identical results, not merely similar ones.
+def test_l_curve_takes_no_worker_pool(recovery):
+    """`l_curve` is serial on purpose -- see its docstring.
 
-    Each weight is an independent solve over the same Green's matrix and `solve`
-    builds its own regularization matrices, so a thread pool needs no locking --
-    this is what pins that. (It buys very little wall time; see `l_curve`'s
-    docstring for why, and prefer fixing the weights that hit the cap.)
+    A `workers=` argument was written, verified to give identical results, and
+    removed: a sweep is dominated by the one weight that runs to the iteration
+    cap (67% of an 8-weight sweep, capping any scheduler at 1.50x) and scipy's
+    pure-Python `lsmr` holds the GIL anyway, so it measured 1.02x at best and
+    slower above. This pins that it stays out of the signature rather than
+    getting reintroduced on the same reasoning.
     """
     _, _, _, inversion = recovery
-    values = [0.05, 0.3, 2.0]
-    serial, _ = inversion.l_curve(values, polarity=(-1, 0, 0))
-    threaded, models = inversion.l_curve(values, workers=3, polarity=(-1, 0, 0))
-
-    assert list(threaded["smoothing"].values) == list(serial["smoothing"].values)
-    assert len(models) == len(values)
-    for field in ("rms_misfit", "roughness", "variance_reduction", "max_slip",
-                  "iterations"):
-        np.testing.assert_array_equal(threaded[field].values, serial[field].values,
-                                      err_msg=field)
-
-    # workers=0 means one thread per CPU, and must not change the answer either.
-    auto, _ = inversion.l_curve(values, workers=0, polarity=(-1, 0, 0))
-    np.testing.assert_array_equal(auto["roughness"].values, serial["roughness"].values)
+    with pytest.raises(TypeError, match="workers"):
+        inversion.l_curve([0.3, 2.0], workers=2, polarity=(-1, 0, 0))
 
 
 def test_lsmr_tol_auto_is_the_default_and_cuts_iterations(recovery):

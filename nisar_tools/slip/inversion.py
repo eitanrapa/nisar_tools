@@ -26,8 +26,6 @@ plausible-looking model with a meaningless variance reduction -- so
 :class:`SlipModel` carries the solver's status and refuses to pretend.
 """
 
-import os
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import numpy as np
@@ -170,7 +168,7 @@ class SlipInversion:
             },
         )
 
-    def l_curve(self, smoothing_values, workers=None, **kwargs):
+    def l_curve(self, smoothing_values, **kwargs):
         """Solve at each smoothing weight and tabulate misfit against roughness.
 
         The corner of the resulting curve is the conventional choice of weight --
@@ -182,35 +180,30 @@ class SlipInversion:
         is better conditioned and converges in fewer iterations, and the sweep's
         total cost is dominated by its roughest end.
 
-        Every weight is an independent solve over the *same* Green's matrix, so
-        ``workers`` runs them on a thread pool (``None``, the default, stays
-        serial; ``0`` uses one thread per CPU). Nothing here mutates ``self`` and
-        ``solve`` builds its own regularization matrices per call, so the pool
-        needs no locking, and the results are identical to the serial sweep.
-
-        **Expect very little from it.** Measured on an 8-weight sweep (240
-        elements, 578 observations, 10 cores): threads gave **1.02x** at 2
-        workers and got *worse* above that (0.96x at 4, 0.90x at 8), and a
-        process pool -- pickling ``G`` once per worker -- managed only **1.10x**.
-        Two independent reasons, both measured rather than assumed:
+        **The sweep is serial, deliberately.** Every weight is an independent
+        solve over the same Green's matrix, which makes a worker pool the obvious
+        move; measured on an 8-weight sweep (240 elements, 578 observations, 10
+        cores), threads gave **1.02x** at 2 workers and got *worse* above that
+        (0.96x at 4, 0.90x at 8), and a process pool -- pickling ``G`` once per
+        worker -- managed only **1.10x**. Two independent reasons:
 
         * **Load imbalance dominates.** The sweep is not eight equal solves. On
           that run the weights cost 0.78/0.75/0.54/0.84/0.61/0.91/**12.15**/1.59
           seconds: ``lam=0.02`` ran to :data:`DEFAULT_MAX_ITER` and was **67% of
-          the entire sweep** on its own. No scheduler beats 1.50x against that,
-          and the expensive weight is precisely the one whose result is
-          meaningless (``converged`` is False).
+          the entire sweep** on its own, so no scheduler beats **1.50x**. The
+          expensive weight is precisely the one whose result is meaningless
+          (``converged`` is False) -- it should be dropped, not parallelised.
         * **Threads cannot overlap the solver.** scipy's ``lsmr`` is pure Python,
           so its iteration loop holds the GIL between matrix-vector products.
           Capping ``OMP_NUM_THREADS=1`` to rule out BLAS oversubscription changed
           nothing (1.03x at 2 workers), which is what identifies the GIL rather
-          than core contention as the limit.
+          than core contention as the limit. (The dense matrix-vector product on
+          its own already runs at ~34 GFLOP/s, i.e. multi-threaded BLAS.)
 
-        So ``workers`` is offered because the weights genuinely are independent
-        and it costs nothing when the costs happen to be balanced -- not because
-        it is the way to make a sweep fast. The two things that actually are:
-        :data:`DEFAULT_LSMR_TOL` (a measured **5.8x** on one solve) and dropping
-        or reporting the weights that never converge instead of paying for them.
+        A ``workers=`` argument was written, verified to give identical results,
+        and then removed: it is API surface that can only make a sweep slower.
+        What does make one faster is :data:`DEFAULT_LSMR_TOL` (a measured
+        **5.8x** on a single solve) and dropping the weights that never converge.
 
         Green's assembly is not parallelisable either -- see
         :mod:`nisar_tools.slip.greens`, where threading over elements measured
@@ -219,14 +212,7 @@ class SlipInversion:
         import xarray as xr
 
         values = np.sort(np.asarray(smoothing_values, dtype=float))[::-1]
-
-        if workers is None or len(values) < 2:
-            models = [self.solve(smoothing=v, **kwargs) for v in values]
-        else:
-            n = (os.cpu_count() or 1) if workers == 0 else int(workers)
-            with ThreadPoolExecutor(max(1, min(n, len(values)))) as pool:
-                models = list(pool.map(
-                    lambda v: self.solve(smoothing=v, **kwargs), values))
+        models = [self.solve(smoothing=v, **kwargs) for v in values]
 
         rows = []
         for model in models:
