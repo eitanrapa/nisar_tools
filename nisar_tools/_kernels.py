@@ -745,16 +745,72 @@ def deramp(field, degree=1, method="poly", scale=None, exclude=None):
     return (field - surface).astype(np.asarray(field).dtype)
 
 
-def mask_edges(field, edge_pixels):
-    """Erode ``field``'s finite footprint by ``edge_pixels`` and NaN the border.
+def along_track_edge_mask(valid, edge_pixels):
+    """Pixels within ``edge_pixels`` of a row's first/last valid sample.
 
-    Trims the decorrelated swath-edge fringe (and the raster edge, via
-    ``border_value=0``). A no-op when ``edge_pixels`` is 0.
+    The near- and far-range boundaries of a swath are the edges that run
+    *along-track*, and they are the only ones carrying the decorrelated
+    antenna-pattern fringe. On a north-up geocoded grid a near-polar orbit puts
+    the track within a few degrees of grid north (measured 3-7 deg on the D126
+    frame), so across-track is grid *east* and each raster row crosses the swath
+    once: its first and last valid samples are the two range boundaries.
+
+    Scanning rows rather than eroding the footprint is what keeps the trim off
+    everything else that happens to border a NaN -- a coastline, a lake from
+    :meth:`~nisar_tools.unwrap.UnwrappedStack.mask_water`, the azimuth ends of
+    the frame -- none of which are range edges. The depth is measured in columns,
+    so it is the perpendicular depth divided by cos(track tilt): 0.7% deep at 7
+    degrees, which is far below one pixel of the erosion itself.
+
+    Returns the boolean mask of pixels to *drop*. Rows are independent, so this
+    decomposes freely along ``y`` but needs whole rows along ``x``.
+    """
+    valid = np.asarray(valid, dtype=bool)
+    n = int(edge_pixels)
+    drop = np.zeros_like(valid)
+    if n <= 0:
+        return drop
+    any_valid = valid.any(axis=1)
+    # argmax on a boolean row gives the first True; the same on the reversed row
+    # gives the last. Rows with no data are excluded, so the degenerate argmax=0
+    # never reaches the slicing below.
+    first = valid.argmax(axis=1)
+    last = valid.shape[1] - 1 - valid[:, ::-1].argmax(axis=1)
+    cols = np.arange(valid.shape[1])
+    lo = (cols[None, :] < (first + n)[:, None])
+    hi = (cols[None, :] > (last - n)[:, None])
+    drop[any_valid] = ((lo | hi) & valid)[any_valid]
+    return drop
+
+
+def mask_edges(field, edge_pixels, edges="along_track"):
+    """Trim ``edge_pixels`` of swath edge off ``field`` (2D), NaN-ing the border.
+
+    ``edges="along_track"`` (default) trims only the near/far-range boundaries --
+    the edges that run along-track, and the only ones with a decorrelated fringe.
+    See :func:`along_track_edge_mask`; it needs whole raster rows.
+
+    ``edges="all"`` erodes the whole finite footprint by ``edge_pixels`` cross
+    iterations (:func:`scipy.ndimage.binary_erosion`, also trimming the raster
+    edge via ``border_value=0``). That reaches inward from *every* valid/NaN
+    boundary, so it also eats a collar around coastlines, water-masked lakes and
+    the azimuth ends of the frame; on the D126 frame that was 47.5% of everything
+    it removed. Kept for the cases where the footprint really is all swath edge.
+
+    A no-op when ``edge_pixels`` is 0.
     """
     field = np.asarray(field)
     valid = np.isfinite(field)
     if edge_pixels and edge_pixels > 0:
-        valid = binary_erosion(valid, iterations=int(edge_pixels), border_value=0)
+        if edges == "along_track":
+            valid = valid & ~along_track_edge_mask(valid, edge_pixels)
+        elif edges == "all":
+            valid = binary_erosion(valid, iterations=int(edge_pixels),
+                                   border_value=0)
+        else:
+            raise ValueError(
+                f"edges must be 'along_track' or 'all', got {edges!r}"
+            )
     return np.where(valid, field, np.asarray(np.nan, dtype=field.dtype))
 
 
@@ -812,6 +868,28 @@ def halo_planes(func, arr, depth, **kwargs):
     )
 
 
+def row_planes(func, arr, **kwargs):
+    """Apply a 2D-plane ``func`` that needs whole raster *rows*, chunk by chunk.
+
+    A halo cannot serve a kernel whose support is the entire row -- a chunk in
+    the middle of the raster has no way to know whether it holds the row's first
+    valid sample. So ``x`` is gathered into one chunk and the decomposition runs
+    along ``y`` only, where the rows are independent. No overlap is needed at
+    all, which makes it exact rather than exact-to-a-halo.
+
+    Used by ``mask_edges(edges="along_track")``. Numpy input falls through to the
+    plain whole-plane batch loop.
+    """
+    if not _is_dask(arr):
+        return _batch_planes(func, arr, **kwargs)
+    ndim = arr.ndim
+    arr = arr.rechunk({ndim - 1: -1})
+    return arr.map_blocks(
+        lambda block: _batch_planes(func, block, **kwargs),
+        dtype=arr.dtype, meta=arr._meta,
+    )
+
+
 def remove_outliers_planes(arr, *, scale, threshold, iterations):
     return _batch_planes(remove_outliers, arr, scale=scale, threshold=threshold,
                          iterations=iterations)
@@ -835,8 +913,8 @@ def deramp_planes(arr, *, degree, method, scale, exclude=None):
                          exclude=exclude)
 
 
-def mask_edges_planes(arr, *, edge_pixels):
-    return _batch_planes(mask_edges, arr, edge_pixels=edge_pixels)
+def mask_edges_planes(arr, *, edge_pixels, edges="along_track"):
+    return _batch_planes(mask_edges, arr, edge_pixels=edge_pixels, edges=edges)
 
 
 # -- deramp: the polynomial fit as a chunk-wise reduction ----------------------

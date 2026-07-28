@@ -183,11 +183,43 @@ def test_smooth_surface_is_nan_aware():
     assert np.nanmax(np.abs(s[np.isfinite(s)] - 1.0)) < 1e-6
 
 
-def test_mask_edges_kernel_erodes_border():
+def test_mask_edges_all_erodes_every_border():
     field = np.full((20, 20), 1.0, np.float32)
-    out = mask_edges(field, edge_pixels=3)
+    out = mask_edges(field, edge_pixels=3, edges="all")
     assert np.all(np.isnan(out[:3])) and np.all(np.isnan(out[-3:]))
     assert np.all(np.isfinite(out[3:-3, 3:-3]))
+
+
+def test_mask_edges_along_track_trims_only_the_range_edges():
+    # The default trims each row's first/last valid samples -- the near/far-range
+    # swath boundaries -- and leaves the azimuth ends alone.
+    field = np.full((20, 20), 1.0, np.float32)
+    out = mask_edges(field, edge_pixels=3)
+    assert np.all(np.isnan(out[:, :3])) and np.all(np.isnan(out[:, -3:]))
+    assert np.all(np.isfinite(out[:, 3:-3]))
+
+
+def test_mask_edges_along_track_spares_coastlines_and_lakes():
+    # A NaN region that is not a range edge -- a water-masked lake, or a bay
+    # eating into the top of the frame -- must not cost its neighbours.
+    field = np.full((20, 20), 1.0, np.float32)
+    field[8:12, 8:12] = np.nan          # a lake
+    field[:4, 14:] = np.nan             # a bay open to the azimuth end
+    out = mask_edges(field, edge_pixels=3)
+    assert np.isfinite(out[8, 7]) and np.isfinite(out[11, 12])   # lake untouched
+    assert np.isfinite(out[4, 16])                               # below the bay
+    eroded = mask_edges(field, edge_pixels=3, edges="all")
+    assert np.isnan(eroded[8, 7]) and np.isnan(eroded[4, 16])    # "all" does eat them
+
+
+def test_mask_edges_along_track_handles_empty_and_ragged_rows():
+    field = np.full((6, 10), np.nan, np.float32)
+    field[2, 3:8] = 1.0                 # one short run
+    field[3, :] = 1.0                   # one full row
+    out = mask_edges(field, edge_pixels=2)
+    assert np.all(np.isnan(out[0]))                       # empty rows stay empty
+    assert np.array_equal(np.where(np.isfinite(out[2]))[0], [5])
+    assert np.array_equal(np.where(np.isfinite(out[3]))[0], np.arange(2, 8))
 
 
 def test_remove_outliers_kernel_nulls_spike():

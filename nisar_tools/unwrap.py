@@ -404,16 +404,25 @@ class UnwrappedStack(RasterStackMixin):
         ds.attrs["water_mask"] = {"resolution": resolution, "spacing": spacing}
         return UnwrappedStack(ds)
 
-    def mask_edges(self, edge_pixels=8, min_coherence=None, use_builtin_mask=False):
+    def mask_edges(self, edge_pixels=8, min_coherence=None, use_builtin_mask=False,
+                   edges="along_track"):
         """Mask swath-edge effects. Returns a new stack (lazy).
 
-        Erodes each pair's finite footprint by ``edge_pixels`` pixels
-        (:func:`scipy.ndimage.binary_erosion`, also trimming the raster edge),
-        removing the decorrelated fringe along the swath boundary. Works for both
-        SNAPHU and GUNW stacks. ``min_coherence`` additionally nulls pixels whose
-        coherence is below that threshold; both provenances carry a ``coherence``
-        layer (a GUNW's ``coherenceMagnitude``, or the interferogram's carried
-        through the SNAPHU unwrap).
+        Trims ``edge_pixels`` pixels off each pair's swath boundary, removing the
+        decorrelated fringe there. Works for both SNAPHU and GUNW stacks.
+        ``min_coherence`` additionally nulls pixels whose coherence is below that
+        threshold; both provenances carry a ``coherence`` layer (a GUNW's
+        ``coherenceMagnitude``, or the interferogram's carried through the SNAPHU
+        unwrap).
+
+        ``edges="along_track"`` (default) trims only the near/far-range
+        boundaries -- the swath edges that run along-track, which are the ones
+        carrying the fringe. ``edges="all"`` instead erodes the whole finite
+        footprint, which also eats a collar around coastlines, water-masked lakes
+        and the frame's azimuth ends: on a coastal descending frame that was
+        nearly half of everything it removed, right where the near-fault signal
+        lives. See :func:`~nisar_tools._kernels.along_track_edge_mask` for the
+        geometry this assumes.
 
         ``use_builtin_mask`` (GUNW only) first nulls the pixels the product's own
         ``subswath_mask`` flags as invalid samples -- an *exact* edge/gap mask
@@ -439,14 +448,27 @@ class UnwrappedStack(RasterStackMixin):
             valid = (m != _MASK_FILL) & (ss_ref > 0) & (ss_sec > 0)
             unw = unw.where(valid)
 
-        # Erosion by ``edge_pixels`` cross iterations reaches exactly that far, so
-        # a matching halo decomposes it spatially and the result is identical to
-        # the whole-plane fit -- unlike the old chunk({"y": -1, "x": -1}), which
-        # capped concurrency at the pair count.
-        masked = _plane_kernel(
-            _kernels.mask_edges, unw, depth=max(1, int(edge_pixels)),
-            edge_pixels=int(edge_pixels),
-        )
+        if edges == "along_track":
+            # Support is the whole row (which sample is the row's first?), so
+            # there is no halo that would do -- x is gathered and the split runs
+            # along y, where rows are independent.
+            masked = _plane_kernel_rows(
+                _kernels.mask_edges, unw,
+                edge_pixels=int(edge_pixels), edges="along_track",
+            )
+        elif edges == "all":
+            # Erosion by ``edge_pixels`` cross iterations reaches exactly that
+            # far, so a matching halo decomposes it spatially and the result is
+            # identical to the whole-plane fit -- unlike the old
+            # chunk({"y": -1, "x": -1}), which capped concurrency at the pair count.
+            masked = _plane_kernel(
+                _kernels.mask_edges, unw, depth=max(1, int(edge_pixels)),
+                edge_pixels=int(edge_pixels), edges="all",
+            )
+        else:
+            raise ValueError(
+                f"edges must be 'along_track' or 'all', got {edges!r}"
+            )
         if min_coherence is not None:
             if "coherence" not in self.ds:
                 raise ValueError(
@@ -462,7 +484,7 @@ class UnwrappedStack(RasterStackMixin):
         ds.attrs.update(self.ds.attrs)
         ds.attrs["edges_masked"] = {
             "edge_pixels": int(edge_pixels), "min_coherence": min_coherence,
-            "use_builtin_mask": bool(use_builtin_mask),
+            "use_builtin_mask": bool(use_builtin_mask), "edges": edges,
         }
         return UnwrappedStack(ds)
 
@@ -938,6 +960,29 @@ def _plane_kernel(func, field, depth, target_blocks=None, **kwargs):
         if working is not None:
             field = field.chunk({"pair": 1, "y": working[0], "x": working[1]})
     data = _kernels.halo_planes(func, field.data, depth, **kwargs)
+    return xr.DataArray(
+        data, dims=field.dims, coords=field.coords, attrs=field.attrs,
+        name=field.name,
+    )
+
+
+def _plane_kernel_rows(func, field, target_blocks=None, **kwargs):
+    """Run a row-wise 2-D plane kernel over a ``(pair, y, x)`` DataArray.
+
+    Wraps :func:`_kernels.row_planes` for a kernel whose support is a whole
+    raster row, so it cannot be given a halo. ``x`` is gathered into one chunk
+    and the work is split along ``y`` instead; that is exact, not
+    exact-to-a-halo. Dims, coords and attrs are preserved.
+    """
+    if _kernels._is_dask(field.data):
+        # Only y is free to split, so ask compute_chunks for the row band and
+        # ignore its x suggestion. halo=1: there is no overlap to amortise.
+        working = compute_chunks(
+            field.sizes["y"], field.sizes["x"], halo=1, target_blocks=target_blocks
+        )
+        if working is not None:
+            field = field.chunk({"pair": 1, "y": working[0], "x": -1})
+    data = _kernels.row_planes(func, field.data, **kwargs)
     return xr.DataArray(
         data, dims=field.dims, coords=field.coords, attrs=field.attrs,
         name=field.name,
