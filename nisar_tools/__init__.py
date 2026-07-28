@@ -17,11 +17,13 @@ Typical flow::
 """
 
 from . import download
+from . import slip
 from .download import download_dem, download_gslcs, login
 from .gslc import GSLC
 from .stack import GSLCStack
 from .interferogram import InterferogramStack, make_pairs
 from .los import LOSStack
+from .slip import FaultMesh, FaultTrace, Observations, SlipInversion, SlipModel
 from .unwrap import UnwrappedStack
 from .workspace import Workspace, WorkspaceError
 
@@ -30,8 +32,13 @@ __version__ = "0.1.0"
 __all__ = [
     "GSLC",
     "GSLCStack",
+    "FaultMesh",
+    "FaultTrace",
     "InterferogramStack",
     "LOSStack",
+    "Observations",
+    "SlipInversion",
+    "SlipModel",
     "UnwrappedStack",
     "Workspace",
     "WorkspaceError",
@@ -40,5 +47,6 @@ __all__ = [
     "download_gslcs",
     "login",
     "make_pairs",
+    "slip",
     "__version__",
 ]

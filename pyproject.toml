@@ -40,7 +40,11 @@ download = ["earthaccess", "sardem"]
 # fails, whereas conda-forge's does not -- environment.yml installs it there.
 # Nothing in the package imports osgeo; rasterio already vendors GDAL for it.
 gdal = ["gdal"]
-dev = ["pytest", "pytest-xdist", "dask[diagnostics]"]
+# cutde is a *test oracle only* — an independent implementation of the same
+# Nikkhoo & Walter triangular dislocation that nisar_tools.slip._tde ports, used
+# to cross-check it (tests/test_slip_tde.py skips if it is absent). Nothing in
+# the package imports it at runtime.
+dev = ["pytest", "pytest-xdist", "dask[diagnostics]", "cutde"]
 
 [tool.setuptools.packages.find]
 include = ["nisar_tools*"]
