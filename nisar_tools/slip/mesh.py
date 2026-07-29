@@ -133,8 +133,8 @@ class FaultMesh:
     @classmethod
     def curved(cls, trace, frame=None, *, segments=None, dips=None, uniform_dip=None,
                surface=None, max_depth=20e3, edge_length=3e3, top_depth=0.0,
-               down_dip_levels=None, bias_w=1.0, smoothness=None, depth_control=None,
-               **fit_kwargs):
+               down_dip_levels=None, bias_w=1.0, bias_l=1.0, smoothness=None,
+               depth_control=None, **fit_kwargs):
         """A fault that dips, built from one dip per deep segment.
 
         The reference implementation's normal workflow: a surface trace, a set of
@@ -163,11 +163,36 @@ class FaultMesh:
 
         ``bias_w`` thickens the depth levels geometrically downward (the
         reference's ``cfg.mesh.biasW = 1.15``), putting the fine resolution where
-        the data resolves slip. ``bias_w=1`` gives even levels.
+        the data resolves slip. ``bias_w=1`` gives even levels. Measured on the
+        real trace at ``down_dip_levels=8``: ``bias_w=1.15`` runs 1.8 km levels at
+        the surface to 4.2 km at 20 km depth, and ``1.3`` runs 1.1 km to 5.5 km.
+
+        ``bias_l`` is accepted only as ``1``. It is the reference's along-strike
+        counterpart, and coarsening *along strike* with depth would leave rows with
+        different node counts -- a lattice that no longer has quads to split, so
+        the triangulation would have to come from Delaunay, whose arbitrary
+        diagonals are what :func:`_lattice_triangles` exists to avoid (see this
+        module's own docstring). The reference's demo configuration sets
+        ``biasL = 1`` too, so this is not a gap in practice.
         """
         frame = frame or trace.local_frame()
         if max_depth <= top_depth:
             raise ValueError("max_depth must be deeper than top_depth")
+        if bias_l != 1.0:
+            raise ValueError(
+                f"bias_l={bias_l} is not supported: coarsening along strike with "
+                "depth gives rows of unequal node count, which cannot be split into "
+                "quads and so would need Delaunay -- whose arbitrary diagonals are "
+                "the winding hazard this mesh is built to avoid. Use bias_w to grade "
+                "resolution with depth, which is what resolution actually needs, and "
+                "note the reference's own demo configuration sets biasL = 1."
+            )
+        unknown = set(fit_kwargs) - _FIT_KWARGS
+        if unknown:
+            raise TypeError(
+                f"Unexpected keyword argument(s) {sorted(unknown)} for "
+                f"FaultMesh.curved; surface-fit options are {sorted(_FIT_KWARGS)}"
+            )
 
         resampled = trace.resample(edge_length, frame)
         tx, ty = resampled.to_local(frame)
@@ -474,6 +499,15 @@ class FaultMesh:
         return (f"<FaultMesh {self.attrs.get('kind', '?')} "
                 f"nodes={self.n_nodes} elements={self.n_elements} "
                 f"depth={self.attrs.get('max_depth', 0) / 1e3:.0f}km>")
+
+
+#: Surface-fit options ``FaultMesh.curved`` forwards, so an unknown one is caught
+#: where the caller typed it rather than deep inside the gridder -- or, on the
+#: closed-form ``uniform_dip`` path, not at all.
+_FIT_KWARGS = frozenset({
+    "surface_weight_ratio", "samples_per_cell",
+    "interp", "regularizer", "autoscale", "solver", "weights",
+})
 
 
 def _depth_levels(top_depth, max_depth, n_levels, bias_w=1.0):

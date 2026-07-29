@@ -415,3 +415,72 @@ def test_vertical_surface_is_flat():
     surface = FaultSurface.vertical(np.linspace(0, 100e3, 11), np.linspace(-20e3, 0, 6))
     assert not np.any(surface.cross_nodes)
     assert not np.any(surface.cross_centres)
+
+
+# -- resolution grading with depth -------------------------------------------
+
+@pytest.mark.parametrize("bias_w", [1.15, 1.3])
+def test_bias_w_grades_element_size_with_depth(setup, bias_w):
+    """Finer elements near the surface, coarser at depth.
+
+    A surface observation resolves a patch at 2 km far more sharply than one at
+    18 km, so uniform depth levels spend parameters where the data cannot
+    constrain them. Measured on the real trace at eight levels over 20 km:
+    ``bias_w=1.15`` runs 1.8 km levels at the surface to 4.2 km at the base,
+    ``1.3`` runs 1.1 km to 5.5 km.
+    """
+    trace, frame = setup
+    mesh = FaultMesh.curved(trace, frame, uniform_dip=90.0, max_depth=20e3,
+                            edge_length=6e3, down_dip_levels=8, bias_w=bias_w)
+
+    thickness = np.diff(-np.unique(mesh.params[:, 1])[::-1])
+    assert np.all(np.diff(thickness) > 0), "levels must thicken monotonically"
+    np.testing.assert_allclose(thickness[1:] / thickness[:-1], bias_w)
+    assert thickness[-1] / thickness[0] > 2.0 if bias_w >= 1.15 else True
+
+    # And it really is the elements that change, not just the coordinates.
+    z = mesh.element_params[:, 1]
+    shallow = mesh.areas[z > -thickness[0]].mean()
+    deep = mesh.areas[z < -(20e3 - thickness[-1])].mean()
+    assert deep > 1.8 * shallow
+
+
+def test_bias_w_does_not_disturb_the_vertical_gate(setup):
+    """Grading is orthogonal to geometry: the fault is still exactly vertical."""
+    trace, frame = setup
+    mesh = FaultMesh.curved(trace, frame, uniform_dip=90.0, max_depth=20e3,
+                            edge_length=6e3, down_dip_levels=8, bias_w=1.3)
+    np.testing.assert_array_equal(mesh.dip, 90.0)
+    assert mesh.nodes[:, 2].max() == 0.0
+    assert mesh.areas.sum() == pytest.approx(trace.length(frame) * 20e3, rel=1e-3)
+
+
+def test_along_strike_grading_is_refused_by_name(setup):
+    """``bias_l`` would need Delaunay, whose winding this mesh exists to avoid.
+
+    It must be *refused*, not ignored. Both construction paths are checked because
+    the closed-form ``uniform_dip`` branch does not touch the surface fitter, so an
+    unvalidated keyword would vanish there while raising on the other -- which is
+    exactly what happened before this test existed.
+    """
+    trace, frame = setup
+    paths = (
+        {"uniform_dip": 90.0},
+        {"segments": FaultSegment.from_trace(trace, frame, 2), "dips": [70.0, 80.0]},
+    )
+    for path in paths:
+        with pytest.raises(ValueError, match="bias_l"):
+            FaultMesh.curved(trace, frame, max_depth=20e3, edge_length=6e3,
+                             bias_l=1.15, **path)
+        with pytest.raises(TypeError, match="Unexpected keyword"):
+            FaultMesh.curved(trace, frame, max_depth=20e3, edge_length=6e3,
+                             not_an_option=1, **path)
+
+
+def test_surface_fit_options_still_reach_the_gridder(setup):
+    trace, frame = setup
+    mesh = FaultMesh.curved(trace, frame, max_depth=20e3, edge_length=6e3,
+                            segments=FaultSegment.from_trace(trace, frame, 2),
+                            dips=[70.0, 80.0], regularizer="diffusion",
+                            samples_per_cell=4)
+    assert mesh.attrs["kind"] == "curved"
