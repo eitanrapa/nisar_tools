@@ -33,13 +33,73 @@ import scipy.sparse as sp
 from scipy.optimize import lsq_linear
 from scipy.sparse.linalg import LinearOperator
 
+from .basis import make_basis
 from .greens import HalfSpaceTDE
 from .regularize import (
+    laplace_beltrami,
     neighbor_smoothing,
     ramp_columns,
     slip_bounds,
-    zero_slip_boundary,
+    zero_slip_boundary,  # noqa: F401  (public API, and used by callers)
 )
+
+
+def _blocked(projection):
+    """A basis projection applied to both the strike and dip halves."""
+    zero = sp.csr_matrix(projection.shape)
+    return sp.bmat([[projection, zero], [zero, projection]], format="csr")
+
+
+def _far_enough(x, y, trace_nodes, distance, block=20000):
+    """True where a point is further than ``distance`` from any trace node.
+
+    Blocked over the points, since the full pairwise matrix against a long fault's
+    node row is large and only its row minimum is wanted.
+    """
+    keep = np.empty(x.size, dtype=bool)
+    for start in range(0, x.size, block):
+        sl = slice(start, start + block)
+        d2 = ((x[sl, None] - trace_nodes[None, :, 0]) ** 2
+              + (y[sl, None] - trace_nodes[None, :, 1]) ** 2)
+        keep[sl] = d2.min(axis=1) > distance ** 2
+    return keep
+
+
+class _MissingEngine:
+    """Placeholder for an engine a loaded model cannot rebuild.
+
+    A layered engine is defined by its EDGRN tables, which are megabytes and are
+    deliberately not saved with a model -- as the Green's matrix is not. Silently
+    substituting the homogeneous half-space would let ``forward`` return plausible
+    numbers computed with the wrong physics, so it raises instead.
+    """
+
+    def __init__(self, name):
+        self.name = name
+        self.nu = 0.25
+
+    def _refuse(self, *_, **__):
+        raise RuntimeError(
+            f"This model was solved with the {self.name!r} engine, whose Green's "
+            "functions come from EDGRN tables that are not stored in a saved "
+            "model. Rebuild the engine (LayeredPointSource with the same tables) "
+            "and construct a fresh SlipInversion to forward-model with it."
+        )
+
+    forward = displacement = los_matrix = _refuse
+
+
+def _boundary_rows(basis, sides, ratio):
+    """Selection rows pulling the flagged boundary parameters toward zero."""
+    idx = np.nonzero(basis.boundary(sides))[0]
+    n = basis.n_basis
+    if idx.size == 0:
+        return sp.csr_matrix((0, 2 * n))
+    cols = np.concatenate([idx, idx + n])
+    return sp.csr_matrix(
+        (np.full(cols.size, float(ratio)), (np.arange(cols.size), cols)),
+        shape=(cols.size, 2 * n),
+    )
 
 #: Crustal shear modulus used for moment when no velocity model is supplied.
 DEFAULT_SHEAR_MODULUS = 30e9
@@ -98,10 +158,11 @@ class SlipInversion:
     smoothing weight -- which is what makes an L-curve sweep cheap.
     """
 
-    def __init__(self, mesh, obs, engine=None, ramp="none"):
+    def __init__(self, mesh, obs, engine=None, ramp="none", basis="element"):
         self.mesh = mesh
         self.obs = obs
         self.engine = engine or HalfSpaceTDE()
+        self.basis = make_basis(mesh, basis)
 
         if mesh.frame is not None and obs.ds.attrs.get("frame") is not None:
             mesh.frame.require_match(obs.ds.attrs["frame"], "Observations")
@@ -109,14 +170,19 @@ class SlipInversion:
         ds = obs.ds
         self.d = np.asarray(ds["los"].values, dtype=float)
         self.w = np.asarray(ds["weight"].values, dtype=float)
-        self.g = self.engine.los_matrix(
+        # Engines always assemble per element -- that is what a dislocation
+        # solution is defined on -- and the basis is applied afterwards, so both
+        # engines stay interchangeable and neither has to know about tents.
+        element_g = self.engine.los_matrix(
             mesh,
             ds["x"].values, ds["y"].values,
             ds["look_e"].values, ds["look_n"].values, ds["look_u"].values,
         )
+        self.g = element_g if self.basis.name == "element" else element_g @ _blocked(
+            self.basis.projection())
 
         self.ramp, self.ramp_labels = ramp_columns(obs, ramp)
-        self.n_slip = 2 * mesh.n_elements
+        self.n_slip = self.basis.n_param
         self.n_ramp = self.ramp.shape[1]
 
     @property
@@ -136,9 +202,14 @@ class SlipInversion:
         scipy's ``None``. Pass ``lsmr_tol=None`` to reproduce a pre-2026-07-27
         run exactly.
         """
-        smooth = neighbor_smoothing(self.mesh.neighbors, ss_ratio, ds_ratio)
-        boundary = zero_slip_boundary(self.mesh, sides, boundary_ratio)
-        lo, hi = slip_bounds(self.mesh.n_elements, strike, dip, polarity)
+        if self.basis.name == "element":
+            smooth = neighbor_smoothing(self.mesh.neighbors, ss_ratio, ds_ratio)
+        else:
+            # A continuous field lives on the nodes, so neighbouring *elements* is
+            # the wrong thing to difference; the surface Laplacian is the right one.
+            smooth = laplace_beltrami(self.mesh, ss_ratio, ds_ratio)
+        boundary = _boundary_rows(self.basis, sides, boundary_ratio)
+        lo, hi = slip_bounds(self.basis.n_basis, strike, dip, polarity)
 
         if self.n_ramp:
             # Nuisance columns are unbounded and unregularized: their whole job is
@@ -302,7 +373,8 @@ class SlipModel:
         self._smooth = smooth_matrix
         self._inversion = inversion
 
-        n = self.mesh.n_elements
+        self.basis = getattr(inversion, "basis", None) or make_basis(self.mesh)
+        n = self.basis.n_basis
         self.strike_slip = self.x[:n]
         self.dip_slip = self.x[n:2 * n]
         self.ramp = self.x[2 * n:]
@@ -350,10 +422,40 @@ class SlipModel:
     def max_slip(self):
         return float(self.slip_magnitude.max())
 
-    def moment(self, shear_modulus=DEFAULT_SHEAR_MODULUS):
-        """Scalar seismic moment, ``sum(mu * area * slip)``, in newton-metres."""
-        mu = np.broadcast_to(np.asarray(shear_modulus, dtype=float), (self.mesh.n_elements,))
-        return float(np.sum(mu * self.mesh.areas * self.slip_magnitude))
+    def moment(self, shear_modulus=None):
+        """Scalar seismic moment, ``sum(mu * area * slip)``, in newton-metres.
+
+        ``shear_modulus`` may be a scalar, one value per parameter, or a
+        :class:`~nisar_tools.slip.edgrn.VelocityModel`, in which case the rigidity
+        is sampled at each parameter's own depth. That is the point of a layered
+        inversion reaching this far: a uniform 30 GPa overstates the rigidity of
+        the shallow crust, so it overstates the moment of shallow slip.
+
+        The area each parameter carries comes from the basis -- a triangle's own
+        area for element-constant slip, a third of the node's 1-ring for a tent --
+        so the moment means the same thing in either parameterization.
+        """
+        areas = self.basis.lumped_areas()
+        if shear_modulus is None:
+            shear_modulus = self._default_shear_modulus()
+        elif hasattr(shear_modulus, "at"):
+            shear_modulus = shear_modulus.at(self._parameter_depths(), "mu")
+        mu = np.broadcast_to(np.asarray(shear_modulus, dtype=float), areas.shape)
+        return float(np.sum(mu * areas * self.slip_magnitude))
+
+    def _default_shear_modulus(self):
+        model = self.options.get("velocity_model")
+        if model is None:
+            return DEFAULT_SHEAR_MODULUS
+        from .edgrn import VelocityModel
+
+        return VelocityModel(**model).at(self._parameter_depths(), "mu")
+
+    def _parameter_depths(self):
+        """Depth of each parameter: an element centroid, or a node."""
+        if self.basis.name == "element":
+            return self.mesh.centroids[:, 2]
+        return self.mesh.nodes[:, 2]
 
     @property
     def moment_magnitude(self):
@@ -364,22 +466,134 @@ class SlipModel:
         return self.residual[self.obs.track_mask(name)]
 
     # -- forward -----------------------------------------------------------
+    @property
+    def element_slip(self):
+        """``(n_elements, 2)`` slip per element, whatever the basis.
+
+        The engines are defined on elements, so this is the form anything that
+        evaluates the model needs. For element-constant slip it is the parameters
+        themselves; for a tent field it is each element's mean of its three nodes.
+        """
+        return np.column_stack([self.basis.element_values(self.strike_slip),
+                                self.basis.element_values(self.dip_slip)])
+
     def forward(self, x, y, look=None):
         """Predict displacement at arbitrary points from this slip model."""
-        return self._inversion.engine.forward(self.mesh, self.x[:2 * self.mesh.n_elements],
+        return self._inversion.engine.forward(self.mesh, self.element_slip,
                                               x, y, look=look)
+
+    def surface_displacement(self, spacing=1000.0, pad=50e3, bounds=None,
+                             exclude_within=None, block=4096):
+        """The full three-component surface displacement field this model predicts.
+
+        Returns an :class:`xarray.Dataset` on the mesh's own local frame with
+        ``ux``, ``uy`` and ``uz`` -- east, north and up in metres, positive in
+        those directions. This is the model's *prediction of the ground*, not of
+        any satellite: line of sight collapses three components into one, and what
+        an inversion recovers is the full vector, so it is worth being able to
+        look at it. Ascending and descending line-of-sight fields can be checked
+        against it, and the horizontal field is what a GPS network would measure.
+
+        ``bounds`` is ``(x_min, x_max, y_min, y_max)`` in local-frame metres;
+        without it the mesh's footprint plus ``pad`` is used.
+
+        Evaluated in blocks of ``block`` points, because the engines build a
+        ``(points, 3, 2 * n_elements)`` array and a 1 km grid over a real
+        footprint would ask for gigabytes of it -- 60 000 points against 1148
+        elements is 3.3 GB. The block never materialises more than a few tens of
+        megabytes.
+
+        Grid points on the fault trace are a genuine singularity, so points within
+        ``exclude_within`` of the surface trace come back NaN rather than
+        non-finite or, worse, enormous. It defaults to the mesh's own element
+        size, which is the scale below which a discretised fault does not mean
+        anything anyway.
+        """
+        import xarray as xr
+
+        if self.mesh.frame is None:
+            raise ValueError(
+                "surface_displacement needs the mesh's LocalFrame to georeference "
+                "the grid; this mesh has none."
+            )
+        nodes = self.mesh.nodes
+        if bounds is None:
+            bounds = (nodes[:, 0].min() - pad, nodes[:, 0].max() + pad,
+                      nodes[:, 1].min() - pad, nodes[:, 1].max() + pad)
+        x_min, x_max, y_min, y_max = (float(v) for v in bounds)
+        x = np.arange(x_min, x_max + spacing, spacing)
+        # Descending, so the raster is north-up like every other grid here.
+        y = np.arange(y_max, y_min - spacing, -spacing)
+        xx, yy = np.meshgrid(x, y)
+
+        if exclude_within is None:
+            exclude_within = float(np.sqrt(2.0 * self.mesh.areas.mean()))
+        # The fault outcrops along its shallowest node row; that is where a
+        # dislocation solution is singular at the free surface.
+        top = nodes[self.mesh.params[:, 1] == self.mesh.params[:, 1].max()]
+        keep = _far_enough(xx.ravel(), yy.ravel(), top, exclude_within)
+
+        flat = np.full((xx.size, 3), np.nan)
+        index = np.nonzero(keep)[0]
+        for start in range(0, index.size, int(block)):
+            at = index[start:start + int(block)]
+            flat[at] = self._inversion.engine.forward(
+                self.mesh, self.element_slip, xx.ravel()[at], yy.ravel()[at])
+
+        ds = xr.Dataset(
+            {name: (("y", "x"), flat[:, i].reshape(xx.shape).astype(np.float32))
+             for i, name in enumerate(("ux", "uy", "uz"))},
+            coords={"y": y, "x": x},
+        )
+        for name, direction in (("ux", "east"), ("uy", "north"), ("uz", "up")):
+            ds[name].attrs.update(units="m", long_name=f"surface displacement, {direction}")
+        ds.attrs.update(engine=self._inversion.engine.name, basis=self.basis.name,
+                        smoothing=self.smoothing, spacing=float(spacing),
+                        exclude_within=float(exclude_within))
+        return ds.rio.write_crs(self.mesh.frame.crs)
+
+    def to_grd(self, outdir, fields=("ux", "uy", "uz"), **kwargs):
+        """Write the surface displacement field as GMT ``.grd`` files.
+
+        One single-variable grid per component, reprojected to lon/lat by the
+        same :func:`nisar_tools.geo.write_grd` every other stage exports through,
+        so the files drop straight into an existing GMT workflow. Extra keyword
+        arguments go to :meth:`surface_displacement`.
+        """
+        from pathlib import Path
+
+        from ..geo import write_grd
+
+        outdir = Path(outdir)
+        outdir.mkdir(parents=True, exist_ok=True)
+        grid = self.surface_displacement(**kwargs)
+
+        unknown = set(fields) - set(grid.data_vars)
+        if unknown:
+            raise KeyError(
+                f"Unknown field(s) {sorted(unknown)}; available: {sorted(grid.data_vars)}")
+        return [write_grd(grid[name].rio.write_crs(self.mesh.frame.crs),
+                          outdir / f"{name}.grd") for name in fields]
 
     # -- output ------------------------------------------------------------
     def to_dataset(self):
-        """The model as an :class:`xarray.Dataset` on ``element`` and ``obs``."""
+        """The model as an :class:`xarray.Dataset` on ``element`` and ``obs``.
+
+        Slip is reported **per element** in either basis, so the file format does
+        not change with the parameterization; the parameters themselves are kept
+        alongside under ``coefficient``.
+        """
         import xarray as xr
 
         lon, lat = (self.mesh.frame.to_lonlat(*self.mesh.centroids[:, :2].T)
                     if self.mesh.frame is not None else (None, None))
+        element = self.element_slip
         data = {
-            "strike_slip": ("element", self.strike_slip),
-            "dip_slip": ("element", self.dip_slip),
-            "slip": ("element", self.slip_magnitude),
+            "strike_slip": ("element", element[:, 0]),
+            "dip_slip": ("element", element[:, 1]),
+            "slip": ("element", np.hypot(*element.T)),
+            "coefficient_strike_slip": ("basis", self.strike_slip),
+            "coefficient_dip_slip": ("basis", self.dip_slip),
             "area": ("element", self.mesh.areas),
             "depth": ("element", self.mesh.centroids[:, 2]),
             "along_strike": ("element", self.mesh.element_params[:, 0]),
@@ -407,6 +621,7 @@ class SlipModel:
             solver_iterations=int(self.result.nit),
             mesh_digest=self.mesh.digest(),
             engine=self._inversion.engine.name,
+            basis=self.basis.name,
             options=self.options,
         )
         if self.ramp_labels:
@@ -427,12 +642,15 @@ class SlipModel:
                 "Raise max_iter or increase the smoothing weight."
             )
         lon, lat = self.mesh.frame.to_lonlat(*self.mesh.centroids[:, :2].T)
+        if hasattr(shear_modulus, "at"):
+            shear_modulus = shear_modulus.at(self.mesh.centroids[:, 2], "mu")
         mu = np.broadcast_to(np.asarray(shear_modulus, dtype=float),
                              (self.mesh.n_elements,))
+        element = self.element_slip
         table = np.column_stack([
             np.arange(1, self.mesh.n_elements + 1), lon, lat,
             self.mesh.centroids[:, 2], self.mesh.strike, self.mesh.dip,
-            self.strike_slip, self.dip_slip, self.mesh.areas, mu,
+            element[:, 0], element[:, 1], self.mesh.areas, mu,
         ])
         header = ("element_id\tlongitude_deg\tlatitude_deg\tdepth_m\tstrike_deg\t"
                   "dip_deg\tstrike_slip_m\tdip_slip_m\tarea_m2\tshear_modulus_pa")
@@ -536,7 +754,8 @@ class SlipModel:
         self.options = options
         self.ramp_labels = [str(s) for s in model.attrs.get("ramp_labels", [])]
 
-        n = mesh.n_elements
+        self.basis = make_basis(mesh, str(model.attrs.get("basis", "element")))
+        n = self.basis.n_basis
         self.strike_slip = self.x[:n]
         self.dip_slip = self.x[n:2 * n]
         self.ramp = self.x[2 * n:]
@@ -546,8 +765,10 @@ class SlipModel:
 
         # The smoothing operator is a pure function of the mesh and the options,
         # so `roughness` is recoverable exactly without storing a sparse matrix.
-        smooth = neighbor_smoothing(mesh.neighbors, options["ss_ratio"],
-                                    options["ds_ratio"])
+        smooth = (neighbor_smoothing(mesh.neighbors, options["ss_ratio"],
+                                     options["ds_ratio"])
+                  if self.basis.name == "element"
+                  else laplace_beltrami(mesh, options["ss_ratio"], options["ds_ratio"]))
         n_ramp = self.ramp.size
         if n_ramp:
             smooth = sp.hstack([smooth, sp.csr_matrix((smooth.shape[0], n_ramp))],
@@ -555,8 +776,17 @@ class SlipModel:
         self._smooth = smooth
         # A stand-in for the inversion: `forward` needs only the engine, and the
         # Green's matrix is deliberately absent (see `save`).
+        #
+        # A layered engine is *not* reconstructed: its EDGRN tables are megabytes
+        # and are not saved, so `forward` on a loaded layered model would silently
+        # use the homogeneous half-space instead of saying so. Refuse, and name
+        # what to do about it.
+        engine_name = str(model.attrs.get("engine", HalfSpaceTDE.name))
+        engine = (HalfSpaceTDE(float(model.attrs.get("engine_nu", 0.25)))
+                  if engine_name == HalfSpaceTDE.name
+                  else _MissingEngine(engine_name))
         self._inversion = SimpleNamespace(
-            engine=HalfSpaceTDE(float(model.attrs.get("engine_nu", 0.25))),
+            engine=engine, basis=self.basis,
             g=None, ramp=None, n_ramp=n_ramp, ramp_labels=self.ramp_labels,
         )
         return self

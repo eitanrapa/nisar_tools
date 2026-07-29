@@ -40,6 +40,13 @@ download = ["earthaccess", "sardem"]
 # fails, whereas conda-forge's does not -- environment.yml installs it there.
 # Nothing in the package imports osgeo; rasterio already vendors GDAL for it.
 gdal = ["gdal"]
+# pygrnwang bundles Rongjiang Wang's EDGRN/EDCMP Fortran and builds it with
+# gfortran, which is how nisar_tools.slip.edgrn.run_edgrn generates layered
+# Green's-function tables from a velocity model. Optional because the reference
+# workflow has the user run EDGRN themselves and hand us the tables, and because
+# a Fortran toolchain is not something to require of every install. Nothing
+# imports it unless run_edgrn is called.
+layered = ["pygrnwang"]
 # cutde is a *test oracle only* — an independent implementation of the same
 # Nikkhoo & Walter triangular dislocation that nisar_tools.slip._tde ports, used
 # to cross-check it (tests/test_slip_tde.py skips if it is absent). Nothing in

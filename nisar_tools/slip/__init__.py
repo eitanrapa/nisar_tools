@@ -48,24 +48,37 @@ Sign conventions, which matter more here than anywhere else in the package:
   policing it after the fact.
 """
 
+from .basis import ElementBasis, NodeBasis
 from .diagnostics import cell_size_ladder, noise_floor, ramp_content, scene_report
+from .edgrn import EdgrnTables, VelocityModel, run_edgrn
 from .frame import LocalFrame
 from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel
+from .layered import LayeredPointSource
 from .mesh import FaultMesh
 from .sampling import Observations
-from .trace import FaultTrace
+from .surface import FaultSurface, gridfit
+from .trace import FaultSegment, FaultTrace
 
 __all__ = [
+    "EdgrnTables",
+    "ElementBasis",
     "FaultMesh",
+    "FaultSegment",
+    "FaultSurface",
     "FaultTrace",
     "HalfSpaceTDE",
+    "LayeredPointSource",
     "LocalFrame",
+    "NodeBasis",
     "Observations",
     "SlipInversion",
     "SlipModel",
+    "VelocityModel",
     "cell_size_ladder",
+    "gridfit",
     "noise_floor",
     "ramp_content",
+    "run_edgrn",
     "scene_report",
 ]

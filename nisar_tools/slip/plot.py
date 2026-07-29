@@ -20,15 +20,23 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     ``component`` is ``"magnitude"``, ``"strike"`` or ``"dip"``. Elements are
     drawn as true triangles, so the mesh itself is visible and a bad element
     cannot hide behind interpolation.
+
+    Slip is drawn **per element** whatever the model's basis. For a nodal model
+    that means each triangle is shaded by the mean of its three nodes, which
+    understates the peak of a continuous field slightly -- but drawing the
+    parameters themselves would put a nodal model on a different geometry from an
+    element one and make the two impossible to compare by eye, which is the main
+    thing this plot is for.
     """
     import matplotlib.pyplot as plt
     from matplotlib.collections import PolyCollection
 
     mesh = model.mesh
+    element = model.element_slip
     values = {
-        "magnitude": model.slip_magnitude,
-        "strike": model.strike_slip,
-        "dip": model.dip_slip,
+        "magnitude": np.hypot(*element.T),
+        "strike": element[:, 0],
+        "dip": element[:, 1],
     }
     if component not in values:
         raise ValueError(f"component must be one of {sorted(values)}")

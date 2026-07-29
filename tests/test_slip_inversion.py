@@ -360,3 +360,174 @@ def test_persist_round_trip(recovery, tmp_path):
     stored = model.persist(ws, "slip")
     np.testing.assert_allclose(stored["strike_slip"].values, model.strike_slip)
     assert stored.attrs["mesh_digest"] == inversion.mesh.digest()
+
+
+# -- recovery on a dipping fault ---------------------------------------------
+
+@pytest.fixture(scope="module")
+def dipping_recovery():
+    """The phase-two acceptance run: a 70-degree fault with genuine dip-slip.
+
+    Two things are new relative to :func:`recovery`, and both matter. The mesh
+    dips, so every element's Green's function comes out of the general branch of
+    the triangular-dislocation solution rather than the exactly-vertical one; and
+    the planted patch has ``rake=25``, so the dip-slip half of the design matrix
+    is actually excited. With a pure strike-slip patch on a vertical fault -- the
+    phase-one fixture -- half the columns could be wrong and the recovery test
+    would still pass.
+    """
+    trace = FaultTrace(_LON, _LAT, name="test_fault")
+    frame = trace.local_frame()
+    mesh = FaultMesh.curved(trace, frame, uniform_dip=70.0,
+                            max_depth=20e3, edge_length=6e3)
+    truth = tapered_slip(mesh, peak=-2.0, rake=25.0)
+    obs = Observations.concat(
+        [
+            Observations.from_los(
+                forward_los_stack(mesh, truth, trace, frame, geometry=g,
+                                  spacing=5000.0, noise=0.004, nan_rows=3, seed=1),
+                name=g, frame=frame, trace=trace,
+                rms_min=0.006, width_min=6000.0, width_max=30000.0,
+                exclude_within=5000.0,
+            )
+            for g in ("asc", "desc")
+        ],
+        normalize="sqrt_count",
+    )
+    return mesh, truth, SlipInversion(mesh, obs)
+
+
+def test_recovers_a_planted_patch_on_a_dipping_fault(dipping_recovery):
+    """The phase-two gate, held to the same bar as the vertical one."""
+    mesh, truth, inversion = dipping_recovery
+    model = inversion.solve(smoothing=0.3, ds_ratio=3.0, polarity=(-1, 0, 0),
+                            strike=(-6.0, 6.0), dip=(-3.0, 3.0))
+
+    assert model.converged, f"solver status {model.result.status}"
+    assert model.variance_reduction > 95.0
+
+    n = mesh.n_elements
+    assert np.corrcoef(model.strike_slip, truth[:n])[0, 1] > 0.9
+    truth_moment = 30e9 * np.sum(mesh.areas * np.hypot(truth[:n], truth[n:]))
+    assert 0.7 < model.moment() / truth_moment < 1.4
+
+    s = mesh.element_params[:, 0]
+    far = np.abs(s - s.mean()) > 0.4 * (s.max() - s.min())
+    assert np.abs(model.slip_magnitude[far]).mean() < 0.1
+
+
+def test_dip_slip_is_recovered_not_just_absorbed(dipping_recovery):
+    """The half of the model a vertical, pure-strike-slip fixture never tests.
+
+    Correlation, not amplitude: regularization biases dip-slip more than
+    strike-slip because it is the weaker of the two signals here and carries
+    ``ds_ratio`` times the smoothing.
+    """
+    mesh, truth, inversion = dipping_recovery
+    model = inversion.solve(smoothing=0.3, ds_ratio=3.0, polarity=(-1, 0, 0),
+                            strike=(-6.0, 6.0), dip=(-3.0, 3.0))
+
+    n = mesh.n_elements
+    truth_ds = truth[n:]
+    assert np.abs(truth_ds).max() > 0.5, "the fixture must actually plant dip-slip"
+    assert np.corrcoef(model.dip_slip, truth_ds)[0, 1] > 0.8
+    # Sign preserved: rake 25 on a negative peak puts dip-slip negative too.
+    assert model.dip_slip[np.argmax(np.abs(truth_ds))] < 0
+
+
+# -- surface displacement export ---------------------------------------------
+
+def test_surface_displacement_grid(recovery):
+    """The full three-component field, on the mesh's own frame.
+
+    Line of sight collapses three components into one; what an inversion actually
+    recovers is the vector, so being able to look at it is the point.
+    """
+    _, _, _, inversion = recovery
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    grid = model.surface_displacement(spacing=5000.0, pad=40e3)
+
+    assert set(grid.data_vars) == {"ux", "uy", "uz"}
+    assert grid.rio.crs is not None, "the grid must be georeferenced to be exportable"
+    assert grid.y[0] > grid.y[-1], "north-up, like every other raster here"
+    for name in ("ux", "uy", "uz"):
+        assert np.isfinite(grid[name].values).mean() > 0.8
+        assert grid[name].attrs["units"] == "m"
+
+
+def test_surface_displacement_is_nan_on_the_trace(recovery):
+    """A dislocation solution is singular where the fault meets the surface.
+
+    Returning a very large number there would be worse than returning nothing:
+    it would set the colour scale of every plot of the field.
+    """
+    mesh, _, _, inversion = recovery
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    grid = model.surface_displacement(spacing=4000.0, pad=20e3, exclude_within=8000.0)
+
+    top = mesh.nodes[mesh.params[:, 1] == mesh.params[:, 1].max()]
+    xx, yy = np.meshgrid(grid.x.values, grid.y.values)
+    distance = np.sqrt(np.min((xx.ravel()[:, None] - top[None, :, 0]) ** 2
+                              + (yy.ravel()[:, None] - top[None, :, 1]) ** 2, axis=1))
+    near = (distance <= 8000.0).reshape(xx.shape)
+
+    assert near.any(), "the test needs some grid points on the fault"
+    assert np.all(np.isnan(grid["ux"].values[near]))
+    assert np.isfinite(grid["ux"].values[~near]).all()
+
+
+def test_surface_displacement_matches_forward_point_by_point(recovery):
+    """The gridded field and ``forward`` must be the same calculation.
+
+    They are not the same code path -- the grid evaluates in blocks and masks the
+    near field -- so this is what pins the blocking as free.
+    """
+    _, _, _, inversion = recovery
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    grid = model.surface_displacement(spacing=8000.0, pad=30e3, block=64)
+
+    xx, yy = np.meshgrid(grid.x.values, grid.y.values)
+    finite = np.isfinite(grid["ux"].values)
+    pick = np.nonzero(finite.ravel())[0][::37][:20]
+    expected = model.forward(xx.ravel()[pick], yy.ravel()[pick])
+
+    for i, name in enumerate(("ux", "uy", "uz")):
+        np.testing.assert_allclose(grid[name].values.ravel()[pick], expected[:, i],
+                                   rtol=1e-5, atol=1e-9)
+
+
+def test_strike_slip_moves_the_ground_sideways_not_up(recovery):
+    """Physical sanity, and a check the components are not swapped.
+
+    A pure strike-slip patch on this near-east-west fault produces horizontal
+    displacement an order of magnitude larger than vertical, and mostly east-west.
+    If ``ux``/``uy``/``uz`` were permuted this would fail immediately.
+    """
+    _, _, _, inversion = recovery
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), dip=(-0.01, 0.01))
+    grid = model.surface_displacement(spacing=5000.0, pad=40e3)
+
+    east = np.nanmax(np.abs(grid["ux"].values))
+    north = np.nanmax(np.abs(grid["uy"].values))
+    up = np.nanmax(np.abs(grid["uz"].values))
+    assert east > 3 * north, "an east-west fault slips mostly east-west"
+    assert min(east, north) > 3 * up, "strike-slip is not a vertical motion"
+
+
+def test_to_grd_writes_readable_single_variable_grids(recovery, tmp_path):
+    import xarray as xr
+
+    _, _, _, inversion = recovery
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    paths = model.to_grd(tmp_path, spacing=8000.0, pad=30e3)
+
+    assert [p.name for p in paths] == ["ux.grd", "uy.grd", "uz.grd"]
+    for path in paths:
+        field = xr.open_dataarray(path)
+        assert field.name == "z"
+        assert field.dims == ("lat", "lon")
+        assert np.isfinite(field.values).any()
+        field.close()
+
+    with pytest.raises(KeyError, match="Unknown field"):
+        model.to_grd(tmp_path, fields=("ue",), spacing=20000.0, pad=20e3)

@@ -149,18 +149,28 @@ def forward_los_stack(mesh, slip, trace, frame, geometry="asc", epsg=32619,
 
 
 def tapered_slip(mesh, peak=-2.0, along_centre=0.55, along_width=40e3,
-                 locking_depth=12e3):
-    """A single right-lateral patch: Gaussian along strike, tapering with depth.
+                 locking_depth=12e3, rake=0.0):
+    """A single slip patch: Gaussian along strike, tapering with depth.
 
-    Negative strike-slip is right-lateral (see :mod:`nisar_tools.slip`), which is
-    the sense of the San Sebastian and Sagaing systems.
+    Negative ``peak`` at ``rake=0`` is right-lateral (see
+    :mod:`nisar_tools.slip`), which is the sense of the San Sebastian and Sagaing
+    systems, and is the default.
+
+    ``rake`` splits the patch between the two components the usual way -- 0 is
+    pure strike-slip, 90 is pure dip-slip with the hanging wall up. It defaults
+    to 0 because that is what the phase-one fixtures planted, but a recovery test
+    on a **dipping** mesh should use a non-zero rake: with dip-slip identically
+    zero, half the design matrix is never exercised and an error in the dip-slip
+    columns cannot show up in the answer.
     """
     s, z = mesh.element_params[:, 0], mesh.element_params[:, 1]
     length = s.max() - s.min()
     profile = np.exp(-((s - (s.min() + along_centre * length)) / along_width) ** 2)
     taper = np.clip(1.0 + z / locking_depth, 0.0, 1.0)
+    amplitude = peak * profile * taper
     slip = np.zeros(2 * mesh.n_elements)
-    slip[: mesh.n_elements] = peak * profile * taper
+    slip[: mesh.n_elements] = amplitude * np.cos(np.radians(rake))
+    slip[mesh.n_elements:] = amplitude * np.sin(np.radians(rake))
     return slip
 
 

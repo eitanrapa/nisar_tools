@@ -145,10 +145,17 @@ median instead — rounding it would leave a step of up to π.
 ## Slip inversion
 
 `nisar_tools.slip` inverts line-of-sight displacement for coseismic slip on a
-fault: a vertical fault discretised into triangular dislocation elements in a
-homogeneous elastic half-space, solved as a bounded, smoothed linear
-least-squares problem. It consumes a `LOSStack`, so it picks up exactly where
-the InSAR pipeline leaves off.
+fault, discretised into triangular dislocation elements and solved as a bounded,
+smoothed linear least-squares problem. It consumes a `LOSStack`, so it picks up
+exactly where the InSAR pipeline leaves off.
+
+Three choices are independent, and the simplest of each is the default:
+
+| | default | also available |
+|---|---|---|
+| geometry | vertical (`FaultMesh.vertical`) | curved, one dip per deep segment (`FaultMesh.curved`) |
+| medium | homogeneous half-space (`HalfSpaceTDE`) | layered, from EDGRN tables (`LayeredPointSource`) |
+| slip basis | constant per element | continuous nodal tent functions (`basis="node"`) |
 
 ```python
 from nisar_tools.slip import FaultTrace, FaultMesh, Observations, SlipInversion
@@ -185,6 +192,78 @@ Four things that are easy to get wrong:
   arbitrary constant and usually an orbital or ionospheric ramp.
   `ramp="linear"` gives each named track its own offset plus `x`/`y` gradients;
   without it those end up in the slip.
+
+### A fault that dips
+
+Give the fault a set of straight *deep segments* in plan view and one dip each.
+Each segment is pushed down-dip, a smooth surface is fitted through those bottom
+lines and the surface trace, and the mesh is that surface on the `(along-strike,
+depth)` lattice:
+
+```python
+from nisar_tools.slip import FaultSegment
+
+segments = FaultSegment.from_files(["Segment_001.txt", "Segment_002.txt"])
+mesh = FaultMesh.curved(trace, frame, segments=segments, dips=[75.0, 80.0],
+                        max_depth=25e3, edge_length=3e3, bias_w=1.15)
+```
+
+A segment file holds four numbers — `x_begin y_begin x_end y_end`, in metres in
+the local frame. `FaultSegment.from_trace(trace, frame, 3)` chops the trace into
+equal chords instead, if you only want "the western third dips 70, the rest 85".
+For a single dip everywhere, `FaultMesh.curved(trace, frame, uniform_dip=75.0)`.
+
+- **Dips above 90 are meaningful**, not an error: the fault leans the other way.
+- **`bias_w` thickens the depth levels downward**, putting resolution where the
+  data can constrain it. `bias_w=1` gives even levels.
+- **A dip of exactly 90 reproduces `FaultMesh.vertical` bit for bit**, so nothing
+  already computed changes by switching constructor.
+- The fit is refused if the down-dip offset exceeds the trace's radius of
+  curvature, because the surface would fold back through itself.
+
+### A layered crust
+
+A homogeneous half-space gives the whole crust one rigidity. The shallow crust is
+much softer than that, and assuming otherwise biases shallow slip low and deep
+slip high. `LayeredPointSource` cuts each element into point sources and looks
+each one up in Green's-function tables from Rongjiang Wang's **EDGRN**:
+
+```python
+from nisar_tools.slip import EdgrnTables, LayeredPointSource, VelocityModel
+
+tables = EdgrnTables.from_input_file("edgrn.inp")     # tables you generated
+engine = LayeredPointSource(tables)
+model  = SlipInversion(mesh, obs, engine=engine, basis="node").solve(smoothing=0.3)
+
+crust = VelocityModel.from_file("crust.txt")          # depth vp vs rho
+print(model.moment(crust) / 1e18, "x 10^18 N m")      # depth-dependent rigidity
+```
+
+You own the Earth model, as in the reference implementation — run EDGRN yourself
+and point at its input file. `run_edgrn(crust, workdir)` will drive it for you if
+`pip install nisar_tools[layered]` (which brings `pygrnwang` and its bundled
+Fortran) or an `edgrn` on `PATH` is available.
+
+The quadrature order is chosen per element and observation rather than fixed at
+the reference's 91 points per triangle: a point source is a good stand-in for a
+patch once you are a few patch-widths away, and almost every observation is far
+from almost every element. Measured on the real problem — 1148 elements, 8000
+observations — that is **89× fewer** source-receiver evaluations at 1e-2 accuracy
+and 10× at 1e-3. Pass `tolerance=None` for the fixed rule.
+
+### Nodal slip
+
+`basis="node"` solves for slip at the mesh nodes, with a continuous
+piecewise-linear field between them, instead of a constant per triangle. There
+are fewer nodes than triangles, so it is also a smaller problem, and it needs a
+smoothing operator defined on the surface (a Laplace–Beltrami operator) rather
+than on element adjacency — `solve()` picks the right one automatically. On the
+test fixture it recovers a planted patch to **correlation 0.994 with 328
+parameters**, against 0.986 with 480 for element-constant slip.
+
+Slip is still *reported* per element (`model.element_slip`, `to_dataset`,
+`to_text`, `plot_slip`), so the output format does not change with the
+parameterization.
 
 ### Measuring the sampling parameters instead of guessing them
 

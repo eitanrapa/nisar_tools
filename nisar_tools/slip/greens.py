@@ -66,7 +66,7 @@ class HalfSpaceTDE:
                 out[:, 0, col] = ue
                 out[:, 1, col] = un
                 out[:, 2, col] = uv
-        _require_finite(out, mesh, x, y)
+        _require_finite(out, mesh, x, y, z)
         return out
 
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None):
@@ -92,7 +92,7 @@ class HalfSpaceTDE:
                 g[:, k + comp * mesh.n_elements] = (
                     ue * look_e + un * look_n + uv * look_u
                 )
-        _require_finite(g, mesh, x, y)
+        _require_finite(g, mesh, x, y, z)
         return g
 
     def forward(self, mesh, slip, x, y, look=None, z=None):
@@ -157,23 +157,31 @@ def _as_points(x, y, z):
     return x, y, z
 
 
-def _require_finite(g, mesh, x, y):
+def _require_finite(g, mesh, x, y, z=None):
     """Refuse a design matrix with non-finite entries, and say which observation.
 
     A dislocation solution is singular on the fault surface itself, so an
     observation sitting on the surface trace produces NaN. Silently zeroing it
     would leave a row of the inversion quietly meaningless; the caller wants to
     know to widen the exclusion buffer around the trace.
+
+    The distance quoted is a true three-dimensional one. Measuring it in map
+    view, as this used to, is the same number on a vertical fault and an
+    understatement on a dipping one -- the deep nodes of a 45-degree fault sit
+    kilometres to one side, so the nearest node in plan view can be one the
+    observation is nowhere near.
     """
     bad = ~np.isfinite(g)
     if not bad.any():
         return
     rows = np.unique(np.nonzero(bad.any(axis=tuple(range(1, g.ndim))))[0])
-    nearest = np.min(
-        np.hypot(x[rows, None] - mesh.nodes[None, :, 0],
-                 y[rows, None] - mesh.nodes[None, :, 1]),
+    z = np.zeros(x.size) if z is None else np.asarray(z, dtype=float).ravel()
+    nearest = np.sqrt(np.min(
+        (x[rows, None] - mesh.nodes[None, :, 0]) ** 2
+        + (y[rows, None] - mesh.nodes[None, :, 1]) ** 2
+        + (z[rows, None] - mesh.nodes[None, :, 2]) ** 2,
         axis=1,
-    )
+    ))
     raise ValueError(
         f"{rows.size} observation(s) gave a non-finite Green's function; the "
         f"closest sits {nearest.min():.0f} m from the fault. Dislocation "
