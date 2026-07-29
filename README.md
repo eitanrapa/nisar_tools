@@ -186,6 +186,55 @@ Four things that are easy to get wrong:
   `ramp="linear"` gives each named track its own offset plus `x`/`y` gradients;
   without it those end up in the slip.
 
+### Measuring the sampling parameters instead of guessing them
+
+`scene_report` derives `rms_min`, `width_min` and `exclude_within` from a scene,
+and reports the coverage that limits the answer regardless of them:
+
+```python
+from nisar_tools.slip import scene_report, ramp_content
+from nisar_tools.slip.plot import plot_coverage
+
+r = scene_report(los_desc, trace, frame, mesh=mesh)
+print(r.attrs["noise_floor"], r.attrs["rms_min"], r.attrs["width_min"])
+plot_coverage(r, name="D126")
+```
+
+Why each one is a measurement and not a preference:
+
+- **`rms_min` is a noise level.** The quadtree splits while the *pixel* scatter
+  inside a cell exceeds it, and that scatter does not shrink as the cell does —
+  so set below the noise, cells can never stop and simply run down to
+  `width_min`. On real scenes this showed up as a median within-cell scatter of
+  **11.8 mm against `rms_min=6 mm`**, with 47% of cells stuck at the floor, and
+  it accounted for 18 631 samples of mostly atmosphere. `noise_floor` measures it
+  on a *fixed* block grid, so the estimate does not depend on the quadtree it is
+  about to configure.
+- **`width_min` is discontinuous.** Cells are index rectangles halved at their
+  midpoint, so the reachable sizes are a dyadic ladder — per axis, per scene, and
+  not guessable. `cell_size_ladder` simulates the descent: 1000 m gave a 1075 m
+  terminal cell and 57 246 samples, 1500 m gave 1750 m and 24 429, and two values
+  in the same gap do nothing at all.
+- **`exclude_within` needs only to stop a *cell* straddling the trace**, so its
+  floor is `width_min / 2`. Larger values are a judgement about unwrapping errors
+  and near-fault model error — worth making deliberately, since removing the near
+  field also removes the only data that constrains shallow slip.
+
+`ramp_content(obs)` answers the companion question, and needs no Green's matrix:
+how much of the data a per-track offset explains, and how much more the `x`/`y`
+gradients add. The columns are normalised by each track's span, so a gradient
+reads directly as **metres of LOS across the scene** — centimetres is orbit, tens
+of centimetres is deformation being taken out of the slip model. For a long,
+near east-west strike-slip fault the far-field coseismic pattern is an arctangent
+step across the trace, which over a finite aperture looks a great deal like a
+gradient perpendicular to strike, so the two genuinely compete.
+
+**None of it fixes coverage, which is usually what binds.** The along-strike
+profile is the point of the report: on the Venezuela scenes an aggregate "19% of
+samples north of the trace" read like thin two-sided coverage, while the profile
+showed the north block was absent along the eastern *two-thirds* — exactly where
+the largest signal was.
+
 ### Choosing the smoothing weight
 
 `l_curve` solves at many weights over the same Green's matrix and tabulates

@@ -48,6 +48,7 @@ Sign conventions, which matter more here than anywhere else in the package:
   policing it after the fact.
 """
 
+from .diagnostics import cell_size_ladder, noise_floor, ramp_content, scene_report
 from .frame import LocalFrame
 from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel
@@ -63,4 +64,8 @@ __all__ = [
     "Observations",
     "SlipInversion",
     "SlipModel",
+    "cell_size_ladder",
+    "noise_floor",
+    "ramp_content",
+    "scene_report",
 ]

@@ -156,3 +156,45 @@ def plot_l_curve(curve, ax=None):
     ax.set_title("L-curve (labels are smoothing weights; ! = unconverged)")
     ax.grid(alpha=0.3)
     return ax.figure, ax
+
+
+def plot_coverage(report, ax=None, name=None):
+    """Valid area on each side of the trace, against along-strike distance.
+
+    A scalar coverage fraction cannot express the failure this is for. On the
+    Venezuela scenes "19% of samples north of the trace" reads like thin
+    two-sided coverage; the profile showed the north block was missing along the
+    eastern *two-thirds* -- precisely where the largest signal was -- which is a
+    resolution limit no sampling parameter can repair. Shaded spans mark the
+    stretches with data on one side only.
+
+    Takes the :class:`xarray.Dataset` from
+    :func:`~nisar_tools.slip.diagnostics.scene_report`.
+    """
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 3.4))
+
+    s = report["along"].values / 1e3
+    left = report["valid_left"].values / 1e6
+    right = report["valid_right"].values / 1e6
+
+    ax.fill_between(s, 0, left, color="#3b6ea5", alpha=0.75, label="left of trace")
+    ax.fill_between(s, 0, -right, color="#a5553b", alpha=0.75, label="right of trace")
+    ax.axhline(0.0, color="0.2", lw=1)
+
+    one_sided = ~report["two_sided"].values
+    if one_sided.any() and s.size > 1:
+        step = float(np.diff(s).mean())
+        for centre in s[one_sided]:
+            ax.axvspan(centre - step / 2, centre + step / 2,
+                       color="0.6", alpha=0.25, lw=0)
+
+    ax.set_xlabel("Along-strike distance (km)")
+    ax.set_ylabel("Valid area (km²)")
+    title = "Coverage either side of the trace (grey = one side only)"
+    ax.set_title(title if name is None else f"{name}: {title}")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(alpha=0.3)
+    return ax.figure, ax
