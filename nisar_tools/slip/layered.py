@@ -80,17 +80,23 @@ class LayeredPointSource:
         self.max_points = int(max_points)
 
     # -- the engine protocol ----------------------------------------------
-    def displacement(self, mesh, x, y, z=None):
-        """ENU displacement per unit slip, shape ``(npts, 3, 2 * n_elements)``."""
+    #: This engine can integrate a basis function directly, so
+    #: :class:`~nisar_tools.slip.inversion.SlipInversion` hands it the basis
+    #: instead of projecting an element-wise matrix afterwards.
+    supports_basis = True
+
+    def displacement(self, mesh, x, y, z=None, basis=None):
+        """ENU displacement per unit slip, shape ``(npts, 3, 2 * n_basis)``."""
         x, y, z = _as_points(x, y, z)
-        out = np.zeros((x.size, 3, 2 * mesh.n_elements))
-        for k, comp, enu in self._columns(mesh, x, y, z):
-            out[:, :, k + comp * mesh.n_elements] = enu
+        n = _n_basis(mesh, basis)
+        out = np.zeros((x.size, 3, 2 * n))
+        for k, comp, enu in self._columns(mesh, x, y, z, basis):
+            out[:, :, k + comp * n] = enu
         _require_finite(out, mesh, x, y, z)
         return out
 
-    def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None):
-        """Line-of-sight design matrix, shape ``(npts, 2 * n_elements)``."""
+    def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None):
+        """Line-of-sight design matrix, shape ``(npts, 2 * n_basis)``."""
         x, y, z = _as_points(x, y, z)
         look = np.stack([np.asarray(look_e, dtype=float).ravel(),
                          np.asarray(look_n, dtype=float).ravel(),
@@ -98,46 +104,76 @@ class LayeredPointSource:
         if look.shape[0] != x.size:
             raise ValueError("Look-vector components must match the observation count")
 
-        g = np.zeros((x.size, 2 * mesh.n_elements))
-        for k, comp, enu in self._columns(mesh, x, y, z):
-            g[:, k + comp * mesh.n_elements] = (enu * look).sum(axis=1)
+        n = _n_basis(mesh, basis)
+        g = np.zeros((x.size, 2 * n))
+        for k, comp, enu in self._columns(mesh, x, y, z, basis):
+            g[:, k + comp * n] = (enu * look).sum(axis=1)
         _require_finite(g, mesh, x, y, z)
         return g
 
-    def forward(self, mesh, slip, x, y, look=None, z=None):
+    def forward(self, mesh, slip, x, y, look=None, z=None, basis=None):
         slip = np.asarray(slip, dtype=float)
         if slip.ndim == 2:
             slip = np.concatenate([slip[:, 0], slip[:, 1]])
-        if slip.size != 2 * mesh.n_elements:
-            raise ValueError(f"slip has {slip.size} values; expected {2 * mesh.n_elements}")
+        expected = 2 * _n_basis(mesh, basis)
+        if slip.size != expected:
+            raise ValueError(f"slip has {slip.size} values; expected {expected}")
         if look is None:
-            return self.displacement(mesh, x, y, z) @ slip
-        return self.los_matrix(mesh, x, y, *look, z=z) @ slip
+            return self.displacement(mesh, x, y, z, basis=basis) @ slip
+        return self.los_matrix(mesh, x, y, *look, z=z, basis=basis) @ slip
 
     # -- assembly ----------------------------------------------------------
-    def _columns(self, mesh, x, y, z):
-        """Yield ``(element, component, (npts, 3) ENU)`` for every column."""
-        vertices = mesh.vertices
-        areas = mesh.areas
-        centroids = mesh.centroids
-        normals = mesh.normals
+    def _columns(self, mesh, x, y, z, basis=None):
+        """Yield ``(index, component, (npts, 3) ENU)`` for every column.
 
-        for k in range(mesh.n_elements):
-            p1, p2, p3 = vertices[k]
-            n = normals[k]
-            basis = _slip_directions(n)
-            size = np.sqrt(2.0 * areas[k])
-            orders = self._orders(centroids[k], size, x, y, z)
+        With no basis, or an element basis, one column per element with slip
+        constant over it. With a **nodal** basis, one column per node with slip
+        varying *linearly* from 1 at that node to 0 at every neighbour: each
+        quadrature point in each incident triangle is weighted by the tent
+        function there, so the integral is of the basis function itself rather
+        than of its average.
 
-            for comp, direction in enumerate(basis):
-                moment = _moment_components(n, direction)
-                enu = np.zeros((x.size, 3))
-                for order in np.unique(orders):
-                    at = orders == order
-                    points, weights = _triangle_quadrature(p1, p2, p3, int(order))
-                    enu[at] = self._sum_sources(
-                        points, weights * areas[k], moment, x[at], y[at])
-                yield k, comp, enu
+        That is the difference between this and the projection
+        :meth:`~nisar_tools.slip.basis.NodeBasis.projection` applies to an
+        element-wise matrix. Both preserve the moment; only this one gets the
+        near-field shape right, because a tent is not constant across a triangle.
+        It costs about **three times** an element assembly -- each triangle is
+        visited once per vertex -- not the thousandfold a fixed 91-point rule per
+        node would.
+        """
+        if basis is None or basis.name == "element":
+            supports = [(k, [k]) for k in range(mesh.n_elements)]
+            tented = False
+        elif basis.name == "node":
+            supports = [(i, basis._incident[i]) for i in range(mesh.n_nodes)]
+            tented = True
+        else:
+            raise ValueError(f"This engine cannot assemble the {basis.name!r} basis")
+
+        vertices, areas = mesh.vertices, mesh.areas
+        centroids, normals = mesh.centroids, mesh.normals
+
+        for index, elements in supports:
+            accumulated = [np.zeros((x.size, 3)), np.zeros((x.size, 3))]
+            for element in elements:
+                p1, p2, p3 = vertices[element]
+                normal = normals[element]
+                size = np.sqrt(2.0 * areas[element])
+                orders = self._orders(centroids[element], size, x, y, z)
+
+                for comp, direction in enumerate(_slip_directions(normal)):
+                    moment = _moment_components(normal, direction)
+                    for order in np.unique(orders):
+                        at = orders == order
+                        points, share = _triangle_quadrature(p1, p2, p3, int(order))
+                        weights = share * areas[element]
+                        if tented:
+                            weights = weights * _tent(
+                                vertices[element], mesh.triangles[element], index, points)
+                        accumulated[comp][at] += self._sum_sources(
+                            points, weights, moment, x[at], y[at])
+            for comp in (0, 1):
+                yield index, comp, accumulated[comp]
 
     def _orders(self, centroid, size, x, y, z):
         """Quadrature order for each observation, from how far away it is.
@@ -201,6 +237,17 @@ class LayeredPointSource:
         return np.stack([(east * weights).sum(axis=1),
                          (north * weights).sum(axis=1),
                          (-uz * weights).sum(axis=1)], axis=1)
+
+
+def _n_basis(mesh, basis):
+    return mesh.n_elements if basis is None else basis.n_basis
+
+
+def _tent(vertices, triangle, node, points):
+    """The nodal tent function of ``node``, sampled inside its own triangle."""
+    from .basis import _barycentric_weight
+
+    return _barycentric_weight(vertices, triangle, node, points)
 
 
 def _slip_directions(normal):

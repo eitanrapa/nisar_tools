@@ -271,3 +271,107 @@ def test_engine_satisfies_the_inversion_protocol(uniform_tables, scene):
         assert hasattr(engine, member)
     assert SlipInversion.__init__.__defaults__ is not None
     assert engine.name != HalfSpaceTDE.name
+
+
+# -- linear (tent) slip between nodes ----------------------------------------
+
+def test_tent_assembly_satisfies_partition_of_unity(uniform_tables, scene):
+    """The exact check on a nodal assembly, and it is exact to machine precision.
+
+    The nodal basis functions sum to 1 everywhere on the fault, so summing every
+    node column has to equal summing every element column -- the same total slip,
+    described two ways. Nothing about the tent weighting, the incidence lists or
+    the quadrature can be wrong and still satisfy this: measured residual 2e-16.
+    """
+    from nisar_tools.slip.basis import ElementBasis, NodeBasis
+
+    _, _, mesh, ox, oy = scene
+    engine = LayeredPointSource(uniform_tables, tolerance=1e-3)
+    element = engine.displacement(mesh, ox, oy, basis=ElementBasis(mesh))
+    nodal = engine.displacement(mesh, ox, oy, basis=NodeBasis(mesh))
+
+    assert nodal.shape[2] == 2 * mesh.n_nodes
+    ne, nn = mesh.n_elements, mesh.n_nodes
+    for e_block, n_block in ((slice(0, ne), slice(0, nn)),
+                             (slice(ne, 2 * ne), slice(nn, 2 * nn))):
+        total_e = element[:, :, e_block].sum(axis=2)
+        total_n = nodal[:, :, n_block].sum(axis=2)
+        assert np.abs(total_n - total_e).max() / np.abs(total_e).max() < 1e-12
+
+
+def test_tent_assembly_differs_from_the_lumped_projection(uniform_tables, scene):
+    """Which is the whole reason for assembling in the basis rather than projecting.
+
+    Replacing a tent by its mean over each triangle preserves the moment, so the
+    far field is untouched, but it flattens the field within one element of a node.
+    Measured on this scene: up to **23%** on individual columns, 0.6% rms. If these
+    agreed there would be no point doing the harder integral.
+    """
+    from nisar_tools.slip.basis import ElementBasis, NodeBasis
+
+    _, _, mesh, ox, oy = scene
+    engine = LayeredPointSource(uniform_tables, tolerance=1e-3)
+    basis = NodeBasis(mesh)
+    nodal = engine.displacement(mesh, ox, oy, basis=basis)
+
+    element = engine.displacement(mesh, ox, oy, basis=ElementBasis(mesh))
+    projection = basis.projection().toarray()
+    ne = mesh.n_elements
+    lumped = np.concatenate([element[:, :, :ne] @ projection,
+                             element[:, :, ne:] @ projection], axis=2)
+
+    difference = np.abs(nodal - lumped).max() / np.abs(nodal).max()
+    assert difference > 1e-2, "a tent is not its own average; they must differ"
+
+
+def test_inversion_uses_the_exact_basis_for_a_layered_engine(uniform_tables, scene):
+    """The engine advertises `supports_basis`, and the inversion honours it."""
+    from nisar_tools.slip import Observations, SlipInversion
+
+    _, frame, mesh, ox, oy = scene
+    import xarray as xr
+
+    n = ox.size
+    obs = Observations(xr.Dataset({
+        "x": ("obs", ox), "y": ("obs", oy),
+        "los": ("obs", np.zeros(n)), "weight": ("obs", np.ones(n)),
+        "look_e": ("obs", np.full(n, 0.62)), "look_n": ("obs", np.full(n, -0.11)),
+        "look_u": ("obs", np.full(n, 0.78)),
+        "track": ("obs", np.array(["t"] * n)),
+    }, attrs={"frame": frame.to_dict()}))
+
+    layered = SlipInversion(mesh, obs, engine=LayeredPointSource(uniform_tables),
+                            basis="node")
+    assert layered.exact_basis is True
+    assert layered.g.shape == (n, 2 * mesh.n_nodes)
+
+    # The half-space engine cannot integrate a tent, so it projects instead.
+    homogeneous = SlipInversion(mesh, obs, basis="node")
+    assert homogeneous.exact_basis is False
+    assert homogeneous.g.shape == (n, 2 * mesh.n_nodes)
+
+
+def test_tent_assembly_costs_about_three_element_assemblies(uniform_tables, scene):
+    """Each triangle is visited once per vertex -- not once per quadrature lattice.
+
+    A fixed 91-point rule per node, as the reference uses, would be a thousandfold.
+    Weighting the *adaptive* quadrature by the tent keeps the cost proportional to
+    the element assembly.
+    """
+    from nisar_tools.slip.basis import NodeBasis
+
+    _, _, mesh, ox, oy = scene
+    engine = LayeredPointSource(uniform_tables, tolerance=3e-3)
+    oz = np.zeros(ox.size)
+
+    element_points = sum(
+        int((engine._orders(mesh.centroids[k], np.sqrt(2 * mesh.areas[k]),
+                            ox, oy, oz) ** 2).sum())
+        for k in range(mesh.n_elements))
+    basis = NodeBasis(mesh)
+    nodal_points = sum(
+        int((engine._orders(mesh.centroids[e], np.sqrt(2 * mesh.areas[e]),
+                            ox, oy, oz) ** 2).sum())
+        for i in range(mesh.n_nodes) for e in basis._incident[i])
+
+    assert 2.0 < nodal_points / element_points < 4.0

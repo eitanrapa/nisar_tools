@@ -170,16 +170,21 @@ class SlipInversion:
         ds = obs.ds
         self.d = np.asarray(ds["los"].values, dtype=float)
         self.w = np.asarray(ds["weight"].values, dtype=float)
-        # Engines always assemble per element -- that is what a dislocation
-        # solution is defined on -- and the basis is applied afterwards, so both
-        # engines stay interchangeable and neither has to know about tents.
-        element_g = self.engine.los_matrix(
-            mesh,
-            ds["x"].values, ds["y"].values,
-            ds["look_e"].values, ds["look_n"].values, ds["look_u"].values,
-        )
-        self.g = element_g if self.basis.name == "element" else element_g @ _blocked(
-            self.basis.projection())
+        # An engine that can integrate a basis function directly is given the
+        # basis, so a nodal column is the integral of the tent itself. One that
+        # cannot -- the closed-form triangular dislocation, which is defined on a
+        # patch of *constant* slip -- assembles per element and has the basis
+        # projected on afterwards. Both preserve the moment exactly; only the
+        # first gets the near-field shape of a linearly varying slip patch right.
+        points = (ds["x"].values, ds["y"].values,
+                  ds["look_e"].values, ds["look_n"].values, ds["look_u"].values)
+        self.exact_basis = bool(getattr(self.engine, "supports_basis", False))
+        if self.exact_basis:
+            self.g = self.engine.los_matrix(mesh, *points, basis=self.basis)
+        else:
+            element_g = self.engine.los_matrix(mesh, *points)
+            self.g = (element_g if self.basis.name == "element"
+                      else element_g @ _blocked(self.basis.projection()))
 
         self.ramp, self.ramp_labels = ramp_columns(obs, ramp)
         self.n_slip = self.basis.n_param
@@ -479,8 +484,12 @@ class SlipModel:
 
     def forward(self, x, y, look=None):
         """Predict displacement at arbitrary points from this slip model."""
-        return self._inversion.engine.forward(self.mesh, self.element_slip,
-                                              x, y, look=look)
+        engine = self._inversion.engine
+        if getattr(self._inversion, "exact_basis", False):
+            # The engine assembled in the basis, so hand it the coefficients.
+            return engine.forward(self.mesh, self.x[:2 * self.basis.n_basis],
+                                  x, y, look=look, basis=self.basis)
+        return engine.forward(self.mesh, self.element_slip, x, y, look=look)
 
     def surface_displacement(self, spacing=1000.0, pad=50e3, bounds=None,
                              exclude_within=None, block=4096):

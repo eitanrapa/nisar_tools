@@ -86,8 +86,21 @@ class FaultTrace:
             raise ValueError("lon and lat must have the same length")
         if lon.size < 2:
             raise ValueError("A fault trace needs at least two vertices")
-        self.lon = lon
-        self.lat = lat
+
+        # Drop repeated vertices. A zero-length segment carries no information
+        # and every consumer downstream has to work around it: arc length gets a
+        # duplicated value, so any derivative with respect to it divides by zero
+        # and comes back NaN, and the point-to-segment projection needs a
+        # `vv == 0` guard. Traces assembled from more than one source routinely
+        # have them -- the Boconó/San Sebastián trace, spliced from a GEM
+        # catalogue and optical mapping, repeats one vertex at the join.
+        keep = np.concatenate([[True], (np.diff(lon) != 0) | (np.diff(lat) != 0)])
+        self.n_duplicates_dropped = int((~keep).sum())
+        if keep.sum() < 2:
+            raise ValueError("A fault trace needs at least two distinct vertices")
+
+        self.lon = lon[keep]
+        self.lat = lat[keep]
         self.name = name
 
     # -- construction ------------------------------------------------------
