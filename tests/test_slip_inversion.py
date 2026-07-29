@@ -11,6 +11,7 @@ import pytest
 from slip_synthetic import forward_los_stack, tapered_slip
 
 from nisar_tools.slip import FaultMesh, FaultTrace, Observations, SlipInversion
+from nisar_tools.slip.inversion import _StackedOperator
 from nisar_tools.slip.regularize import (
     neighbor_smoothing,
     ramp_columns,
@@ -238,19 +239,56 @@ def test_l_curve_takes_no_worker_pool(recovery):
         inversion.l_curve([0.3, 2.0], workers=2, polarity=(-1, 0, 0))
 
 
-def test_lsmr_tol_auto_is_the_default_and_cuts_iterations(recovery):
-    """The shipped default must be the adaptive inner tolerance, and it must
-    actually reduce work versus scipy's `None` -- for the same model."""
-    _, _, _, inversion = recovery
-    fast = inversion.solve(smoothing=0.05, polarity=(-1, 0, 0))
-    slow = inversion.solve(smoothing=0.05, polarity=(-1, 0, 0), lsmr_tol=None)
+def _count_matvecs(monkeypatch):
+    """Tally products through the stacked operator; returns a one-element list."""
+    n = [0]
+    for name in ("_matvec", "_rmatvec"):
+        original = getattr(_StackedOperator, name)
 
-    assert fast.options["lsmr_tol"] == "auto"
-    assert fast.converged and slow.converged
-    assert fast.result.nit < slow.result.nit
+        def counted(self, v, _original=original, _n=n):
+            _n[0] += 1
+            return _original(self, v)
+
+        monkeypatch.setattr(_StackedOperator, name, counted)
+    return n
+
+
+def test_lsmr_tol_auto_is_the_default_and_cuts_work(recovery, monkeypatch):
+    """The shipped default must be the adaptive inner tolerance, and must reduce
+    work versus scipy's ``None`` -- for the same model.
+
+    Counted in **matrix-vector products, not outer iterations**. ``"auto"`` solves
+    each sub-problem loosely, so it can take *more* outer steps while doing far
+    less total work; ``nit`` is the wrong meter, and pinning it pinned a fixture
+    accident instead of the property -- it broke when the fixtures moved to the
+    left-looking geometry NISAR actually flies, with no change to the solver.
+
+    Summed over two weights, because the win is **not uniform in the weight**.
+    Measured on this fixture, ``None``/``"auto"`` matvecs are 2.18x at lam=1.0,
+    1.93x at 0.5 and 1.91x at 0.3, but **0.70x at lam=2.0 and 0.78x at 0.05** --
+    the adaptive tolerance loses at both ends. Over a whole sweep it still comes
+    out ahead (1.17x here), which is how :meth:`l_curve` uses it.
+    """
+    _, _, _, inversion = recovery
+    weights = (1.0, 0.3)
+
+    n = _count_matvecs(monkeypatch)
+    work, models = {}, {}
+    for tol in ("auto", None):
+        n[0] = 0
+        models[tol] = [inversion.solve(smoothing=lam, polarity=(-1, 0, 0),
+                                       lsmr_tol=tol) for lam in weights]
+        work[tol] = n[0]
+
+    assert models["auto"][0].options["lsmr_tol"] == "auto"
+    assert all(m.converged for ms in models.values() for m in ms)
+    assert work[None] > 1.2 * work["auto"], work
+
     # Same answer: the speed-up is in how the sub-problem is solved, not what for.
-    assert fast.variance_reduction == pytest.approx(slow.variance_reduction, abs=0.5)
-    np.testing.assert_allclose(fast.strike_slip, slow.strike_slip, atol=0.05)
+    for fast, slow in zip(models["auto"], models[None]):
+        assert fast.variance_reduction == pytest.approx(slow.variance_reduction,
+                                                        abs=0.5)
+        np.testing.assert_allclose(fast.strike_slip, slow.strike_slip, atol=0.05)
 
 
 def test_ramp_absorbs_an_added_offset(recovery):

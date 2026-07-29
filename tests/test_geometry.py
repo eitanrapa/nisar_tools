@@ -165,9 +165,40 @@ def test_phase_to_los_formula_and_sign():
     rng = np.random.default_rng(0)
     unw = rng.standard_normal((4, 5)).astype(np.float32) * 5
     lam = 0.24
-    np.testing.assert_allclose(G.phase_to_los(unw, lam), lam / (4 * np.pi) * unw)
+    np.testing.assert_allclose(G.phase_to_los(unw, lam), -lam / (4 * np.pi) * unw)
     np.testing.assert_allclose(G.phase_to_los(unw, lam, sign=-1),
-                               -lam / (4 * np.pi) * unw)
+                               lam / (4 * np.pi) * unw)
+
+
+def test_phase_to_los_inverts_the_range_change_chain():
+    """The absolute sign, derived forward from a displacement rather than assumed.
+
+    Every other test in the slip path builds its data with the same convention it
+    then inverts, so all of them pass under a global sign flip. This one goes the
+    other way round -- ground motion -> range change -> interferometric phase --
+    and only then calls ``phase_to_los``, so it is the one place a mirrored LOS
+    field cannot hide.
+
+    The assumption being pinned is ISCE3's ``exp(-j 4 pi r / lambda)`` SLC phase,
+    which with ``ref * conj(sec)`` gives
+    ``phi = phi_ref - phi_sec = (4 pi / lambda) (r_sec - r_ref)``.
+    """
+    lam = 0.242
+    look = np.array([0.62, -0.11, 0.78])       # target -> sensor, ascending-ish
+    look /= np.linalg.norm(look)
+
+    for u in (np.array([0.05, 0.0, 0.0]),      # 5 cm east
+              np.array([0.0, 0.0, -0.03]),     # 3 cm subsidence
+              np.array([-0.02, 0.04, 0.01])):
+        toward = float(u @ look)               # positive = toward the sensor
+        r_sec_minus_ref = -toward              # moving toward it shortens range
+        phi = (4 * np.pi / lam) * r_sec_minus_ref
+
+        assert G.phase_to_los(phi, lam) == pytest.approx(toward, abs=1e-12)
+
+    # Subsidence with an upward-looking LOS must read as motion *away*.
+    down = np.array([0.0, 0.0, -0.03])
+    assert G.phase_to_los((4 * np.pi / lam) * -float(down @ look), lam) < 0
 
 
 # -- GSLC readers (synthetic granule with a cube) ----------------------------

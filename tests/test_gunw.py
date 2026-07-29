@@ -73,8 +73,8 @@ def test_to_los_self_contained(gunw_factory):
     unw = u.ds["unw"].isel(pair=0).values
     d = los.ds["los"].isel(pair=0).values
     valid = np.isfinite(unw)
-    # d = +(lambda / 4pi) * phase
-    assert np.allclose(d[valid], WAVELENGTH / (4 * np.pi) * unw[valid], atol=1e-6)
+    # d = -(lambda / 4pi) * phase; see geometry.PHASE_RANGE_SIGN
+    assert np.allclose(d[valid], -WAVELENGTH / (4 * np.pi) * unw[valid], atol=1e-6)
     assert np.all(np.isnan(d[~valid]))
 
     inc = los.ds["incidence_angle"].values

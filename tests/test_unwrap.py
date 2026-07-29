@@ -449,5 +449,7 @@ def test_add_cycles_carries_into_los(gslc_factory):
 
     base = stack.to_los(p, dem=None).ds["los"].values
     bumped = stack.add_cycles(1).to_los(p, dem=None).ds["los"].values
+    # One cycle is 2*pi of phase, and d = -(lambda/4pi)*phase, so adding a cycle
+    # moves the displacement half a wavelength *away* from the sensor.
     lam = G.radar_wavelength(p)
-    np.testing.assert_allclose(bumped - base, lam / 2.0, rtol=1e-5)
+    np.testing.assert_allclose(bumped - base, -lam / 2.0, rtol=1e-5)

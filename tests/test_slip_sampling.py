@@ -98,17 +98,19 @@ def test_exclusion_needs_a_trace(trace, frame):
         Observations.from_los(stack, frame=frame, exclude_within=1000.0)
 
 
-def test_sign_attribute_restores_the_positive_toward_sensor_convention(trace, frame):
-    """A stack that stores negated displacement, and says so, samples the same.
+def test_sign_attribute_is_provenance_and_is_not_re_applied(trace, frame):
+    """``attrs["sign"]`` must not touch ``los``. The sampler takes it as-is.
 
-    ``LOSStack.attrs["sign"]`` records the convention *already applied* to the
-    stored ``los``, so the sampler multiplies by it to get back to
-    positive-toward-sensor. Two stacks describing the same ground motion -- one
-    with ``sign=+1``, one with the data negated and ``sign=-1`` -- must therefore
-    produce identical observations.
+    A stack's ``los`` is positive toward the sensor whatever ``sign`` was passed,
+    because :func:`~nisar_tools.geometry.phase_to_los` applied it when the stack
+    was built. The sampler used to multiply by it a second time, squaring it to
+    +1 and silently undoing the very correction ``sign=-1`` exists to make -- so
+    there was no supported way to flip an inverted fringe sense at all.
 
-    Missing this would fit a slip model with the wrong sense of motion on every
-    track at once, which the variance reduction cannot reveal.
+    That is not a cosmetic bug: it fits a slip model with the wrong sense of
+    motion on every track at once, and the variance reduction cannot reveal it.
+    Two stacks holding the same displacement must sample identically no matter
+    what they are labelled.
     """
     positive = _sample(trace, frame, sign=1)
     negative = _sample(trace, frame, sign=-1)
@@ -116,23 +118,9 @@ def test_sign_attribute_restores_the_positive_toward_sensor_convention(trace, fr
                                rtol=1e-6)
 
 
-def test_sign_attribute_is_actually_read(trace, frame):
-    """Mislabel the convention and the sampled displacement flips.
-
-    Guards against the attribute being ignored, which the test above would not
-    catch on its own.
-    """
-    stack = analytic_los_stack(trace, frame, spacing=1500.0, sign=-1)
-    honest = Observations.from_los(stack, frame=frame, trace=trace, rms_min=0.008,
-                                   width_min=2500.0, width_max=20000.0,
-                                   exclude_within=3000.0)
-    stack.ds.attrs["sign"] = 1                        # now the label is wrong
-    mislabelled = Observations.from_los(stack, frame=frame, trace=trace, rms_min=0.008,
-                                        width_min=2500.0, width_max=20000.0,
-                                        exclude_within=3000.0)
-    np.testing.assert_allclose(mislabelled.ds["los"].values, -honest.ds["los"].values,
-                               rtol=1e-9)
-
+def test_sign_attribute_is_validated(trace, frame):
+    """Still read far enough to reject a value that means nothing."""
+    stack = analytic_los_stack(trace, frame, spacing=1500.0)
     stack.ds.attrs["sign"] = 0
     with pytest.raises(ValueError, match="sign attribute"):
         Observations.from_los(stack, frame=frame, trace=trace, exclude_within=3000.0)

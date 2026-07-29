@@ -38,10 +38,12 @@ def test_to_los_displacement_and_geometry(gslc_factory):
     los = unw_stack.to_los(p, dem=None)
     assert isinstance(los, LOSStack)
 
-    # Displacement: d = +(lambda / 4pi) * phase (positive toward sensor).
+    # Displacement: d = -(lambda / 4pi) * phase (positive toward sensor). The
+    # minus is `geometry.PHASE_RANGE_SIGN` -- with `ref * conj(sec)` the phase
+    # decreases as the ground approaches the sensor.
     lam = G.radar_wavelength(p)
     np.testing.assert_allclose(
-        los.ds["los"].values, lam / (4 * np.pi) * unw, rtol=1e-5, atol=1e-7
+        los.ds["los"].values, -lam / (4 * np.pi) * unw, rtol=1e-5, atol=1e-7
     )
 
     # Geometry is 2D (shared across pairs) and matches the analytic cube.
@@ -74,7 +76,7 @@ def test_to_los_wavelength_override(gslc_factory):
     p = gslc_factory(ny=32, nx=32, write_geometry=True)
     unw_stack, unw, *_ = _synthetic_unwrapped(p)
     los = unw_stack.to_los(p, wavelength=0.1)
-    np.testing.assert_allclose(los.ds["los"].values, 0.1 / (4 * np.pi) * unw,
+    np.testing.assert_allclose(los.ds["los"].values, -0.1 / (4 * np.pi) * unw,
                                rtol=1e-5, atol=1e-7)
 
 

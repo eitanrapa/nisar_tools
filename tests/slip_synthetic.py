@@ -21,8 +21,9 @@ from pyproj import Transformer
 from nisar_tools.los import LOSStack
 
 # Two look geometries roughly like NISAR ascending and descending passes at
-# mid-swath: right-looking, so the LOS unit vector's east component reverses
-# between them. That reversal is what makes strike-slip and dip-slip separable.
+# mid-swath: **left**-looking, as NISAR flies, so the LOS unit vector's east
+# component reverses between them. That reversal is what makes strike-slip and
+# dip-slip separable.
 GEOMETRIES = {
     "asc": {"incidence": 35.0, "heading": -10.0},
     "desc": {"incidence": 39.0, "heading": 190.0},
@@ -30,15 +31,22 @@ GEOMETRIES = {
 
 
 def look_vector(incidence_deg, heading_deg):
-    """Target->sensor ENU unit vector for a right-looking pass.
+    """Target->sensor ENU unit vector for a **left**-looking pass.
 
     Matches :mod:`nisar_tools.geometry`'s convention: ``los_up`` is positive and
     equals ``cos(incidence)``.
+
+    Left-looking, because that is what NISAR is -- and these fixtures used to be
+    right-looking, which put every slip test on the wrong side of the orbit from
+    the data the package actually processes. Sanity check against a real
+    granule: ascending ``los_east`` is **+0.68**, descending **-0.61**.
     """
     inc = np.deg2rad(incidence_deg)
-    # Look direction is 90 degrees clockwise of the heading for a right-looking
-    # radar; the horizontal part of the target->sensor vector points back at it.
-    az = np.deg2rad(heading_deg + 90.0)
+    # A left-looking radar illuminates 90 degrees anticlockwise of its heading,
+    # so on an ascending (roughly northward) pass the swath lies west of the
+    # ground track and the sensor is EAST of the target. The horizontal part of
+    # the target->sensor vector points back at the spacecraft.
+    az = np.deg2rad(heading_deg - 90.0)
     return (-np.sin(inc) * np.sin(az), -np.sin(inc) * np.cos(az), np.cos(inc))
 
 
@@ -53,11 +61,14 @@ def _grid(frame, epsg, half_x, half_y, spacing):
 
 
 def _stack(los, x, y, look, epsg, name, sign=1, incidence=35.0):
+    # ``sign`` is recorded but deliberately NOT applied to ``los``: a real stack's
+    # displacement is positive toward the sensor whatever ``sign`` was passed,
+    # because ``phase_to_los`` already applied it. The attribute is provenance.
     e, n, u = look
     shape = los.shape
     ds = xr.Dataset(
         {
-            "los": (("pair", "y", "x"), (sign * los)[None].astype(np.float32)),
+            "los": (("pair", "y", "x"), los[None].astype(np.float32)),
             "los_east": (("y", "x"), np.full(shape, e, np.float32)),
             "los_north": (("y", "x"), np.full(shape, n, np.float32)),
             "los_up": (("y", "x"), np.full(shape, u, np.float32)),
@@ -105,7 +116,15 @@ def forward_los_stack(mesh, slip, trace, frame, geometry="asc", epsg=32619,
     evaluation against every element, so a 500 m grid over this fault would be
     tens of millions of them. A recovery test wants a coarse *raster* and then a
     quadtree of it, not a fine one.
+
+    **The line of sight is reached the long way round** -- ENU displacement ->
+    range change -> interferometric phase -> :func:`phase_to_los` -- rather than
+    by asking the engine for scalar LOS directly. Going straight there would use
+    the same sign convention the inversion then inverts, making the recovery test
+    self-consistent under a global flip and blind to exactly the error that had
+    a dextral fault inverting as sinistral.
     """
+    from nisar_tools.geometry import phase_to_los
     from nisar_tools.slip.greens import HalfSpaceTDE
 
     x, y = _grid(frame, epsg, half_x, half_y, spacing)
@@ -114,10 +133,12 @@ def forward_los_stack(mesh, slip, trace, frame, geometry="asc", epsg=32619,
 
     geom = _geom(geometry)
     e, n, u = look_vector(**geom)
-    ones = np.ones(fx.size)
-    los = HalfSpaceTDE(0.25).forward(
-        mesh, slip, fx, fy, look=(e * ones, n * ones, u * ones)
-    ).reshape(xx.shape)
+    enu = HalfSpaceTDE(0.25).forward(mesh, slip, fx, fy)      # (npts, 3)
+    toward = enu @ np.array([e, n, u])                        # + toward sensor
+
+    wavelength = 0.242
+    phase = (4.0 * np.pi / wavelength) * (-toward)            # r_sec - r_ref
+    los = phase_to_los(phase, wavelength).reshape(xx.shape)
 
     if noise:
         los = los + np.random.default_rng(seed).normal(0.0, noise, los.shape)

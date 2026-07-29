@@ -76,8 +76,10 @@ class LOSStack(RasterStackMixin):
         ``product`` names the granule's product group (``"GSLC"``, or ``"GUNW"``
         when the geometry comes from a NASA GUNW's own embedded cube). ``dem`` is
         a GeoTIFF path or DataArray of ellipsoidal heights (``None`` -> sea-level
-        geometry). ``sign`` flips the LOS displacement convention (see
-        :func:`nisar_tools.geometry.phase_to_los`).
+        geometry). ``sign=-1`` corrects data whose fringe sense is inverted
+        relative to this package's ``ref * conj(sec)`` convention; the stored
+        ``los`` is positive toward the sensor either way, and nothing downstream
+        re-applies it (see :func:`nisar_tools.geometry.phase_to_los`).
 
         ``mask_geometry`` (default) blanks the geometry outside the data. The
         cube spans the frame's whole bounding rectangle and knows nothing about
@@ -142,6 +144,8 @@ class LOSStack(RasterStackMixin):
 
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):
+        from . import geometry
+
         name = name or self.STAGE
         ds = self.ds.chunk(self.disk_chunks("pair"))
         full = {
@@ -150,6 +154,12 @@ class LOSStack(RasterStackMixin):
             "wavelength": self.ds.attrs.get("wavelength"),
             "frequency": self.ds.attrs.get("frequency"),
             "sign": self.ds.attrs.get("sign"),
+            # `sign` alone cannot invalidate a store when the *formula* changes
+            # underneath it -- its value stayed 1 across the 2026-07-28 sign fix
+            # while every pixel flipped. Pinning the convention itself makes a
+            # stale `los_*.zarr` raise instead of silently reloading mirrored
+            # displacement.
+            "phase_convention": f"ref*conj(sec),d={geometry.PHASE_RANGE_SIGN:+d}(lambda/4pi)phi",
             "pairs": self.ds.attrs.get("pairs"),
             **params,
         }

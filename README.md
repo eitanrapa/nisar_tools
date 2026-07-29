@@ -217,8 +217,11 @@ above (0.90× at 8); a process pool **1.10×**. Two reasons:
   alone already runs at ~34 GFLOP/s — BLAS is threaded.)
 
 What *does* make a sweep fast is the inner tolerance (`lsmr_tol="auto"`, now the
-default — a measured **5.8×** on one solve) and not paying for weights that never
-converge. Green's assembly resists parallelism too, for a different reason again:
+default) and not paying for weights that never converge. Judge that tolerance
+over a whole sweep rather than at one weight: it was **5.8×** on the reference
+problem, but per-weight it ranges from **2.2× faster to 1.4× slower** — it loses
+at both the smooth and rough ends and wins in the middle, netting ~1.17× across a
+sweep. Green's assembly resists parallelism too, for a different reason again:
 threading over elements measured uniformly worse (1 worker 24.6 s, 10 workers
 62–79 s), because each element is ~50 small numpy calls and dispatch overhead
 swamps the GIL-free stretch.

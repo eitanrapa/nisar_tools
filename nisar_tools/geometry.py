@@ -11,8 +11,9 @@ LOS unit vector. The cube already encodes the zero-Doppler geometry (from the
 product's own orbit), so the orbit ephemeris is not needed for this path.
 
 Sign convention for the phase conversion: LOS displacement is **positive toward
-the sensor** (range decrease), ``d = +(lambda / 4pi) * unwrapped_phase``, under
-this package's ``ref * conj(sec)`` interferogram convention. Pass ``sign=-1`` to
+the sensor** (range decrease), ``d = -(lambda / 4pi) * unwrapped_phase``, under
+this package's ``ref * conj(sec)`` interferogram convention -- see
+:data:`PHASE_RANGE_SIGN` for where that minus comes from. Pass ``sign=-1`` to
 :func:`phase_to_los` if your fringe sense is inverted.
 """
 
@@ -241,12 +242,39 @@ def sample_look_geometry(cube, x, y, epsg, height=None, workers=None):
     return ds
 
 
+#: Sign relating this package's interferogram phase to *range change*.
+#:
+#: Interferograms are formed as ``ref * conj(sec)`` (``_kernels.py``), so the
+#: phase is ``phi = phi_ref - phi_sec``. With ISCE3's ``exp(-j 4 pi r / lambda)``
+#: SLC phase that is::
+#:
+#:     phi = -(4 pi / lambda) (r_ref - r_sec) = (4 pi / lambda) (r_sec - r_ref)
+#:
+#: Ground moving *toward* the sensor shortens the range (``r_sec < r_ref``), so
+#: the phase **decreases**. Displacement positive toward the sensor is therefore
+#: ``-(lambda / 4pi) * phi``, not ``+``.
+#:
+#: This was wrong (``+1``) until 2026-07-28, which mirrored every LOS product:
+#: the Venezuela inversion of the dextral San Sebastian recovered *sinistral*
+#: slip, and forcing the correct ``polarity=(-1, 0, 0)`` pinned 86% of the mesh
+#: onto a bound and never converged. Verified against the geometry cube, whose
+#: ``los_east`` is +0.68 ascending / -0.61 descending -- correct for left-looking
+#: NISAR -- so the look vectors were never the problem.
+PHASE_RANGE_SIGN = -1
+
+
 def phase_to_los(unwrapped, wavelength, sign=1):
     """Convert unwrapped phase (radians) to LOS displacement (metres).
 
-    ``d = sign * (wavelength / 4pi) * phase``. The default ``sign=+1`` makes
-    displacement positive toward the sensor under this package's
-    ``ref * conj(sec)`` interferogram convention. Accepts numpy, dask, or
-    xarray input and preserves its type (staying lazy for dask/xarray).
+    ``d = -sign * (wavelength / 4pi) * phase``; see :data:`PHASE_RANGE_SIGN` for
+    the derivation of the sign. The default ``sign=+1`` makes displacement
+    positive toward the sensor under this package's ``ref * conj(sec)``
+    interferogram convention; pass ``sign=-1`` for data whose fringe sense is
+    inverted, which makes the *returned* values positive toward the sensor
+    again. Nothing downstream re-applies it -- what comes back is always in the
+    package's canonical convention.
+
+    Accepts numpy, dask, or xarray input and preserves its type (staying lazy
+    for dask/xarray).
     """
-    return sign * (wavelength / (4.0 * np.pi)) * unwrapped
+    return sign * PHASE_RANGE_SIGN * (wavelength / (4.0 * np.pi)) * unwrapped

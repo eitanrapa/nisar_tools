@@ -55,8 +55,11 @@ class Observations:
         ``trace`` -- required, since the Green's functions are singular on the
         fault. ``frame`` defaults to one centred on the trace, or on the scene.
 
-        The ``sign`` attribute of the stack is applied here, so ``los`` is always
-        positive toward the sensor whatever convention the stack was built with.
+        The stack's ``los`` is taken as-is: it is already positive toward the
+        sensor, because :func:`~nisar_tools.geometry.phase_to_los` applied
+        ``sign`` when the stack was built. The attribute is validated and carried
+        as provenance, **not** re-applied -- doing so squared it, which silently
+        undid the very correction ``sign=-1`` exists to make.
         """
         if stat not in ("mean", "median"):
             raise ValueError("stat must be 'mean' or 'median'")
@@ -69,10 +72,12 @@ class Observations:
             frame = trace.local_frame() if trace is not None else _frame_for(ds)
 
         los = np.asarray(ds["los"].isel(pair=pair).values, dtype=float)
+        # Validated and recorded below as provenance only. `phase_to_los` already
+        # applied it, so multiplying again would square it back to +1 and return
+        # the uncorrected field.
         sign = int(ds.attrs.get("sign", 1))
         if sign not in (1, -1):
             raise ValueError(f"Unexpected LOSStack sign attribute {sign!r}")
-        los = sign * los
 
         look = np.stack([
             np.asarray(ds["los_east"].values, dtype=float),

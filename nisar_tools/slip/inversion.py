@@ -69,6 +69,20 @@ DEFAULT_MAX_ITER = 400
 #: slip models agreeing to 6.6 mm. Since roughly 89% of a solve is spent inside
 #: those products, cutting their number is by far the largest available win.
 #:
+#: ⚠️ **That win is not uniform in the smoothing weight.** Re-measured 2026-07-28
+#: on the test fixture (240 elements, 761 observations, 480 parameters), counting
+#: matrix-vector products, ``None`` / ``"auto"``::
+#:
+#:     lam    2.0    1.0    0.5    0.3    0.1   0.05
+#:          0.70x  2.18x  1.93x  1.91x  1.19x  0.78x
+#:
+#: so the adaptive tolerance *loses* at both ends of the sweep and wins by ~2x in
+#: the middle, netting **1.17x** over the whole sweep -- which is how
+#: :meth:`SlipInversion.l_curve` uses it, and why it stays the default. Judge it
+#: over a sweep, never at one weight. Note also that outer iteration count is the
+#: wrong meter: ``"auto"`` solves each sub-problem loosely, so it routinely takes
+#: *more* outer steps while doing less total work.
+#:
 #: Do **not** reach for ``lsmr_maxiter`` instead. A hard cap is not monotone:
 #: caps of 100 and 200 both drove the outer loop into ``DEFAULT_MAX_ITER`` and
 #: returned materially different, *worse* models (4.15 m and 2.47 m from the
