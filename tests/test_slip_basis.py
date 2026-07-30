@@ -236,3 +236,123 @@ def test_moment_accepts_a_velocity_model(scene):
     uniform = model.moment(30e9)
     assert layered != uniform
     assert 0.1 * uniform < layered < 2.0 * uniform
+
+
+# -- rigidity plumbing -------------------------------------------------------
+
+def _crust():
+    from nisar_tools.slip import VelocityModel
+
+    # The Venezuela CRUST2.0 mean profile: a 9 GPa sedimentary lid over a
+    # 34-46 GPa crust. Doubled rows are EDGRN's way of writing a discontinuity.
+    return VelocityModel(
+        depth=[0, 2e3, 2e3, 10.58e3, 10.58e3, 19.25e3, 19.25e3, 27.92e3],
+        vp=[3.75e3] * 2 + [6.10e3] * 2 + [6.50e3] * 2 + [7.00e3] * 2,
+        vs=[1.95e3] * 2 + [3.50e3] * 2 + [3.65e3] * 2 + [3.90e3] * 2,
+        rho=[2.37e3] * 2 + [2.75e3] * 2 + [2.87e3] * 2 + [3.01e3] * 2,
+        name="Venezuela_crust2.0")
+
+
+def test_velocity_model_reaches_every_reported_statistic(scene):
+    """``SlipInversion(velocity_model=...)`` must change what ``repr`` says.
+
+    Before this was wired, ``SlipModel`` had the code to read a velocity model out
+    of its options but nothing ever put one there -- so ``moment()``,
+    ``moment_magnitude``, ``to_dataset`` and ``repr`` all silently assumed 30 GPa
+    even for a layered inversion. On this fixture that is a 30% error in moment
+    and 0.08 in Mw, reported without a hint that anything was assumed.
+    """
+    mesh, _, obs = scene
+    crust = _crust()
+
+    plain = SlipInversion(mesh, obs).solve(smoothing=0.3, polarity=(-1, 0, 0))
+    with_model = SlipInversion(mesh, obs, velocity_model=crust).solve(
+        smoothing=0.3, polarity=(-1, 0, 0))
+
+    assert plain.moment() != with_model.moment()
+    assert with_model.moment() == pytest.approx(plain.moment(crust))
+    assert with_model.moment_magnitude != plain.moment_magnitude
+    assert with_model.to_dataset().attrs["moment"] == pytest.approx(with_model.moment())
+
+    # An explicit argument still overrides.
+    assert with_model.moment(30e9) == pytest.approx(plain.moment())
+
+
+def test_shear_modulus_is_sampled_at_each_parameter_depth(scene):
+    mesh, _, obs = scene
+    crust = _crust()
+    model = SlipInversion(mesh, obs, basis="node", velocity_model=crust).solve(
+        smoothing=0.3, polarity=(-1, 0, 0))
+
+    mu = model.shear_modulus
+    assert mu.size == mesh.n_nodes, "one rigidity per parameter, not per element"
+    assert mu.min() < 15e9, "the sedimentary lid must show up"
+    assert mu.max() > 40e9
+    # Shallow nodes are softer than deep ones.
+    depth = mesh.nodes[:, 2]
+    assert mu[depth > -1e3].mean() < mu[depth < -15e3].mean()
+
+
+def test_velocity_model_survives_save_and_load(scene, tmp_path):
+    from nisar_tools.slip import SlipModel
+
+    mesh, _, obs = scene
+    crust = _crust()
+    model = SlipInversion(mesh, obs, velocity_model=crust).solve(
+        smoothing=0.3, polarity=(-1, 0, 0))
+
+    back = SlipModel.load(model.save(tmp_path / "with_crust.slip.zip"))
+    assert back.moment() == pytest.approx(model.moment(), rel=1e-9)
+    assert back.moment_magnitude == pytest.approx(model.moment_magnitude, rel=1e-9)
+
+
+def test_to_text_records_the_rigidity_it_used(scene, tmp_path):
+    """Column 10 must be what the moment was computed with, not a constant."""
+    mesh, _, obs = scene
+    crust = _crust()
+    model = SlipInversion(mesh, obs, velocity_model=crust).solve(
+        smoothing=0.3, polarity=(-1, 0, 0))
+
+    path = model.to_text(tmp_path / "model.txt")
+    mu = np.loadtxt(path, skiprows=1)[:, 9]
+    assert len(set(np.round(mu, 3))) > 1, "a layered model has no single rigidity"
+    np.testing.assert_allclose(mu, crust.at(mesh.centroids[:, 2], "mu"))
+
+
+def test_a_thin_shallow_layer_needs_thin_elements_to_be_seen(mesh):
+    """Rigidity is sampled at element centroids, so the mesh has to resolve the lid.
+
+    The Venezuela profile's 9 GPa sedimentary layer is only 2 km thick. A mesh with
+    6 km levels puts its shallowest centroid *below* it and never sees 9 GPa at all
+    -- the softest rigidity it samples is the 33.7 GPa upper crust. Grading the top
+    row down to ~1 km is what makes the layer enter the moment, which is a reason to
+    grade beyond resolving slip.
+    """
+    trace = FaultTrace(_LON, _LAT, name="test_fault")
+    frame = trace.local_frame()
+    crust = _crust()
+
+    coarse = crust.at(np.abs(mesh.centroids[:, 2]), "mu")
+    fine_mesh = FaultMesh.curved(trace, frame, uniform_dip=90.0, max_depth=25e3,
+                                 edge_length=6e3, down_dip_levels=11,
+                                 bias_w=5 ** (1 / 9))
+    fine = crust.at(np.abs(fine_mesh.centroids[:, 2]), "mu")
+
+    assert coarse.min() > 30e9, "6 km levels straddle the 2 km lid entirely"
+    assert fine.min() < 15e9, "a ~1 km top row samples it"
+
+
+def test_layered_engine_ignores_nu(scene):
+    """The tables carry the elastic structure; nu is provenance only.
+
+    Worth pinning because the argument exists and looks like it should matter --
+    it does for the half-space engine, where it is the only material parameter.
+    """
+    from nisar_tools.slip import EdgrnTables, LayeredPointSource
+
+    mesh, _, obs = scene
+    tables = EdgrnTables.homogeneous(r=np.linspace(0.0, 300e3, 151),
+                                     z=np.linspace(250.0, 30e3, 60), n_azimuth=12)
+    a = SlipInversion(mesh, obs, engine=LayeredPointSource(tables, nu=0.25))
+    b = SlipInversion(mesh, obs, engine=LayeredPointSource(tables, nu=0.40))
+    np.testing.assert_array_equal(a.g, b.g)

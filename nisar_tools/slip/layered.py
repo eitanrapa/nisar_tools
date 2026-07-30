@@ -74,6 +74,16 @@ class LayeredPointSource:
 
     def __init__(self, tables, nu=0.25, tolerance=DEFAULT_TOLERANCE,
                  max_points=MAX_QUADRATURE_POINTS):
+        """``tables`` carries the elastic structure; ``nu`` does **not**.
+
+        Poisson's ratio is recorded for provenance and to satisfy the engine
+        protocol, and is deliberately not used in any calculation here: EDGRN
+        already integrated through the layer stack, so every elastic property the
+        displacements depend on -- including how Poisson's ratio varies with depth
+        -- is baked into the tables. Passing a different ``nu`` changes nothing.
+        That is the opposite of :class:`~nisar_tools.slip.greens.HalfSpaceTDE`,
+        where ``nu`` is the only material parameter there is.
+        """
         self.tables = tables
         self.nu = float(nu)
         self.tolerance = None if tolerance is None else float(tolerance)

@@ -158,11 +158,31 @@ class SlipInversion:
     smoothing weight -- which is what makes an L-curve sweep cheap.
     """
 
-    def __init__(self, mesh, obs, engine=None, ramp="none", basis="element"):
+    def __init__(self, mesh, obs, engine=None, ramp="none", basis="element",
+                 velocity_model=None):
+        """``engine`` and ``basis`` choose the physics and the parameterization.
+
+        ``velocity_model`` is **not** used to compute Green's functions -- for a
+        layered medium that information is already inside the engine's EDGRN
+        tables, and for a homogeneous half-space the displacements do not depend
+        on rigidity at all (it cancels; only Poisson's ratio survives). What it is
+        for is **moment**: ``sum(mu * area * slip)`` needs a rigidity, and without
+        one every reported ``Mw`` silently assumes
+        :data:`DEFAULT_SHEAR_MODULUS` = 30 GPa. Pass the same
+        :class:`~nisar_tools.slip.edgrn.VelocityModel` you built the tables from
+        and every statistic -- ``moment``, ``moment_magnitude``, ``to_text``,
+        ``repr`` -- uses the rigidity at each parameter's own depth instead.
+
+        It matters more than it sounds. A model whose shallowest layer is 9 GPa,
+        as the Venezuela CRUST2.0 profile's is, has a third the rigidity of the
+        default over the top 2 km -- which is exactly where a vertical
+        strike-slip fault's shallow slip sits.
+        """
         self.mesh = mesh
         self.obs = obs
         self.engine = engine or HalfSpaceTDE()
         self.basis = make_basis(mesh, basis)
+        self.velocity_model = velocity_model
 
         if mesh.frame is not None and obs.ds.attrs.get("frame") is not None:
             mesh.frame.require_match(obs.ds.attrs["frame"], "Observations")
@@ -255,6 +275,10 @@ class SlipInversion:
                 "polarity": None if polarity is None else list(polarity),
                 "strike": list(strike), "dip": list(dip), "max_iter": int(max_iter),
                 "lsmr_tol": lsmr_tol,
+                # Carried so a saved model keeps its own rigidity; without it a
+                # reloaded layered model would report a 30 GPa moment.
+                "velocity_model": (None if self.velocity_model is None
+                                   else self.velocity_model.to_dict()),
             },
         )
 
@@ -449,12 +473,22 @@ class SlipModel:
         return float(np.sum(mu * areas * self.slip_magnitude))
 
     def _default_shear_modulus(self):
-        model = self.options.get("velocity_model")
+        """The inversion's own velocity model if it had one, else 30 GPa."""
+        model = getattr(self._inversion, "velocity_model", None)
         if model is None:
-            return DEFAULT_SHEAR_MODULUS
-        from .edgrn import VelocityModel
+            stored = self.options.get("velocity_model")
+            if stored is None:
+                return DEFAULT_SHEAR_MODULUS
+            from .edgrn import VelocityModel
 
-        return VelocityModel(**model).at(self._parameter_depths(), "mu")
+            model = VelocityModel.from_dict(stored)
+        return model.at(self._parameter_depths(), "mu")
+
+    @property
+    def shear_modulus(self):
+        """The rigidity this model's statistics actually use, per parameter."""
+        return np.broadcast_to(np.asarray(self._default_shear_modulus(), dtype=float),
+                               self.basis.lumped_areas().shape)
 
     def _parameter_depths(self):
         """Depth of each parameter: an element centroid, or a node."""
@@ -637,12 +671,17 @@ class SlipModel:
             ds.attrs["ramp"] = dict(zip(self.ramp_labels, self.ramp.tolist()))
         return ds
 
-    def to_text(self, path, shear_modulus=DEFAULT_SHEAR_MODULUS):
+    def to_text(self, path, shear_modulus=None):
         """Write the reference implementation's ten-column element table.
 
         ``element_id lon lat depth_m strike_deg dip_deg strike_slip_m dip_slip_m
         area_m2 shear_modulus_pa`` -- the format of SlipSolve's
         ``simple_triangular_model.txt``, so downstream GMT scripts work unchanged.
+
+        Column 10 is the rigidity the inversion's own velocity model gives at each
+        element's depth, or 30 GPa if it had none -- so the file records what the
+        moment in it was actually computed with rather than a constant that may not
+        be the one used.
         """
         if not self.converged:
             raise ValueError(
@@ -651,6 +690,16 @@ class SlipModel:
                 "Raise max_iter or increase the smoothing weight."
             )
         lon, lat = self.mesh.frame.to_lonlat(*self.mesh.centroids[:, :2].T)
+        if shear_modulus is None:
+            model = getattr(self._inversion, "velocity_model", None) or \
+                self.options.get("velocity_model")
+            if model is None:
+                shear_modulus = DEFAULT_SHEAR_MODULUS
+            else:
+                from .edgrn import VelocityModel
+
+                shear_modulus = (model if hasattr(model, "at")
+                                 else VelocityModel.from_dict(model))
         if hasattr(shear_modulus, "at"):
             shear_modulus = shear_modulus.at(self.mesh.centroids[:, 2], "mu")
         mu = np.broadcast_to(np.asarray(shear_modulus, dtype=float),

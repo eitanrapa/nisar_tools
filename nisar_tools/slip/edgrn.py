@@ -132,6 +132,16 @@ class VelocityModel:
         # np.interp already clamps outside the range at both ends.
         return np.interp(depth, self.depth, values)
 
+    def to_dict(self):
+        """A JSON-serialisable form, so a model can carry its own rigidity."""
+        return {"depth": self.depth.tolist(), "vp": self.vp.tolist(),
+                "vs": self.vs.tolist(), "rho": self.rho.tolist(),
+                "name": self.name}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d["depth"], d["vp"], d["vs"], d["rho"], name=d.get("name"))
+
     def __len__(self):
         return self.depth.size
 
