@@ -50,7 +50,7 @@ Sign conventions, which matter more here than anywhere else in the package:
 
 from .basis import ElementBasis, NodeBasis
 from .diagnostics import cell_size_ladder, noise_floor, ramp_content, scene_report
-from .edgrn import EdgrnTables, VelocityModel, run_edgrn
+from .edgrn import EdgrnTables, VelocityModel, run_edgrn, write_edgrn_input
 from .frame import LocalFrame
 from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel
@@ -81,4 +81,5 @@ __all__ = [
     "ramp_content",
     "run_edgrn",
     "scene_report",
+    "write_edgrn_input",
 ]

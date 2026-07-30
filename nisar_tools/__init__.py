@@ -23,7 +23,25 @@ from .gslc import GSLC
 from .stack import GSLCStack
 from .interferogram import InterferogramStack, make_pairs
 from .los import LOSStack
-from .slip import FaultMesh, FaultTrace, Observations, SlipInversion, SlipModel
+# Everything needed to set up an inversion, at either end of the three choices
+# (vertical/curved geometry, homogeneous/layered medium, element/nodal slip).
+# The rest of the subpackage -- the samplers, diagnostics and plotting -- stays on
+# `nisar_tools.slip`, which is also importable as a whole.
+from .slip import (
+    EdgrnTables,
+    FaultMesh,
+    FaultSegment,
+    FaultSurface,
+    FaultTrace,
+    HalfSpaceTDE,
+    LayeredPointSource,
+    Observations,
+    SlipInversion,
+    SlipModel,
+    VelocityModel,
+    run_edgrn,
+    write_edgrn_input,
+)
 from .unwrap import UnwrappedStack
 from .workspace import Workspace, WorkspaceError
 
@@ -32,14 +50,20 @@ __version__ = "0.1.0"
 __all__ = [
     "GSLC",
     "GSLCStack",
+    "EdgrnTables",
     "FaultMesh",
+    "FaultSegment",
+    "FaultSurface",
     "FaultTrace",
+    "HalfSpaceTDE",
     "InterferogramStack",
     "LOSStack",
+    "LayeredPointSource",
     "Observations",
     "SlipInversion",
     "SlipModel",
     "UnwrappedStack",
+    "VelocityModel",
     "Workspace",
     "WorkspaceError",
     "download",
@@ -47,6 +71,8 @@ __all__ = [
     "download_gslcs",
     "login",
     "make_pairs",
+    "run_edgrn",
     "slip",
+    "write_edgrn_input",
     "__version__",
 ]
