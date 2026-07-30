@@ -17,6 +17,7 @@ from ._base import (
     RasterStackMixin,
     compute_chunks,
     open_stage,
+    plane_kernel,
     wrapped_phase,
 )
 
@@ -183,6 +184,58 @@ class InterferogramStack(RasterStackMixin):
         ds.attrs["water_mask"] = {"resolution": resolution, "spacing": spacing}
         return InterferogramStack(ds)
 
+    def remove_unconnected_regions(self, min_size=None, connectivity=1,
+                                   max_drop_fraction=0.01, target_blocks=None):
+        """Drop the regions the mainland cannot reach. Returns a new stack.
+
+        Run this between :meth:`mask_water` and :meth:`unwrap`. A coastline mask
+        leaves islets, ships, platforms and decorrelated fragments stranded
+        offshore, and an unwrapper propagates phase along arcs between adjacent
+        pixels -- so a region with no path to the main body carries no recoverable
+        ambiguity, however large. Left in place they produce artifacts that appear
+        to bridge open water. The criterion is **connectivity, not size**.
+
+        ``min_size=None`` (default) keeps only the largest component. Pass
+        ``min_size=N`` to keep every component of more than ``N`` pixels, which is
+        what a scene that genuinely *is* two landmasses wants: both real bodies
+        survive and the speckle still goes.
+
+        ``max_drop_fraction`` refuses to blank a real landmass -- see
+        :func:`~nisar_tools._kernels.remove_unconnected_regions` for why the guard
+        is on the largest single dropped component rather than the total, and for
+        the ``connectivity`` convention.
+
+        Both ``igram`` and ``coherence`` are masked, so the two stay consistent
+        (the same thing :meth:`mask_water` does). Lazy: nothing is written until
+        :meth:`persist`. Note the guard raises when the graph *computes*, not when
+        this is called -- an eager check would mean a whole extra pass over the
+        stack.
+        """
+        igram = self.ds["igram"]
+        depth = _kernels.unconnected_regions_depth(
+            min_size, igram.sizes["y"], igram.sizes["x"]
+        )
+        cleaned = plane_kernel(
+            _kernels.remove_unconnected_regions_planes, igram, depth=depth,
+            target_blocks=target_blocks, min_size=min_size,
+            connectivity=connectivity, max_drop_fraction=max_drop_fraction,
+        )
+
+        ds = self.ds.copy()
+        ds["igram"] = cleaned
+        # Coherence carries no NaN of its own (it is exactly 0.0 outside the
+        # swath), so it follows the igram's footprint rather than being labelled
+        # separately -- which also means one labelling pass, not two.
+        ds["coherence"] = self.ds["coherence"].where(cleaned.notnull())
+        ds.attrs.update(self.ds.attrs)
+        ds.attrs["unconnected_removed"] = {
+            "min_size": None if min_size is None else int(min_size),
+            "connectivity": int(connectivity),
+            "max_drop_fraction": (None if max_drop_fraction is None
+                                  else float(max_drop_fraction)),
+        }
+        return InterferogramStack(ds)
+
     def filter_goldstein(self, alpha=0.5, patch_size=32, overlap=0.75, psd_smooth=3,
                          target_blocks=None):
         """Goldstein-Werner phase-filter every pair's igram. Returns a new stack.
@@ -300,6 +353,8 @@ class InterferogramStack(RasterStackMixin):
             full["goldstein"] = self.ds.attrs["goldstein"]
         if self.ds.attrs.get("water_mask") is not None:
             full["water_mask"] = self.ds.attrs["water_mask"]
+        if self.ds.attrs.get("unconnected_removed") is not None:
+            full["unconnected_removed"] = self.ds.attrs["unconnected_removed"]
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return InterferogramStack(reopened)
 

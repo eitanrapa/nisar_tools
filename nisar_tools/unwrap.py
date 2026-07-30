@@ -39,6 +39,7 @@ from ._base import (
     RasterStackMixin,
     compute_chunks,
     open_stage,
+    plane_kernel as _plane_kernel,
 )
 
 # -- NASA GUNW HDF5 layout (verified from real granules) ----------------------
@@ -499,6 +500,46 @@ class UnwrappedStack(RasterStackMixin):
         }
         return UnwrappedStack(ds)
 
+    def remove_unconnected_regions(self, min_size=None, connectivity=1,
+                                   max_drop_fraction=0.01, target_blocks=None):
+        """Drop the regions the main body cannot reach. Returns a new stack.
+
+        The same operation as
+        :meth:`~nisar_tools.interferogram.InterferogramStack.remove_unconnected_regions`,
+        for an already-unwrapped stack -- a NASA GUNW, or a post-hoc clean of a
+        SNAPHU result. On an interferogram it is a *fix*, keeping unreachable
+        regions away from the unwrapper; here it is tidying, since the unwrapping
+        has already happened.
+
+        Worth chaining **before** :meth:`remove_outliers` and
+        ``deramp(method="spline")``: both fit through
+        :func:`~nisar_tools._kernels.smooth_surface`, a normalized convolution that
+        fills NaN gaps from their neighbours, so a stranded region pulls the fitted
+        surface across the water separating it from the mainland.
+
+        See the interferogram method for ``min_size``, ``connectivity`` and
+        ``max_drop_fraction``.
+        """
+        unw = self.ds["unw"]
+        cleaned = _plane_kernel(
+            _kernels.remove_unconnected_regions_planes, unw,
+            depth=_kernels.unconnected_regions_depth(
+                min_size, unw.sizes["y"], unw.sizes["x"]
+            ),
+            target_blocks=target_blocks, min_size=min_size,
+            connectivity=connectivity, max_drop_fraction=max_drop_fraction,
+        )
+        ds = self.ds.copy()
+        ds["unw"] = cleaned
+        ds.attrs.update(self.ds.attrs)
+        ds.attrs["unconnected_removed"] = {
+            "min_size": None if min_size is None else int(min_size),
+            "connectivity": int(connectivity),
+            "max_drop_fraction": (None if max_drop_fraction is None
+                                  else float(max_drop_fraction)),
+        }
+        return UnwrappedStack(ds)
+
     def remove_outliers(self, scale=16.0, threshold=1.0, iterations=2):
         """Reject residual outliers against a smooth spline. Returns a new stack.
 
@@ -956,7 +997,8 @@ class UnwrappedStack(RasterStackMixin):
         # Provenance of each lazy transform, folded into the hash only once
         # applied, so an untouched stage keeps its own identity.
         for key in ("water_mask", "cycle_shifts", "phase_screen_removed",
-                    "edges_masked", "outliers_removed", "deramp", "merged"):
+                    "edges_masked", "outliers_removed", "unconnected_removed",
+                    "deramp", "merged"):
             value = self.ds.attrs.get(key)
             if value:
                 full[key] = value
@@ -1056,30 +1098,6 @@ _SNAPHU_NOISE = (
     "only one tile--disregarding tile overlap values",
     "only one tile--disregarding multiprocessor option",
 )
-
-
-def _plane_kernel(func, field, depth, target_blocks=None, **kwargs):
-    """Run a 2-D plane kernel over a ``(pair, y, x)`` DataArray, chunk by chunk.
-
-    Wraps :func:`_kernels.halo_planes`, which overlaps the spatial axes by
-    ``depth`` so the kernel decomposes across chunks instead of forcing one whole
-    plane per task. Dims, coords and attrs are preserved.
-
-    A persisted stack arrives on the 2048-px *disk* chunk, which for a multilooked
-    raster is usually the whole plane -- so it is rechunked to a working size first
-    (see :func:`_base.compute_chunks`), or there would be nothing to decompose.
-    """
-    if _kernels._is_dask(field.data):
-        working = compute_chunks(
-            field.sizes["y"], field.sizes["x"], depth, target_blocks
-        )
-        if working is not None:
-            field = field.chunk({"pair": 1, "y": working[0], "x": working[1]})
-    data = _kernels.halo_planes(func, field.data, depth, **kwargs)
-    return xr.DataArray(
-        data, dims=field.dims, coords=field.coords, attrs=field.attrs,
-        name=field.name,
-    )
 
 
 def _plane_kernel_rows(func, field, target_blocks=None, **kwargs):

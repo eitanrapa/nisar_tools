@@ -28,6 +28,8 @@ from scipy.ndimage import (
     binary_erosion,
     gaussian_filter,
     gaussian_filter1d,
+    generate_binary_structure,
+    label,
     uniform_filter,
     uniform_filter1d,
 )
@@ -844,6 +846,84 @@ def mask_edges(field, edge_pixels, edges="along_track"):
     return np.where(valid, field, np.asarray(np.nan, dtype=field.dtype))
 
 
+def remove_unconnected_regions(field, min_size=None, connectivity=1,
+                               max_drop_fraction=0.01):
+    """NaN the finite regions of ``field`` (2D) that the mainland cannot reach.
+
+    An unwrapper propagates phase along arcs between adjacent pixels, so a region
+    with no path to the main body carries no recoverable ambiguity however large
+    it is -- the criterion here is **connectivity, not size**. On a coastal frame
+    the strays are islets, ships, platforms and decorrelated fragments left behind
+    by the coastline mask; feeding them to SNAPHU produces artifacts that appear to
+    bridge open water.
+
+    ``min_size=None`` (the default) keeps only the largest component. Pass
+    ``min_size=N`` to keep every component of more than ``N`` pixels instead, which
+    is the escape hatch for a scene that genuinely is two landmasses: it keeps both
+    real bodies and still drops the speckle.
+
+    ``connectivity=1`` (4-connected) is the default because a diagonal touch is not
+    an arc for the solver, so a diagonally-attached region is just as unreachable as
+    a detached one. It is also the conservative reading -- 4-connectivity splits
+    more apart, so it removes more. ``connectivity=2`` allows diagonal links.
+
+    ``max_drop_fraction`` guards against blanking a real landmass: if the *largest
+    single* dropped component exceeds that fraction of the valid pixels, raise
+    rather than silently delete it. Deliberately not the *total* dropped -- a scene
+    shredded into thousands of tiny blobs has a large total but no large component,
+    and those blobs are exactly what this is for, so a total-based guard would fire
+    on the case the function exists to handle. ``None`` disables it.
+
+    A no-op when nothing is finite, or when everything finite is already one
+    component.
+    """
+    if connectivity not in (1, 2):
+        raise ValueError(f"connectivity must be 1 or 2, got {connectivity!r}")
+
+    field = np.asarray(field)
+    valid = np.isfinite(field)
+    n_valid = int(valid.sum())
+    if n_valid == 0:
+        return field.copy()
+
+    lab, n = label(valid, structure=generate_binary_structure(2, connectivity))
+    # Only keep-largest can short-circuit here: a sole component is trivially the
+    # largest, but under ``min_size`` it still has to clear the threshold. (Under
+    # a halo each block sees only its own fragment, so this is exactly where a
+    # too-eager shortcut would silently keep everything.)
+    if n == 0 or (min_size is None and n == 1):
+        return field.copy()
+
+    # bincount[0] counts the background, which is not a component.
+    sizes = np.bincount(lab.ravel(), minlength=n + 1)
+    sizes[0] = 0
+    if min_size is None:
+        keep = np.zeros(sizes.size, bool)
+        keep[int(sizes.argmax())] = True
+    else:
+        keep = sizes > int(min_size)
+        keep[0] = False
+    keep_label = keep[lab]
+
+    dropped = sizes[~keep]
+    dropped = dropped[dropped > 0]
+    if max_drop_fraction is not None and dropped.size:
+        biggest = int(dropped.max())
+        fraction = biggest / n_valid
+        if fraction > float(max_drop_fraction):
+            raise ValueError(
+                f"remove_unconnected_regions would drop a component of "
+                f"{biggest} pixels ({fraction:.2%} of the {n_valid} valid "
+                f"pixels), above max_drop_fraction={max_drop_fraction:g}; "
+                f"{dropped.size} components totalling {int(dropped.sum())} "
+                f"pixels are unconnected. If this scene really is two "
+                f"landmasses, keep both with min_size=; otherwise raise "
+                f"max_drop_fraction= to confirm the removal."
+            )
+
+    return np.where(keep_label, field, np.asarray(np.nan, dtype=field.dtype))
+
+
 def _batch_planes(func, arr, **kwargs):
     """Apply a 2D-plane ``func`` to each trailing plane of a possibly-3D ``arr``.
 
@@ -945,6 +1025,34 @@ def deramp_planes(arr, *, degree, method, scale, exclude=None):
 
 def mask_edges_planes(arr, *, edge_pixels, edges="along_track"):
     return _batch_planes(mask_edges, arr, edge_pixels=edge_pixels, edges=edges)
+
+
+def remove_unconnected_regions_planes(arr, *, min_size=None, connectivity=1,
+                                      max_drop_fraction=0.01):
+    return _batch_planes(remove_unconnected_regions, arr, min_size=min_size,
+                         connectivity=connectivity,
+                         max_drop_fraction=max_drop_fraction)
+
+
+def unconnected_regions_depth(min_size, ny, nx):
+    """Halo needed to decompose :func:`remove_unconnected_regions` spatially.
+
+    With ``min_size=N`` a halo of ``N`` is **exact**, not exact-to-a-halo. A
+    component of at most ``N`` pixels has graph diameter at most ``N-1``, so once
+    it touches a block's interior it lies wholly inside an ``N``-pixel halo and is
+    measured exactly; one that reaches the padded edge must have spanned ``N+1``
+    pixels getting there, so the block keeps it -- which is the same answer the
+    whole plane gives. Verified against whole-plane over blobs straddling chunk
+    seams, and a smaller halo really does break it.
+
+    ``min_size=None`` (keep the largest component) has **no halo at all**: which
+    component is largest is a global property and no block can know it. That case
+    returns a depth spanning the raster, which :func:`halo_planes` turns into one
+    whole plane per task -- the same fallback ``deramp(method="spline")`` relies on.
+    """
+    if min_size is None:
+        return max(int(ny), int(nx))
+    return int(min_size)
 
 
 # -- deramp: the polynomial fit as a chunk-wise reduction ----------------------

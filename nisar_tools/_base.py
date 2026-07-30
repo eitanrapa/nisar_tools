@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from . import _kernels
+
 # On-disk spatial chunk size (complex64 2048^2 ~= 32 MB).
 SPATIAL_CHUNK = 2048
 
@@ -47,6 +49,34 @@ def wrapped_phase(da):
         da,
         dask="parallelized",
         output_dtypes=[np.float32],
+    )
+
+
+def plane_kernel(func, field, depth, target_blocks=None, **kwargs):
+    """Run a 2-D plane kernel over a ``(pair, y, x)`` DataArray, chunk by chunk.
+
+    Wraps :func:`_kernels.halo_planes`, which overlaps the spatial axes by
+    ``depth`` so the kernel decomposes across chunks instead of forcing one whole
+    plane per task. Dims, coords and attrs are preserved.
+
+    A persisted stack arrives on the 2048-px *disk* chunk, which for a multilooked
+    raster is usually the whole plane -- so it is rechunked to a working size first
+    (see :func:`compute_chunks`), or there would be nothing to decompose.
+
+    Lives here rather than in ``unwrap`` because both ``InterferogramStack`` and
+    ``UnwrappedStack`` need it, and importing it from ``unwrap`` would drag that
+    module's top-level ``import snaphu`` into the interferogram stage.
+    """
+    if _kernels._is_dask(field.data):
+        working = compute_chunks(
+            field.sizes["y"], field.sizes["x"], depth, target_blocks
+        )
+        if working is not None:
+            field = field.chunk({"pair": 1, "y": working[0], "x": working[1]})
+    data = _kernels.halo_planes(func, field.data, depth, **kwargs)
+    return xr.DataArray(
+        data, dims=field.dims, coords=field.coords, attrs=field.attrs,
+        name=field.name,
     )
 
 

@@ -75,6 +75,44 @@ download.download_gslcs("data/gslc", granules=["NISAR_L2_GSLC_..."], method="asf
 
 A runnable end-to-end example is in [notebooks/nisar_tools.ipynb](notebooks/nisar_tools.ipynb).
 
+### Dropping territory the mainland can't reach
+
+A coastline mask leaves things stranded offshore — islets GSHHG calls land,
+ships, platforms, decorrelated fragments. An unwrapper propagates phase along
+arcs between adjacent pixels, so a region with **no path to the main body carries
+no recoverable ambiguity, however large it is**, and left in place it produces
+artifacts that appear to bridge open water. The criterion is *connectivity, not
+size*.
+
+```python
+igrams = (igrams
+    .mask_water(mask_cache=ws, resolution="i")
+    .remove_unconnected_regions()          # keeps only the largest component
+    .filter_goldstein(alpha="adaptive")
+)
+```
+
+On a real coastal frame that took 29 components down to 1, removing 6,369 px —
+0.018% of the valid data. That frame is also why a size threshold is the wrong
+instrument: its strays run 16 to 1530 px against a 36-million-px mainland, so a
+`min_size` of 32 would have removed four of the twenty-eight and looked like it
+had worked.
+
+- `min_size=N` keeps every component above `N` pixels instead — for a scene that
+  genuinely *is* two landmasses, so both real bodies survive and the speckle
+  still goes.
+- `max_drop_fraction` (default 0.01) refuses if the largest **single** dropped
+  component exceeds that share of the valid pixels. Deliberately not the total:
+  a scene shredded into thousands of specks has a large total but no large
+  component, and those specks are exactly what the method is for.
+- `connectivity=1` (4-connected) by default — a diagonal touch is not an arc for
+  the solver, so a diagonally-attached region is as unreachable as a detached one.
+
+Also on `UnwrappedStack`, where it is worth chaining ahead of `remove_outliers`
+and `deramp(method="spline")`: both fit through a normalized convolution that
+fills NaN gaps from their neighbours, so a stranded region drags the fitted
+surface out across the water separating it from the mainland.
+
 ### Exporting to GMT `.grd`
 
 `geo.project_to_latlon` reprojects any native-grid field to lon/lat, and the
