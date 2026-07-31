@@ -146,6 +146,130 @@ def project_to_latlon(data, x_coords=None, y_coords=None, epsg_code=None):
     return da.rio.reproject("EPSG:4326")
 
 
+#: xarray engines tried in turn by :func:`read_grd`, best first.
+#:
+#: A ``.grd`` is single-variable NetCDF, but *which* NetCDF matters: GMT 6 writes
+#: HDF5-backed NetCDF-4 by default, which scipy's classic-only backend cannot
+#: read, while ``netcdf4``/``h5netcdf`` are optional dependencies this project
+#: does not require. NetCDF-4 is handled instead by :func:`_read_grd_hdf5`, using
+#: the ``h5py`` this package already depends on.
+#:
+#: ``pygmt`` registers a ``gmt`` engine that reads both, and it is deliberately
+#: **not** in this list: importing ``h5py`` -- which ``nisar_tools`` always does
+#: -- makes it drop a NetCDF-4 grid's coordinate variables and return *pixel
+#: indices* instead, with no error. Two HDF5 libraries end up loaded in one
+#: process and GMT's netCDF layer loses. The data comes back right and only the
+#: georeferencing is wrong, so nothing downstream would notice.
+_GRD_ENGINES = ("netcdf4", "h5netcdf", "scipy", "rasterio")
+
+#: Leading bytes of an HDF5 file, i.e. of a NetCDF-4 ``.grd``.
+_HDF5_MAGIC = b"\x89HDF\r\n\x1a\n"
+
+
+def utm_epsg(lon, lat):
+    """EPSG code of the WGS84 UTM zone containing ``(lon, lat)``."""
+    zone = int((float(lon) + 180.0) // 6.0) % 60 + 1
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def _read_grd_hdf5(path):
+    """Read a NetCDF-4 (HDF5-backed) ``.grd`` with ``h5py``.
+
+    A GMT grid is one 2-D variable plus its two coordinate variables at the file
+    root, so the layout can be recovered without a NetCDF library: the data is
+    the only 2-D dataset, and its axes are named by the HDF5 dimension scales it
+    points at (``DIMENSION_LIST``), falling back to matching 1-D datasets by
+    length. The CRS, when present, rides on a ``grid_mapping`` dataset's
+    ``spatial_ref``/``crs_wkt`` attribute.
+    """
+    import h5py
+
+    def text(value):
+        return value.decode() if isinstance(value, bytes) else str(value)
+
+    with h5py.File(path, "r") as f:
+        arrays = {k: v for k, v in f.items() if isinstance(v, h5py.Dataset)}
+        grids = [k for k, v in arrays.items() if v.ndim == 2]
+        if len(grids) != 1:
+            raise ValueError(
+                f"{path}: expected exactly one 2-D variable, found {grids or 'none'}"
+            )
+        var = arrays[grids[0]]
+
+        names = []
+        for ref_list in var.attrs.get("DIMENSION_LIST", []):
+            names.append(f[ref_list[0]].name.lstrip("/"))
+        if len(names) != 2:  # no dimension scales; match by length instead
+            names = [
+                next(k for k, v in arrays.items() if v.ndim == 1 and v.shape[0] == n)
+                for n in var.shape
+            ]
+
+        data = np.asarray(var)
+        fill = var.attrs.get("_FillValue")
+        if fill is not None and np.issubdtype(data.dtype, np.floating):
+            data = np.where(data == np.asarray(fill).ravel()[0], np.nan, data)
+
+        da = xr.DataArray(
+            data, dims=names,
+            coords={n: np.asarray(arrays[n]) for n in names},
+            name=grids[0],
+        )
+        mapping = var.attrs.get("grid_mapping")
+        if mapping is not None:
+            attrs = arrays.get(text(mapping), None)
+            wkt = attrs and (attrs.attrs.get("spatial_ref") or attrs.attrs.get("crs_wkt"))
+            if wkt is not None:
+                da = da.rio.write_crs(text(wkt))
+    return da
+
+
+def read_grd(path, engine=None):
+    """Read a GMT ``.grd`` as a CRS-aware 2-D DataArray -- the inverse of
+    :func:`write_grd`.
+
+    Axes are renamed to ``x``/``y``. The CRS comes from the file when it carries
+    one; otherwise the grid is taken as geographic if its axes were named
+    ``lon``/``lat`` (GMT's own convention for a geographic grid) or if they span
+    a plausible lon/lat range. ``engine`` forces one backend instead of trying
+    :data:`_GRD_ENGINES` in turn; ``engine="hdf5"`` forces the ``h5py`` reader.
+
+    Eager -- a ``.grd`` is a whole raster in one variable, with no chunking to
+    preserve.
+    """
+    with open(path, "rb") as fh:
+        is_hdf5 = fh.read(8) == _HDF5_MAGIC
+
+    engines = [engine] if engine else (
+        ["hdf5"] if is_hdf5
+        else [e for e in _GRD_ENGINES if e in xr.backends.list_engines()]
+    )
+    da, errors = None, []
+    for name in engines:
+        try:
+            da = (_read_grd_hdf5(path) if name == "hdf5"
+                  else xr.open_dataarray(path, engine=name))
+            break
+        except Exception as exc:  # unreadable this way; try the next
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
+    if da is None:
+        raise ValueError(
+            f"Could not read {path} (tried {', '.join(engines)}).\n" + "\n".join(errors)
+        )
+
+    da = da.squeeze(drop=True)  # rasterio leaves a length-1 band axis
+    geographic = "lon" in da.dims or "lat" in da.dims
+    da = da.rename({k: v for k, v in (("lon", "x"), ("lat", "y")) if k in da.dims})
+    if da.ndim != 2:
+        raise ValueError(f"{path} is not a 2-D grid (dims {da.dims})")
+
+    if da.rio.crs is None:
+        x, y = da["x"].values, da["y"].values
+        if geographic or (abs(x).max() <= 360.0 and abs(y).max() <= 90.0):
+            da = da.rio.write_crs("EPSG:4326")
+    return da.rio.write_nodata(np.nan)
+
+
 def write_grd(field, path):
     """Reproject a 2D native-grid field to lon/lat and write a GMT `.grd`.
 

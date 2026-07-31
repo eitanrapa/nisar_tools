@@ -27,6 +27,10 @@ from ._base import RasterStackMixin, open_stage
 _GEOM_2D = ("incidence_angle", "look_angle", "los_east", "los_north",
             "los_up", "height")
 
+#: Multiplier taking a displacement grid to metres, which is what everything
+#: downstream -- ``rms_min``, ``exclude_within``, the Green's functions -- assumes.
+_LOS_UNITS = {"m": 1.0, "cm": 0.01, "mm": 0.001}
+
 
 def _as_granule_list(gslc):
     """Normalise a granule argument to a list of paths.
@@ -42,6 +46,61 @@ def _as_granule_list(gslc):
     if not granules:
         raise ValueError("Need at least one GSLC granule for the geometry cube")
     return granules
+
+
+def _match_grid(da, ref, resampling):
+    """Put ``da`` on ``ref``'s lattice, resampling only if it is not already."""
+    from . import geo
+
+    same = (
+        da.dims == ref.dims
+        and all(np.array_equal(da[d].values, ref[d].values) for d in ("y", "x"))
+        and da.rio.crs == ref.rio.crs
+    )
+    if same:
+        return da
+    return da.rio.reproject_match(ref, resampling=geo.resampling_from_name(resampling))
+
+
+def _finalise_look(ds):
+    """Validate, renormalise and complete the look geometry.
+
+    Reprojecting three components independently shortens the vector slightly, and
+    ``los_up == cos(incidence)`` only holds for a unit vector -- so it is
+    renormalised, and the incidence angle derived from it. A norm far from 1 to
+    begin with means the grids are not a unit vector at all, which is raised on
+    rather than quietly rescaled.
+    """
+    e, n, u = (np.asarray(ds[f"los_{c}"].values, float) for c in ("east", "north", "up"))
+    norm = np.sqrt(e * e + n * n + u * u)
+    finite = np.isfinite(norm) & (norm > 0)
+    if not finite.any():
+        raise ValueError("The look-vector grids have no pixel in common with data")
+
+    median = float(np.median(norm[finite]))
+    if not 0.9 <= median <= 1.1:
+        raise ValueError(
+            f"look_e/n/u are not a unit vector (median norm {median:.3g}); "
+            "check the three grids are the components of the LOS direction."
+        )
+
+    mean_up = float(np.mean(u[finite]))
+    if mean_up <= 0:
+        raise ValueError(
+            f"Mean look_u is {mean_up:+.3f}, but a target->sensor unit vector "
+            "points up (cos of the incidence angle). Pass "
+            "look_convention='sensor_to_target' if the grids point sensor->target."
+        )
+
+    scale = np.where(finite, norm, np.nan)
+    for c, v in (("east", e), ("north", n), ("up", u)):
+        ds[f"los_{c}"] = (("y", "x"), (v / scale).astype(np.float32))
+    ds["incidence_angle"] = (
+        ("y", "x"),
+        np.degrees(np.arccos(np.clip(u / scale, -1.0, 1.0))).astype(np.float32),
+    )
+    ds["los"] = ds["los"].astype(np.float32)
+    return ds
 
 
 class LOSStack(RasterStackMixin):
@@ -135,6 +194,122 @@ class LOSStack(RasterStackMixin):
             look_direction=look_direction,
             granules=[str(p) for p in granules],
             pairs=du.attrs.get("pairs"),
+        )
+        return cls(ds)
+
+    @classmethod
+    def from_grd(cls, los, look_e, look_n, look_u, units="m", sign=1,
+                 look_convention="target_to_sensor", epsg=None,
+                 resolution=None, resampling="bilinear", direction=None,
+                 look_direction=None, wavelength=None):
+        """Build a :class:`LOSStack` from GMT ``.grd`` grids of displacement and
+        look vector -- the route in for LOS products this package did not make
+        (GMTSAR, ISCE, ALOS, a colleague's ``.grd``).
+
+        ``los`` is one displacement grid or a sequence of them (one per pair);
+        ``look_e``/``look_n``/``look_u`` are the three components of the
+        line-of-sight unit vector, shared by every pair. Look grids on a
+        different lattice than ``los`` are resampled onto it.
+
+        Three things have to be declared because no ``.grd`` records them, and
+        each is silently wrong-looking rather than loud if mis-set:
+
+        ``units``
+            ``"m"`` (default), ``"cm"`` or ``"mm"`` -- a file called
+            ``los_cm.grd`` needs ``units="cm"``. Everything downstream works in
+            metres, so a factor of 100 here becomes a factor of 100 in the
+            recovered slip.
+        ``sign``
+            ``+1`` if the grid is already **positive toward the sensor** (this
+            package's convention, and the sense of a *decreasing* range);
+            ``-1`` if it is positive away, i.e. positive range change, which is
+            the other common convention. Applied on load, exactly as
+            :func:`~nisar_tools.geometry.phase_to_los` applies it, so what is
+            stored is canonical and nothing downstream re-applies it.
+        ``look_convention``
+            ``"target_to_sensor"`` (default, this package's) or
+            ``"sensor_to_target"``, which is negated on load. Checked against
+            the data: the vertical component of a target->sensor vector is
+            ``cos(incidence)`` and must be **positive**, so a mis-declaration
+            raises rather than inverting the geometry.
+
+        The grid is reprojected to a metric CRS if it is geographic -- the
+        quadtree in :meth:`~nisar_tools.slip.Observations.from_los` measures cell
+        widths against ``width_min`` in metres, so a lon/lat lattice would put
+        ``width_min=1000`` at a million columns. ``epsg`` picks the target
+        (default: the UTM zone of the scene centre) and ``resolution`` its pixel
+        size in metres (default: rasterio's estimate from the source grid).
+
+        ``direction`` (``"ascending"``/``"descending"``) and ``look_direction``
+        (``"left"``/``"right"``; ALOS is **right**-looking, NISAR is left) are
+        carried as provenance and are what lets
+        :func:`nisar_tools.slip.diagnostics.scene_report` check ``los_east``'s
+        sign against the pass geometry -- the invariant that catches an inverted
+        look vector. ``wavelength`` is provenance only; the grid is already
+        displacement, so nothing rescales by it.
+        """
+        from . import geo
+
+        try:
+            scale = _LOS_UNITS[units]
+        except KeyError:
+            raise ValueError(
+                f"units must be one of {sorted(_LOS_UNITS)}, not {units!r}"
+            ) from None
+        if sign not in (1, -1):
+            raise ValueError(f"sign must be +1 or -1, not {sign!r}")
+        if look_convention not in ("target_to_sensor", "sensor_to_target"):
+            raise ValueError(
+                "look_convention must be 'target_to_sensor' or 'sensor_to_target'"
+            )
+
+        paths = _as_granule_list(los)
+        grids = [geo.read_grd(p) for p in paths]
+        ref = grids[0]
+        for i, g in enumerate(grids[1:], 1):
+            grids[i] = _match_grid(g, ref, resampling)
+
+        look = {
+            f"los_{c}": _match_grid(geo.read_grd(p), ref, resampling)
+            for c, p in (("east", look_e), ("north", look_n), ("up", look_u))
+        }
+        if look_convention == "sensor_to_target":
+            look = {k: -v for k, v in look.items()}
+
+        stacked = xr.concat(
+            [g * (scale * sign) for g in grids], dim="pair", coords="minimal",
+        )
+        ds = xr.Dataset({"los": stacked, **look})
+
+        if ds.rio.crs is None:
+            raise ValueError(
+                f"{paths[0]} carries no CRS and its coordinates are not lon/lat; "
+                "pass grids with a CRS, or reproject them first."
+            )
+        if ds.rio.crs.is_geographic:
+            if epsg is None:
+                lon, lat = ds["x"].values.mean(), ds["y"].values.mean()
+                epsg = geo.utm_epsg(lon, lat)
+            ds = ds.rio.reproject(
+                f"EPSG:{int(epsg)}", resolution=resolution,
+                resampling=geo.resampling_from_name(resampling), nodata=np.nan,
+            )
+        epsg = int(ds.rio.crs.to_epsg())
+
+        ds = _finalise_look(ds)
+        ds.attrs.update(
+            epsg=epsg,
+            direction=direction,
+            wavelength=None if wavelength is None else float(wavelength),
+            frequency=None,
+            # Applied above, so the stored field is positive toward the sensor
+            # whatever was passed -- the same contract `from_unwrapped` has.
+            sign=int(sign),
+            look_direction=look_direction,
+            granules=[str(p) for p in paths],
+            pairs=None,
+            source="grd",
+            units=units,
         )
         return cls(ds)
 
