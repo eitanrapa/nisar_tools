@@ -14,6 +14,15 @@ Reads only ``<ws>/slip_observations.zarr``; weights come from
 
 Then put the corner into ``slip_config.SMOOTHING`` and run ``run_inversion.py``.
 
+**Both files gain a ``_bootstrap`` suffix when the observations came from the
+coarse round-0 sampling** (``NISAR_MAX_ROUNDS=0``), which is the L-curve-first
+route. The label is read off the observations, not passed in, so the two curves
+cannot overwrite each other or be confused later -- and they do mean different
+things. Round 0 is deliberately under-sampled; where there are fewer observations
+than parameters the smoothing supplies missing rank rather than trading misfit
+against roughness, so its corner sits at more smoothing than the refined sampling
+wants. Treat it as a starting point for stage 1, not as the answer.
+
 The corner is deliberately left to the eye: automatic detection on a short
 discrete sweep is unreliable, and the two neighbouring weights usually differ
 less than the choice of mesh does. What this script *will* do is refuse to
@@ -32,7 +41,7 @@ from nisar_tools.slip import SlipInversion
 from nisar_tools.slip.plot import plot_l_curve
 from slip_config import (
     BOUNDS, INVERSION, LCURVE_WEIGHTS, OUT_DIR, banner, geometry,
-    load_observations, save_figure, workspace,
+    load_observations, sampling_kind, save_figure, workspace,
 )
 
 
@@ -41,8 +50,28 @@ def main():
     ws = workspace(create=False)
     trace, frame, mesh = geometry()
     obs = load_observations(ws, frame)
+    ratio = obs.n / (2 * mesh.n_elements)
+
+    # The observations say which sampling they came from, so the outputs are named
+    # for what they actually describe. A curve from the coarse round-0 sampling and
+    # one from the refined sampling answer different questions and would otherwise
+    # overwrite each other under the same filename.
+    kind = sampling_kind(obs)
+    suffix = "" if kind == "model" else "_bootstrap"
     print(f"    {obs!r}\n    {mesh!r}", flush=True)
-    print(f"    {obs.n / (2 * mesh.n_elements):.1f}x the slip parameters\n", flush=True)
+    print(f"    sampling: {kind}-driven, {ratio:.1f}x the slip parameters\n", flush=True)
+
+    if kind == "bootstrap":
+        print("⚠️  this is the COARSE data-driven sampling, so the corner is only "
+              "provisional: round 0 is deliberately under-sampled, and where there "
+              "are fewer observations than parameters the smoothing is supplying "
+              "missing rank rather than trading misfit against roughness. Expect the "
+              "corner to sit at more smoothing than the refined sampling wants.",
+              flush=True)
+    if ratio < 1.0:
+        print(f"⚠️  {obs.n} observations against {2 * mesh.n_elements} slip parameters "
+              "-- the problem is under-determined at every weight on this curve",
+              flush=True)
 
     # One Green's matrix for the whole sweep -- that is the point of doing this
     # here rather than re-solving from scratch per weight.
@@ -56,7 +85,12 @@ def main():
     # neither is visible in misfit or roughness alone.
     peak = np.array([float(np.abs(m.element_slip).max()) for m in models])
     table["max_slip_m"] = peak
-    table.to_csv(OUT_DIR / "l_curve.csv")
+    # Constant columns, so the file still says which sampling it describes after
+    # it has been emailed to someone or opened a year later.
+    table["sampling"] = kind
+    table["n_observations"] = obs.n
+    table["n_parameters"] = 2 * mesh.n_elements
+    table.to_csv(OUT_DIR / f"l_curve{suffix}.csv")
     print("\n" + table.to_string(), flush=True)
 
     # Too much smoothing: the model goes flat while VR stays plausible-looking.
@@ -75,7 +109,10 @@ def main():
               f"{list(curve['smoothing'].values[saturated])} -- those points are the "
               "bound, not a fit; ignore them or widen `BOUNDS`", flush=True)
 
-    save_figure(plot_l_curve(curve)[0], "l_curve")
+    figure, axis = plot_l_curve(curve)
+    axis.set_title(f"{axis.get_title()}\n{kind}-driven sampling, "
+                   f"{obs.n} obs / {2 * mesh.n_elements} parameters", fontsize=9)
+    save_figure(figure, f"l_curve{suffix}")
 
     converged = curve["converged"].values.astype(bool)
     if not converged.all():
@@ -98,8 +135,15 @@ def main():
         print("⚠️  misfit barely moves across the sweep -- the range is too narrow "
               "to show a corner. Widen LCURVE_WEIGHTS.", flush=True)
 
-    print(f"\nread the corner off {OUT_DIR / 'figures' / 'l_curve.png'}, put it in "
-          "slip_config.SMOOTHING, then run run_inversion.py", flush=True)
+    where = OUT_DIR / "figures" / f"l_curve{suffix}.png"
+    if kind == "bootstrap":
+        print(f"\nread the provisional corner off {where}, then re-run stage 1 with "
+              "NISAR_MAX_ROUNDS back at its default and NISAR_SMOOTHING set to it -- "
+              "the refined sampling gets its own curve, written beside this one",
+              flush=True)
+    else:
+        print(f"\nread the corner off {where}, put it in slip_config.SMOOTHING "
+              "(or NISAR_SMOOTHING), then run run_inversion.py", flush=True)
 
 
 if __name__ == "__main__":

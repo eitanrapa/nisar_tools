@@ -79,6 +79,15 @@ def main():
     obs.persist(ws, OBS_STAGE, overwrite=True)
     print(f"\n{obs!r} -> {ws.path(OBS_STAGE)}", flush=True)
 
+    if LOOP["max_rounds"] == 0:
+        # NISAR_MAX_ROUNDS=0: round 0 only, so what was just written is the coarse
+        # data-driven sampling, not the refined one. Say so here as well as in
+        # stage 2 -- this overwrote whatever was in the observations stage before.
+        print("NOTE: NISAR_MAX_ROUNDS=0, so these are the COARSE round-0 "
+              "observations. Stage 2 will label its outputs `_bootstrap`; re-run "
+              "this stage without the override to produce the refined sampling.",
+              flush=True)
+
     # The loop's own model, kept for comparison. Stage 3 re-solves at whatever
     # weight the L-curve picks, so this is not the answer -- but if the two differ
     # much, the weight moved a long way and that is worth knowing.

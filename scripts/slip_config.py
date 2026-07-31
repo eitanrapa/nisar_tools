@@ -98,7 +98,17 @@ SMOOTHING = float(os.environ.get("NISAR_SMOOTHING", 0.3))
 LCURVE_WEIGHTS = [30.0, 10.0, 3.0, 1.0, 0.5, 0.3, 0.1, 0.03]
 
 #: `iterate_sampling`: round 0 data-driven and coarse, the rest model-driven.
-LOOP = dict(max_rounds=4, spacing=2000.0, tol=0.01)
+#:
+#: ``NISAR_MAX_ROUNDS=0`` stops after round 0, so stage 1 writes the **coarse,
+#: data-driven** sampling. That is the way to L-curve *before* letting a model
+#: steer the sampling -- but read what it gives you with care: round 0 is
+#: deliberately under-sampled, and on the test mesh it produced 154 samples
+#: against 240 slip parameters. A corner picked on an under-determined problem
+#: sits at more smoothing than one picked on the final, well-determined one,
+#: because there the regularization is supplying missing rank rather than
+#: trading misfit against roughness.
+LOOP = dict(max_rounds=int(os.environ.get("NISAR_MAX_ROUNDS", 4)),
+            spacing=2000.0, tol=0.01)
 
 #: Depth-dependent rigidity, from Crust2.0 for Venezuela. Passing it matters:
 #: `moment_magnitude` falls back to a flat 30 GPa, and this crust runs 34-46 GPa
@@ -155,6 +165,19 @@ def load_observations(ws, frame):
     obs = Observations.from_zarr(ws.path(OBS_STAGE))
     frame.require_match(obs.ds.attrs["frame"], "The stored observations")
     return obs
+
+
+def sampling_kind(obs):
+    """``"model"`` or ``"bootstrap"``, read off the observations themselves.
+
+    An ``Observations`` records ``quadtree["field"] = "model"`` when its cells were
+    chosen from a predicted field; a coarse round-0 set has no such key. Deriving
+    the label from that rather than from a flag the caller passes is the point --
+    the two samplings produce L-curves that mean different things, and a mislabelled
+    one is indistinguishable from a correct one six months later.
+    """
+    return "model" if obs.ds.attrs.get("quadtree", {}).get("field") == "model" \
+        else "bootstrap"
 
 
 def save_figure(fig, name):
