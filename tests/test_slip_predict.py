@@ -367,3 +367,24 @@ def test_a_loaded_model_has_no_matrix_to_reuse(setup, tmp_path):
     back = SlipModel.load(tmp_path / "m.slip.zip")
     assert back.inversion.g is None
     np.testing.assert_allclose(back.residual, back.data - back.prediction)
+
+
+def test_a_degenerate_model_warns_instead_of_quietly_converging(setup):
+    """Over-smoothing makes the loop 'converge' on nothing, and it looks fine.
+
+    A flat model predicts a flat field, ``model_rms_min`` then returns ~0, the
+    quadtree splits on floating-point noise, and nothing changes between rounds
+    because nothing is there -- so ``max_change`` goes to zero and the loop stops
+    as if it had succeeded. Hit for real on the D134 scene at ``smoothing=200``:
+    peak slip 0.004 m at a respectable-looking 22% variance reduction.
+    """
+    trace, frame, mesh, _, scenes = setup
+    with pytest.warns(RuntimeWarning, match="effectively zero"):
+        _, model, history = iterate_sampling(
+            scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+            max_rounds=1, spacing=8000.0,
+            solve_kwargs={"smoothing": 1e6}, verbose=False,
+        )
+    assert np.abs(model.element_slip).max() < 1e-3
+    # The trap: it still reports as converged, which is why the warning exists.
+    assert history[-1]["converged"]

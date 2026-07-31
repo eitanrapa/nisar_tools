@@ -1,0 +1,171 @@
+"""Shared configuration for the three detached slip-inversion stages.
+
+The work splits into three because the costs are very different and only the
+first is expensive to redo:
+
+    run_sampling.py    resample every scene onto one lattice, then iterate
+                       sample -> solve -> re-sample until the model settles.
+                       Minutes. Writes the observations.
+    run_lcurve.py      sweep the smoothing weight over those observations.
+                       One Green's matrix, many solves.
+    run_inversion.py   solve once at the weight the L-curve picked, and write
+                       the model, its text table and the review figures.
+
+They share this file so a mesh or a sampling parameter cannot drift between
+them -- which would be silent, since each stage's output looks fine on its own.
+
+The Green's matrix is **not** passed between stages: it is the largest object in
+the problem and is deliberately never saved (``SlipModel.save`` omits it). Each
+stage re-assembles it, which measured ~25 s at 1106 elements against 8000
+observations -- far cheaper than the alternatives.
+"""
+
+import os
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")            # headless: before pyplot is imported anywhere
+
+import matplotlib.pyplot as plt  # noqa: E402
+
+from nisar_tools import LOSStack, Workspace                        # noqa: E402
+from nisar_tools.slip import FaultMesh, FaultTrace, VelocityModel  # noqa: E402
+
+# -- where -------------------------------------------------------------------
+WORK_DIR = Path(os.environ.get("NISAR_WORK_DIR", "workdir")).expanduser()
+OUT_DIR = WORK_DIR / "model_sampling"
+FIG_DIR = OUT_DIR / "figures"
+FAULT = Path(os.environ.get("NISAR_FAULT",
+                            "~/Downloads/Venezuela_fault_trace.kml")).expanduser()
+
+#: Stage names inside the workspace, so the three scripts agree on them.
+OBS_STAGE = "slip_observations"
+LOS_STAGE = "los_{name}_frame"
+
+# -- what --------------------------------------------------------------------
+#: One entry per scene: a ``.grd`` directory, or a persisted ``los`` stage name.
+SCENES = {
+    "D134": {
+        "grd": "~/Downloads/D134",
+        "units": "cm", "sign": +1,
+        "direction": "descending", "look_direction": "right",
+    },
+    # "D126": {"stage": "los_D126"},
+}
+
+#: ``NISAR_EDGE_LENGTH`` overrides the element size without editing this file --
+#: worth having on a detached runner, where a coarse pass is how you find out
+#: whether the whole chain works before committing an hour to the fine one.
+MESH = dict(max_depth=float(os.environ.get("NISAR_MAX_DEPTH", 20e3)),
+            edge_length=float(os.environ.get("NISAR_EDGE_LENGTH", 3e3)))
+
+#: ``ramp`` gives each *named* track its own nuisance terms. Without it an
+#: interferogram's arbitrary constant lands in the slip as broad, deep, fictitious
+#: patches -- and with two scenes merged into one raster it cost a factor of 3.5
+#: in peak slip while variance reduction stayed at 98%.
+#:
+#: ``velocity_model`` belongs here rather than only at the ``moment()`` call:
+#: :attr:`SlipModel.moment_magnitude` reads it off the *inversion*, so without it
+#: the reported Mw silently falls back to a flat 30 GPa while an explicitly
+#: computed M0 uses the real rigidity -- two numbers in one summary that do not
+#: describe the same Earth.
+INVERSION = dict(ramp="offset")
+
+#: Bounds and polarity. Right-lateral faults (San Sebastian) need strike-slip
+#: pinned non-positive, because positive strike-slip is LEFT-lateral here.
+BOUNDS = dict(polarity=(-1, 0, 0), strike=(-6.0, 6.0), dip=(-2.0, 2.0))
+
+#: The weight `run_inversion.py` solves at. Read it off `run_lcurve.py`'s corner.
+#: ``NISAR_SMOOTHING`` overrides it, so stage 3 can be re-run at a new weight
+#: without editing this file -- which is the common case after looking at the curve.
+#:
+#: Measured on the real D134 scene, 100 elements, `ramp="offset"`:
+#:
+#:     lambda   1000    100      10       3       1     0.3     0.1    0.03
+#:     VR %     21.96  22.15   36.70   80.10   95.40   97.68   98.37   98.48
+#:     max |s|  0.000  0.004   0.308   1.678   2.862   3.926   5.569   6.000
+#:
+#: so the corner is around **0.3-1.0**. Above ~30 the smoothing wins outright and
+#: the model comes back flat zero at a plausible-looking 22% VR; below ~0.03 the
+#: strike bound saturates and the *bound*, not the data, is setting the answer.
+#: `solve()` normalises the operator by its own row count, so this stays roughly
+#: mesh-refinement invariant.
+SMOOTHING = float(os.environ.get("NISAR_SMOOTHING", 0.3))
+
+#: Weights `run_lcurve.py` sweeps -- wide enough to show both failure modes, so
+#: the corner is visibly a corner and not just the end of the range. Swept
+#: large -> small internally; cost is dominated by the roughest end.
+LCURVE_WEIGHTS = [30.0, 10.0, 3.0, 1.0, 0.5, 0.3, 0.1, 0.03]
+
+#: `iterate_sampling`: round 0 data-driven and coarse, the rest model-driven.
+LOOP = dict(max_rounds=4, spacing=2000.0, tol=0.01)
+
+#: Depth-dependent rigidity, from Crust2.0 for Venezuela. Passing it matters:
+#: `moment_magnitude` falls back to a flat 30 GPa, and this crust runs 34-46 GPa
+#: through the seismogenic zone, so Mw would come out too small.
+VELOCITY_MODEL = VelocityModel(
+    depth=[0, 2e3, 2e3, 10.58e3, 10.58e3, 19.25e3, 19.25e3, 27.92e3, 27.92e3, 60e3],
+    vp=[3.75e3] * 2 + [6.10e3] * 2 + [6.50e3] * 2 + [7.00e3] * 2 + [8.20e3] * 2,
+    vs=[1.95e3] * 2 + [3.50e3] * 2 + [3.65e3] * 2 + [3.90e3] * 2 + [4.70e3] * 2,
+    rho=[2.37e3] * 2 + [2.75e3] * 2 + [2.87e3] * 2 + [3.01e3] * 2 + [3.40e3] * 2,
+    name="Venezuela_crust2.0",
+)
+
+INVERSION["velocity_model"] = VELOCITY_MODEL
+
+
+# -- shared helpers ----------------------------------------------------------
+def workspace(create=True):
+    return Workspace(WORK_DIR, create=create)
+
+
+def geometry():
+    """``(trace, frame, mesh)`` -- rebuilt identically by every stage.
+
+    One :class:`LocalFrame` for the mesh and every track. Mixing frames is a
+    silent kilometre-scale error rather than a crash, which is why every stage
+    derives the frame from the same trace instead of storing one.
+    """
+    trace = FaultTrace.from_file(FAULT)
+    frame = trace.local_frame()
+    return trace, frame, FaultMesh.vertical(trace, frame, **MESH)
+
+
+def load_scene(spec, ws):
+    """One scene, from a ``.grd`` quadruple or a persisted ``los`` stage."""
+    if "stage" in spec:
+        return LOSStack.from_zarr(ws.path(spec["stage"]))
+    directory = Path(spec["grd"]).expanduser()
+    return LOSStack.from_grd(
+        directory / "los_cm.grd", directory / "look_e.grd",
+        directory / "look_n.grd", directory / "look_u.grd",
+        units=spec.get("units", "m"), sign=spec.get("sign", 1),
+        direction=spec.get("direction"), look_direction=spec.get("look_direction"),
+    )
+
+
+def load_observations(ws, frame):
+    """The observations `run_sampling.py` wrote, checked against this frame.
+
+    The check is the point: an ``Observations`` built in a different frame will
+    invert perfectly happily and put the slip in the wrong place.
+    """
+    from nisar_tools.slip import Observations
+
+    obs = Observations.from_zarr(ws.path(OBS_STAGE))
+    frame.require_match(obs.ds.attrs["frame"], "The stored observations")
+    return obs
+
+
+def save_figure(fig, name):
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    path = FIG_DIR / f"{name}.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {path}", flush=True)
+    return path
+
+
+def banner(stage):
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"=== {stage}\n    work dir {WORK_DIR}\n    fault    {FAULT}", flush=True)

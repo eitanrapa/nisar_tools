@@ -325,7 +325,14 @@ class LOSStack(RasterStackMixin):
         ds = self.ds.chunk(self.disk_chunks("pair"))
         full = {
             "stage": name,
-            "epsg": self.epsg,
+            # `.get`, not `self.epsg`: a stack resampled into a LocalFrame has no
+            # EPSG code at all, and the property raises. The frame goes in beside
+            # it, and only when present, so a UTM stack keeps the hash it had.
+            "epsg": self.ds.attrs.get("epsg"),
+            **({"frame": self.ds.attrs["frame"]}
+               if self.ds.attrs.get("frame") is not None else {}),
+            **({"resampled": self.ds.attrs["resampled"]}
+               if self.ds.attrs.get("resampled") is not None else {}),
             "wavelength": self.ds.attrs.get("wavelength"),
             "frequency": self.ds.attrs.get("frequency"),
             "sign": self.ds.attrs.get("sign"),

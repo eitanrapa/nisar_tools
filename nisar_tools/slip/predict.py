@@ -178,6 +178,7 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
         _report(history[-1])
 
     for round_index in range(1, int(max_rounds) + 1):
+        _warn_if_degenerate(model, round_index)
         previous = model.element_slip.copy()
         parts = []
         for name, stack in scenes.items():
@@ -215,6 +216,34 @@ def model_rms_min(field, fraction=0.02):
     if finite.size == 0:
         raise ValueError("The predicted field is empty; nothing to set a threshold from")
     return float(fraction) * float(finite.std())
+
+
+#: Below this peak slip the model that drives the sampling is not a model.
+_DEGENERATE_SLIP = 1e-3
+
+
+def _warn_if_degenerate(model, round_index):
+    """Warn when the model about to steer the sampling is essentially zero.
+
+    A flat model predicts a flat field, ``model_rms_min`` then returns roughly
+    zero, and the quadtree splits on floating-point noise -- so the loop *appears*
+    to converge (nothing changes between rounds, because nothing is there) on a
+    model that explains none of the data. It is the smoothing weight almost every
+    time: measured on the real D134 scene, anything above about 30 flattened the
+    answer to a peak of 0.004 m while variance reduction sat at a
+    respectable-looking 22%.
+    """
+    import warnings
+
+    peak = float(np.abs(model.element_slip).max())
+    if peak < _DEGENERATE_SLIP:
+        warnings.warn(
+            f"round {round_index} is being sampled from a model with a peak slip of "
+            f"{peak:.2e} m and VR {model.variance_reduction:.1f}% -- effectively zero, "
+            "so the predicted field carries no signal to sample. Lower the smoothing "
+            "weight; the loop will otherwise 'converge' on nothing.",
+            RuntimeWarning, stacklevel=3,
+        )
 
 
 def _fill_nearest(values):
