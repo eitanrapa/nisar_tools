@@ -273,6 +273,16 @@ class FaultMesh:
         return self.nodes[self.triangles]
 
     @property
+    def param_vertices(self):
+        """The three vertex ``(s, z)`` per element, shape ``(m, 3, 2)``.
+
+        The unrolled counterpart of :attr:`vertices`: arc length along strike and
+        depth, which is exactly what the mesh is parameterized by, so the section
+        it draws is an exact picture of the fault rather than a projection of one.
+        """
+        return self.params[self.triangles]
+
+    @property
     def normals(self):
         """Unit normals, ``normalize(cross(P2 - P1, P3 - P1))``.
 

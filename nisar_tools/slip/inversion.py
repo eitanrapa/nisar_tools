@@ -413,7 +413,10 @@ class SlipModel:
                   if inversion.n_ramp else inversion.g)
         self.prediction = design @ self.x
         self.data = inversion.d
-        self.residual = self.prediction - self.data
+        #: Observed minus modelled, the geodetic convention -- so a positive
+        #: residual is displacement the model failed to account for, and the
+        #: residual map reads in the same sense as the data map beside it.
+        self.residual = self.data - self.prediction
 
     # -- fit ---------------------------------------------------------------
     @property
@@ -502,6 +505,7 @@ class SlipModel:
         return float((2.0 / 3.0) * (np.log10(m0) - 9.1)) if m0 > 0 else float("nan")
 
     def track_residual(self, name):
+        """One track's residual, observed minus modelled."""
         return self.residual[self.obs.track_mask(name)]
 
     # -- forward -----------------------------------------------------------
@@ -593,7 +597,10 @@ class SlipModel:
         ds.attrs.update(engine=self._inversion.engine.name, basis=self.basis.name,
                         smoothing=self.smoothing, spacing=float(spacing),
                         exclude_within=float(exclude_within))
-        return ds.rio.write_crs(self.mesh.frame.crs)
+        # `local_crs`, not `crs`: this grid's x/y are local metres, and the frame's
+        # bare projection would place them 500 km east and 1167 km south of where
+        # they are -- which `to_grd` would then bake into a lon/lat file.
+        return ds.rio.write_crs(self.mesh.frame.local_crs)
 
     def to_grd(self, outdir, fields=("ux", "uy", "uz"), **kwargs):
         """Write the surface displacement field as GMT ``.grd`` files.
@@ -819,7 +826,11 @@ class SlipModel:
         self.ramp = self.x[2 * n:]
         self.data = np.asarray(model["data"].values, dtype=float)
         self.prediction = np.asarray(model["prediction"].values, dtype=float)
-        self.residual = np.asarray(model["residual"].values, dtype=float)
+        # Recomputed rather than read back. It is a pure function of the two
+        # fields above, so deriving it costs nothing and means a file written
+        # before the residual convention changed to observed-minus-modelled loads
+        # with the current sign instead of a silently mirrored one.
+        self.residual = self.data - self.prediction
 
         # The smoothing operator is a pure function of the mesh and the options,
         # so `roughness` is recoverable exactly without storing a sparse matrix.

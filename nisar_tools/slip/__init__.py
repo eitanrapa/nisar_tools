@@ -56,11 +56,14 @@ from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel
 from .layered import LayeredPointSource
 from .mesh import FaultMesh
+from .predict import iterate_sampling, model_rms_min, predicted_los
+from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
 from .sampling import Observations
 from .surface import FaultSurface, gridfit
 from .trace import FaultSegment, FaultTrace
 
 __all__ = [
+    "ARCSEC_10",
     "EdgrnTables",
     "ElementBasis",
     "FaultMesh",
@@ -76,9 +79,15 @@ __all__ = [
     "SlipModel",
     "VelocityModel",
     "cell_size_ladder",
+    "frame_lattice",
     "gridfit",
+    "iterate_sampling",
+    "model_rms_min",
     "noise_floor",
+    "predicted_los",
     "ramp_content",
+    "resample_all",
+    "resample_to_frame",
     "run_edgrn",
     "scene_report",
     "write_edgrn_input",

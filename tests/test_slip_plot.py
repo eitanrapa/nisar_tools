@@ -83,3 +83,49 @@ def test_plot_l_curve(solved):
     line = ax.lines[0]
     assert line.get_xydata().shape == (3, 2)
     matplotlib.pyplot.close(fig)
+
+
+# -- the mesh, before any model exists ----------------------------------------
+
+@pytest.mark.parametrize("color", ["area", "depth", "dip"])
+def test_plot_mesh_draws_every_element_on_both_panels(solved, color):
+    """``plot_mesh`` takes a bare mesh -- it is the figure to look at *before*
+    committing to an inversion, which is while the mesh can still be changed."""
+    trace, mesh, _, _, _ = solved
+    fig, (map_ax, sec_ax) = slip_plot.plot_mesh(mesh, trace=trace, color=color)
+    for ax in (map_ax, sec_ax):
+        (collection,) = [c for c in ax.collections]
+        assert len(collection.get_paths()) == mesh.n_elements
+        assert collection.get_array().size == mesh.n_elements
+    # The trace is drawn on the map panel only; the section is in (s, z).
+    assert len(map_ax.lines) == 1
+    assert not sec_ax.lines
+
+
+def test_plot_mesh_panels_use_different_coordinates(solved):
+    """Map view is ENU metres, the section is (arc length, depth) -- confusing the
+    two would still draw a plausible-looking figure."""
+    trace, mesh, _, _, _ = solved
+    _, (map_ax, sec_ax) = slip_plot.plot_mesh(mesh)
+    # Section: arc length against depth, both read straight off `params`.
+    assert sec_ax.get_ylim() == (pytest.approx(mesh.params[:, 1].min() / 1e3), 0.0)
+    assert sec_ax.get_xlim()[0] == pytest.approx(mesh.params[:, 0].min() / 1e3)
+
+    # Map: east/north metres, which on a 238 km trace of 18 km depth spans a
+    # visibly different range from the section's along-strike axis.
+    east = mesh.vertices[:, :, 0] / 1e3
+    assert map_ax.get_xlim()[0] <= east.min() and map_ax.get_xlim()[1] >= east.max()
+    assert map_ax.get_ylim()[1] > 0.0        # northings straddle the frame origin
+    assert map_ax.get_xlim()[0] < sec_ax.get_xlim()[0]
+
+
+def test_plot_mesh_rejects_an_unknown_colour(solved):
+    _, mesh, _, _, _ = solved
+    with pytest.raises(ValueError, match="color must be one of"):
+        slip_plot.plot_mesh(mesh, color="slip")
+
+
+def test_param_vertices_matches_the_triangles(solved):
+    _, mesh, _, _, _ = solved
+    assert mesh.param_vertices.shape == (mesh.n_elements, 3, 2)
+    np.testing.assert_array_equal(mesh.param_vertices, mesh.params[mesh.triangles])

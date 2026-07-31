@@ -45,9 +45,8 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 3.2))
 
-    verts = [mesh.params[tri][:, :2] / 1e3 for tri in mesh.triangles]
-    verts = [np.column_stack([v[:, 0], v[:, 1]]) for v in verts]
-    coll = PolyCollection(verts, array=value, cmap=cmap, edgecolors="none")
+    coll = PolyCollection(mesh.param_vertices / 1e3, array=value, cmap=cmap,
+                          edgecolors="none")
     if component != "magnitude":
         # A signed field wants a symmetric diverging scale about zero, or the
         # colour of "no slip" drifts with the data range.
@@ -71,12 +70,75 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     return ax.figure, ax
 
 
+def plot_mesh(mesh, trace=None, color="area", axes=None, cmap="viridis"):
+    """The fault discretisation itself: map view beside the unrolled section.
+
+    Takes a bare :class:`~nisar_tools.slip.mesh.FaultMesh`, no solved model
+    needed -- this is the figure to look at *before* committing to an inversion,
+    which is when the mesh can still be changed.
+
+    ``color`` is ``"area"`` (the default), ``"depth"`` or ``"dip"``. Element area
+    is the useful one: it is what a graded mesh (``bias_w``) is changing, and it
+    should be read against the sample spacing from
+    :func:`~nisar_tools.slip.plot.plot_samples` -- elements much smaller than the
+    data that constrain them are what the smoothing weight then has to paper over.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
+
+    fields = {
+        "area": (mesh.areas / 1e6, "Element area (km²)"),
+        "depth": (-mesh.centroids[:, 2] / 1e3, "Centroid depth (km)"),
+        "dip": (mesh.dip, "Dip (deg)"),
+    }
+    if color not in fields:
+        raise ValueError(f"color must be one of {sorted(fields)}")
+    value, label = fields[color]
+
+    if axes is None:
+        _, axes = plt.subplots(2, 1, figsize=(12, 7.5),
+                               gridspec_kw={"height_ratios": [2, 1]})
+    map_ax, sec_ax = axes
+
+    map_ax.add_collection(PolyCollection(
+        mesh.vertices[:, :, :2] / 1e3, array=value, cmap=cmap,
+        edgecolors="0.35", linewidths=0.2,
+    ))
+    if trace is not None and mesh.frame is not None:
+        tx, ty = trace.to_local(mesh.frame)
+        map_ax.plot(tx / 1e3, ty / 1e3, "r-", lw=1.4, zorder=3)
+    map_ax.autoscale_view()
+    map_ax.set_aspect("equal")
+    map_ax.set_xlabel("East (km)")
+    map_ax.set_ylabel("North (km)")
+    map_ax.set_title(
+        f"{mesh.n_elements} elements, {mesh.n_nodes} nodes "
+        f"({mesh.attrs.get('kind', '?')}, edge {mesh.attrs.get('edge_length', 0) / 1e3:g} km)"
+    )
+
+    sec = PolyCollection(mesh.param_vertices / 1e3, array=value, cmap=cmap,
+                         edgecolors="0.35", linewidths=0.2)
+    sec_ax.add_collection(sec)
+    sec_ax.set_xlim(mesh.params[:, 0].min() / 1e3, mesh.params[:, 0].max() / 1e3)
+    sec_ax.set_ylim(mesh.params[:, 1].min() / 1e3, 0.0)
+    sec_ax.set_aspect("equal")
+    sec_ax.set_xlabel("Distance along strike (km)")
+    sec_ax.set_ylabel("Depth (km)")
+
+    plt.colorbar(sec, ax=list(axes), label=label, pad=0.02)
+    return sec_ax.figure, axes
+
+
 def plot_fit(model, track=None, cmap="RdBu_r", trace=None):
     """Data, model and residual for one track, as three map panels.
 
     Sharing one colour scale between data and model is the point -- an
     independently scaled model panel can make a poor fit look convincing. The
     residual gets its own, tighter, scale.
+
+    The residual is **observed minus modelled**, so it reads in the same sense as
+    the data panel beside it: red where there is more displacement than the model
+    accounts for, not less.
     """
     import matplotlib.pyplot as plt
 

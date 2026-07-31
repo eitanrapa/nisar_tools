@@ -444,4 +444,4 @@ def warp_onto_lattice(field, tx, ty, src_epsg, dst_epsg, resampling="bilinear"):
     )
     if integer:
         out = out.fillna(0).astype(field.dtype)
-    return out.rio.write_crs(f"EPSG:{int(dst_epsg)}")
+    return out.rio.write_crs(geo.as_crs(dst_epsg))

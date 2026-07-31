@@ -27,15 +27,32 @@ warnings.filterwarnings(
 )
 
 
+def as_crs(value):
+    """Normalise a CRS argument to something rasterio and pyproj both accept.
+
+    Historically every grid in this package was identified by an integer EPSG
+    code, and the helpers below built ``f"EPSG:{code}"`` themselves. The slip
+    module's :class:`~nisar_tools.slip.frame.LocalFrame` is a transverse Mercator
+    centred on the study area, which has **no EPSG code at all** -- so a grid can
+    now be identified by a :class:`pyproj.CRS` instead. An integer (or a string of
+    digits) still means EPSG; anything else is passed through.
+    """
+    if isinstance(value, (int, np.integer)):
+        return f"EPSG:{int(value)}"
+    if isinstance(value, str) and value.isdigit():
+        return f"EPSG:{int(value)}"
+    return value
+
+
 def bbox_to_native(lon_min, lon_max, lat_min, lat_max, epsg_code):
     """Transform a lon/lat bounding box to native-CRS x/y bounds.
 
     Returns ``(x_min, x_max, y_min, y_max)`` in the projection given by
-    ``epsg_code``. All four corners are transformed (not just two) so the
-    bounds are correct even when the box edges are not axis-aligned in the
-    native projection.
+    ``epsg_code`` (an EPSG code or a :class:`pyproj.CRS`; see :func:`as_crs`).
+    All four corners are transformed (not just two) so the bounds are correct
+    even when the box edges are not axis-aligned in the native projection.
     """
-    transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg_code}", always_xy=True)
+    transformer = Transformer.from_crs("EPSG:4326", as_crs(epsg_code), always_xy=True)
 
     corners_lon = [lon_min, lon_max, lon_max, lon_min]
     corners_lat = [lat_min, lat_min, lat_max, lat_max]
@@ -57,10 +74,11 @@ def transform_native_bbox(x_min, x_max, y_min, y_max, src_epsg, dst_epsg):
     Edge-densified (via :func:`rasterio.warp.transform_bounds`), so the
     returned bounds cover the whole warped footprint even though a projected
     rectangle's edges curve in the target CRS. Returns
-    ``(x_min, x_max, y_min, y_max)``.
+    ``(x_min, x_max, y_min, y_max)``. Either CRS may be an EPSG code or a
+    :class:`pyproj.CRS` (see :func:`as_crs`).
     """
     left, bottom, right, top = transform_bounds(
-        f"EPSG:{src_epsg}", f"EPSG:{dst_epsg}", x_min, y_min, x_max, y_max
+        as_crs(src_epsg), as_crs(dst_epsg), x_min, y_min, x_max, y_max
     )
     return left, right, bottom, top
 
@@ -94,8 +112,11 @@ def warp_to_grid(arr, src_transform, src_epsg, dst_transform, dst_epsg,
     (for linear kernels this is exactly complex-valued interpolation) and
     recombined as complex64; use ``resampling="nearest"`` to preserve exact
     sample values. Pixels with no source coverage come back NaN.
+
+    Either CRS may be an EPSG code or a :class:`pyproj.CRS` (see :func:`as_crs`).
     """
     resampling = resampling_from_name(resampling)
+    src_crs, dst_crs = as_crs(src_epsg), as_crs(dst_epsg)
 
     def _warp(src):
         """Warp one band, or several stacked on a leading axis, in one call."""
@@ -106,9 +127,9 @@ def warp_to_grid(arr, src_transform, src_epsg, dst_transform, dst_epsg,
             src,
             dst,
             src_transform=src_transform,
-            src_crs=f"EPSG:{src_epsg}",
+            src_crs=src_crs,
             dst_transform=dst_transform,
-            dst_crs=f"EPSG:{dst_epsg}",
+            dst_crs=dst_crs,
             src_nodata=np.nan,
             dst_nodata=np.nan,
             resampling=resampling,

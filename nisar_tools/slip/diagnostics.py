@@ -34,6 +34,8 @@ that :meth:`Observations.concat` averages away.
 import numpy as np
 import xarray as xr
 
+from .sampling import _to_frame, stack_epsg
+
 #: Fallback stand-off for :func:`noise_floor` when no mesh is available to size
 #: it from. Coseismic displacement has not died away a few tens of kilometres
 #: from a large rupture, so blocks nearer than this carry real signal gradient
@@ -131,7 +133,7 @@ def _blocks(los_stack, trace, frame, pair=0, block=2000.0):
     yc = ds["y"].coarsen(y=ny, boundary="trim").mean().values
     xx, yy = np.meshgrid(np.asarray(xc, dtype=float), np.asarray(yc, dtype=float))
 
-    fx, fy = frame.from_epsg(xx.ravel(), yy.ravel(), int(ds.attrs["epsg"]))
+    fx, fy = _to_frame(xx.ravel(), yy.ravel(), frame, stack_epsg(ds))
     along, dist, side = _project(trace, fx, fy, frame)
 
     return {

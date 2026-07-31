@@ -45,7 +45,8 @@ class Observations:
     @classmethod
     def from_los(cls, los_stack, pair=0, name="track", frame=None, trace=None,
                  rms_min=0.005, width_min=1000.0, width_max=20000.0,
-                 min_valid_fraction=0.5, exclude_within=0.0, stat="mean"):
+                 min_valid_fraction=0.5, exclude_within=0.0, stat="mean",
+                 field=None, refine_within=0.0):
         """Quadtree-downsample one pair of a :class:`~nisar_tools.los.LOSStack`.
 
         ``rms_min`` is the within-cell standard deviation (metres) below which a
@@ -60,14 +61,42 @@ class Observations:
         ``sign`` when the stack was built. The attribute is validated and carried
         as provenance, **not** re-applied -- doing so squared it, which silently
         undid the very correction ``sign=-1`` exists to make.
+
+        **Model-based sampling.** ``field`` is an optional ``(ny, nx)`` array that
+        decides *where* to split, in place of the observed displacement. Passing a
+        model's predicted LOS (see :func:`nisar_tools.slip.predict.predicted_los`)
+        is the Wang & Fialko (2015) scheme: the observed field's within-cell
+        scatter does not shrink as a cell shrinks, so once ``rms_min`` is below the
+        noise the recursion cannot stop on information and simply runs down to
+        ``width_min`` -- on real scenes that produced tens of thousands of samples
+        of mostly atmosphere. A predicted field is noise-free by construction, so
+        cells split on signal. What is *reduced* is always the observed data:
+        ``field`` chooses the cells, and the cells are then filled from
+        ``los``, exactly as the paper uses "the bounding coordinates of each
+        resolution cell" to average the real interferogram.
+
+        ``refine_within`` forces cells within that many metres of ``trace`` to keep
+        splitting to ``width_min`` whatever ``field`` says there. It exists only for
+        the model-based path and matters more than it looks: an initial model with
+        little shallow slip predicts a smooth near-field, so the quadtree would
+        coarsen precisely where shallow slip needs constraining, and the next
+        iteration is then free to invent it. The paper keeps "a relatively dense
+        sampling around the fault trace ... through all iterations" for this reason.
+
+        ⚠️ ``rms_min`` means something different under ``field``: a threshold on
+        model curvature, not a noise level, so
+        :func:`~nisar_tools.slip.diagnostics.scene_report`'s recommendation does
+        not apply -- use :func:`~nisar_tools.slip.diagnostics.model_rms_min`.
         """
         if stat not in ("mean", "median"):
             raise ValueError("stat must be 'mean' or 'median'")
         if exclude_within > 0 and trace is None:
             raise ValueError("exclude_within needs a trace to measure distance from")
+        if refine_within > 0 and trace is None:
+            raise ValueError("refine_within needs a trace to measure distance from")
 
         ds = los_stack.ds
-        epsg = int(ds.attrs["epsg"])
+        epsg = stack_epsg(ds)
         if frame is None:
             frame = trace.local_frame() if trace is not None else _frame_for(ds)
 
@@ -86,6 +115,22 @@ class Observations:
         ])
 
         valid = np.isfinite(los) & np.all(np.isfinite(look), axis=0)
+
+        split_on = los
+        if field is not None:
+            split_on = np.asarray(
+                field.values if hasattr(field, "values") else field, dtype=float
+            )
+            if split_on.shape != los.shape:
+                raise ValueError(
+                    f"field has shape {split_on.shape}, but the stack's grid is "
+                    f"{los.shape}"
+                )
+            # A pixel with no prediction cannot be judged, so it cannot vote on
+            # where to split -- and reducing it would mix modelled and observed
+            # footprints inside one cell.
+            valid = valid & np.isfinite(split_on)
+
         if not valid.any():
             raise ValueError("No pixel has both a finite displacement and a look vector")
 
@@ -94,14 +139,22 @@ class Observations:
         dx = abs(float(np.diff(x_native)[0]))
         dy = abs(float(np.diff(y_native)[0]))
 
+        refine = None
+        if refine_within > 0:
+            gx, gy = np.meshgrid(x_native, y_native)
+            fx_all, fy_all = _to_frame(gx.ravel(), gy.ravel(), frame, epsg)
+            refine = (trace.distance(fx_all, fy_all, frame)
+                      .reshape(los.shape) <= refine_within)
+
         cells = _quadtree_cells(
-            los, valid,
+            split_on, valid,
             rms_min=rms_min,
             min_rows=max(1, int(round(width_min / dy))),
             min_cols=max(1, int(round(width_min / dx))),
             max_rows=max(1, int(round(width_max / dy))),
             max_cols=max(1, int(round(width_max / dx))),
             min_valid_fraction=min_valid_fraction,
+            refine=refine,
         )
         if not cells:
             raise ValueError(
@@ -113,7 +166,7 @@ class Observations:
         # Native grid metres -> the shared local frame. Averaging in the native
         # projection and transforming once is exact to well under a metre over a
         # cell, and avoids transforming every pixel of the raster.
-        fx, fy = frame.from_epsg(rows["x"], rows["y"], epsg)
+        fx, fy = _to_frame(rows["x"], rows["y"], frame, epsg)
 
         keep = np.ones(fx.size, dtype=bool)
         if exclude_within > 0:
@@ -137,6 +190,20 @@ class Observations:
                 "track": ("obs", np.full(int(keep.sum()), name, dtype=object)),
             }
         )
+        quadtree = {
+            "rms_min": float(rms_min),
+            "width_min": float(width_min),
+            "width_max": float(width_max),
+            "min_valid_fraction": float(min_valid_fraction),
+            "exclude_within": float(exclude_within),
+            "stat": stat,
+        }
+        if field is not None:
+            # Folded in only when used, so a data-driven run keeps the params
+            # hash it had before model-based sampling existed.
+            quadtree["field"] = "model"
+            quadtree["refine_within"] = float(refine_within)
+
         out.attrs.update(
             frame=frame.to_dict(),
             epsg=epsg,
@@ -146,14 +213,7 @@ class Observations:
             sign=sign,
             direction=ds.attrs.get("direction"),
             wavelength=ds.attrs.get("wavelength"),
-            quadtree={
-                "rms_min": float(rms_min),
-                "width_min": float(width_min),
-                "width_max": float(width_max),
-                "min_valid_fraction": float(min_valid_fraction),
-                "exclude_within": float(exclude_within),
-                "stat": stat,
-            },
+            quadtree=quadtree,
             n_raw_valid=int(valid.sum()),
         )
         return cls(out)
@@ -245,7 +305,7 @@ class Observations:
         name = name or self.STAGE
         full = {
             "stage": name,
-            "epsg": int(self.ds.attrs["epsg"]),
+            "epsg": self.ds.attrs.get("epsg"),
             "frame": self.ds.attrs["frame"],
             "tracks": self.ds.attrs.get("tracks"),
             "quadtree": self.ds.attrs.get("quadtree"),
@@ -265,11 +325,42 @@ class Observations:
         return f"<Observations n={self.n} tracks={self.tracks}>"
 
 
+def stack_epsg(ds):
+    """The EPSG code to transform a stack's grid from, or ``None``.
+
+    ``None`` means the stack was resampled onto a lattice in the local frame
+    (:mod:`nisar_tools.slip.resample`) and its ``x``/``y`` are already local
+    metres. Every helper that projects a stack's coordinates goes through this
+    and :func:`_to_frame`, so a frame-gridded stack works everywhere a UTM one
+    does rather than raising ``KeyError: 'epsg'`` somewhere downstream.
+    """
+    if ds.attrs.get("frame") is not None:
+        return None
+    return int(ds.attrs["epsg"])
+
+
+def _to_frame(x, y, frame, epsg):
+    """Bring native grid coordinates into ``frame``.
+
+    ``epsg is None`` means the stack was already resampled onto a lattice in this
+    frame (see :mod:`nisar_tools.slip.resample`), which grids in
+    :attr:`~nisar_tools.slip.frame.LocalFrame.local_crs` -- so its ``x``/``y``
+    *are* local metres and there is nothing to do. That is also the only available
+    answer: the frame's transverse Mercator has no EPSG code to transform from.
+    """
+    if epsg is None:
+        return np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    return frame.from_epsg(x, y, epsg)
+
+
 def _frame_for(ds):
     """A local frame centred on a scene, when no trace was supplied."""
     from pyproj import Transformer
 
     from .frame import LocalFrame
+
+    if ds.attrs.get("frame") is not None:
+        return LocalFrame.from_dict(ds.attrs["frame"])
 
     x = np.asarray(ds["x"].values, dtype=float)
     y = np.asarray(ds["y"].values, dtype=float)
@@ -279,18 +370,29 @@ def _frame_for(ds):
 
 
 def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
-                    max_rows, max_cols, min_valid_fraction):
+                    max_rows, max_cols, min_valid_fraction, refine=None):
     """Index rectangles ``(r0, r1, c0, c1)`` surviving the variance split.
 
     Constant-time per candidate: the count, sum and sum of squares over any
     rectangle come from three cumulative-sum tables, so the recursion never
     touches the pixels themselves.
+
+    The split statistic is the within-cell **standard deviation**. The reference
+    implementations describe a *curvature*-based rule (Simons et al. 2002; Fialko
+    2004; Wang & Fialko 2015); on a smooth field the two behave alike, and the
+    summed-area formulation is what makes this cost 0.05 s on 0.32 M pixels, so
+    the difference is recorded rather than removed.
+
+    ``refine`` is an optional boolean mask of pixels that must be resolved to
+    ``min_rows``/``min_cols`` regardless of how flat ``values`` is over them. It
+    rides on a fourth table, so the test stays O(1) per candidate.
     """
     v = np.where(valid, values, 0.0)
     m = valid.astype(np.float64)
     s0 = _sat(m)
     s1 = _sat(v)
     s2 = _sat(v * v)
+    s3 = None if refine is None else _sat(np.asarray(refine, dtype=np.float64))
 
     def block(sat, r0, r1, c0, c1):
         return sat[r1, c1] - sat[r0, c1] - sat[r1, c0] + sat[r0, c0]
@@ -308,6 +410,8 @@ def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
             mean = block(s1, r0, r1, c0, c1) / count
             var = block(s2, r0, r1, c0, c1) / count - mean * mean
             rough = np.sqrt(max(var, 0.0)) > rms_min
+        if s3 is not None and block(s3, r0, r1, c0, c1) > 0:
+            rough = True
 
         # Each axis is halved only if the halves stay above that axis's minimum
         # width -- decided per axis, not once for the cell. Deciding jointly lets

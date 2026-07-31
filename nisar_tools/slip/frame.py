@@ -18,6 +18,7 @@ Distortion over a few hundred kilometres of an on-meridian transverse Mercator i
 a few parts in 10\\ :sup:`4`, well below the resolution any slip model claims.
 """
 
+import numpy as np
 from pyproj import CRS, Transformer
 
 # UTM's own scale factor and false easting. Keeping them means a frame whose
@@ -51,6 +52,17 @@ class LocalFrame:
         self._inv = Transformer.from_crs(self.crs, "EPSG:4326", always_xy=True)
         self._x0, self._y0 = self._fwd.transform(self.origin_lon, self.origin_lat)
 
+        # The same projection with the origin shift folded into the false
+        # easting/northing, so a *local* coordinate is directly valid in it. This
+        # is the CRS to write on any raster whose x/y are local metres -- tagging
+        # those with `crs` claims they are the unshifted projected values, which
+        # on this frame misplaces the data by 500 km east and 1167 km south.
+        self.local_crs = CRS.from_proj4(
+            f"+proj=tmerc +lat_0=0 +lon_0={self.ref_lon} +k={_K0} "
+            f"+x_0={_FALSE_EASTING - self._x0} +y_0={-self._y0} "
+            f"+ellps={self.ellps} +units=m +no_defs"
+        )
+
     # -- conversions -------------------------------------------------------
     def to_local(self, lon, lat):
         """Project lon/lat to local ``(x, y)`` metres east/north of the origin."""
@@ -69,7 +81,25 @@ class LocalFrame:
         """
         transformer = Transformer.from_crs(f"EPSG:{int(epsg)}", self.crs, always_xy=True)
         px, py = transformer.transform(x, y)
-        return px - self._x0, py - self._y0
+        return self.from_projected(px, py)
+
+    def from_projected(self, x, y):
+        """Local metres from coordinates already in :attr:`crs`.
+
+        :attr:`crs` is the *projection*; this frame is that projection **with an
+        origin subtracted**, so the two are not the same numbers. A raster warped
+        into ``frame.crs`` -- which is what
+        :func:`nisar_tools.slip.resample.resample_to_frame` produces, and which is
+        the only georeferencing rioxarray can write -- carries the projected
+        values, offset from local metres by the origin and by UTM's 500 km false
+        easting. Reading its ``x``/``y`` as local coordinates puts every
+        observation hundreds of kilometres from the fault.
+        """
+        return np.asarray(x) - self._x0, np.asarray(y) - self._y0
+
+    def to_projected(self, x, y):
+        """Inverse of :meth:`from_projected`: local metres -> :attr:`crs`."""
+        return np.asarray(x) + self._x0, np.asarray(y) + self._y0
 
     # -- persistence -------------------------------------------------------
     def to_dict(self):

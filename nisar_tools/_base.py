@@ -109,7 +109,32 @@ class RasterStackMixin:
 
     @property
     def epsg(self):
-        return int(self.ds.attrs["epsg"])
+        try:
+            return int(self.ds.attrs["epsg"])
+        except KeyError:
+            raise AttributeError(
+                f"{type(self).__name__} has no EPSG code. It is gridded in a "
+                "LocalFrame (a transverse Mercator centred on the study area, "
+                "which has none) -- see attrs['frame'], and use .crs for anything "
+                "that just needs to know the projection."
+            ) from None
+
+    @property
+    def crs(self):
+        """The grid's CRS, whether or not it has an EPSG code.
+
+        Prefer this to :attr:`epsg` wherever the value is only being handed to
+        rasterio or pyproj. A stack resampled into a
+        :class:`~nisar_tools.slip.frame.LocalFrame` for the slip inversion carries
+        a proj4 transverse Mercator with no EPSG code at all, so ``f"EPSG:{...}"``
+        cannot describe it.
+        """
+        crs = self.ds.rio.crs
+        if crs is not None:
+            return crs
+        from . import geo
+
+        return geo.as_crs(self.ds.attrs["epsg"])
 
     @property
     def direction(self):
@@ -136,7 +161,7 @@ class RasterStackMixin:
         from . import geo  # local: geo imports rioxarray, and stages import geo
 
         x_min, x_max, y_min, y_max = geo.bbox_to_native(
-            lon_min, lon_max, lat_min, lat_max, self.epsg
+            lon_min, lon_max, lat_min, lat_max, self.crs
         )
         x = self.x
         y = self.y
@@ -181,7 +206,7 @@ class RasterStackMixin:
         layers = []
         for stem, da in self._grd_layers(fields, indices):
             if da.rio.crs is None:  # derived amp/phase can drop the CRS coord
-                da = da.rio.write_crs(f"EPSG:{self.epsg}")
+                da = da.rio.write_crs(self.crs)
             layers.append((stem, da))
 
         def _write(layer):

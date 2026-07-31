@@ -352,6 +352,64 @@ samples north of the trace" read like thin two-sided coverage, while the profile
 showed the north block was absent along the eastern *two-thirds* — exactly where
 the largest signal was.
 
+### Sub-sampling from the model instead of from the data
+
+Everything above picks quadtree cells from the **observed** displacement, which is
+noise-driven — the split test is the *pixel* scatter in a cell, and that does not
+shrink as the cell shrinks. `iterate_sampling` implements the Wang & Fialko (2015)
+alternative: quadtree a **synthetic** interferogram from a preliminary model, then
+fill those cells from the real data, and repeat until the model stops changing.
+
+```python
+from nisar_tools.slip import ARCSEC_10, iterate_sampling, resample_all
+
+# One lattice for every track: 10 arcsec, in the shared LocalFrame.
+gridded = resample_all({"D134": los_alos, "D126": los_nisar}, frame, spacing=ARCSEC_10)
+
+obs, model, history = iterate_sampling(
+    gridded, mesh, trace, frame,
+    {name: dict(rms_min=r.attrs["rms_min"], width_min=r.attrs["width_min"],
+                width_max=30_000.0, exclude_within=r.attrs["exclude_within"])
+     for name, r in reports.items()},
+    inversion_kwargs={"ramp": "linear"}, solve_kwargs={"smoothing": 0.3},
+)
+```
+
+**Resample first, and not only for tidiness.** A quadtree cell is an integer number
+of pixels halved at its midpoint, so the reachable sizes form a dyadic ladder *set by
+the pixel size* — per axis, per scene. Two scenes at different resolutions land on
+different ladders, one `width_min` means two different things, and the per-track
+sample counts diverge for a reason that has nothing to do with the data, which
+`Observations.concat` then turns into an unintended reweighting. `resample_all`
+defaults to 10 arc-seconds (309 m), the usual ALOS-2 posting and already ~20× finer
+than a fault element.
+
+**`refine_within` is not optional.** An initial model with little shallow slip
+predicts a smooth near field, so the quadtree coarsens exactly where shallow slip
+needs constraining and the next round is free to invent it — the paper's "spurious
+shallow slip". `iterate_sampling` holds a dense band along the trace through every
+round.
+
+**`rms_min` changes meaning** under model-based sampling: a threshold on model
+curvature, not a noise level, so the `scene_report` value does not apply.
+`model_rms_min` derives it from the predicted field's own scatter.
+
+⚠️ **Not unconditionally better.** Measured on the synthetic fixture at 12 mm of
+noise, data-driven vs model-driven correlation with the truth: **0.944/0.934** for
+white noise, **0.895/0.874** correlated over 15 km, **0.852/0.918** at 30 km. The
+gain arrives only once the noise is long-wavelength enough that extra samples inside
+one atmospheric cell carry no independent information. The sample count moves in
+either direction depending on `rms_fraction`. What it reliably does is stop the
+sampler chasing noise. On the real ALOS-2 D134 scene: 610 samples in round 0, then
+1246 → 1311 → 1312, converging in three rounds (max parameter change 1.38 → 0.045 →
+0.001 m) at VR 97.8%.
+
+`plot_mesh(mesh, trace=trace)` draws the discretisation itself — map view beside the
+unrolled section, coloured by element area — and takes a bare `FaultMesh`, so it is
+available before any model exists. Read it against `plot_samples`: elements much
+smaller than the data constraining them are what the smoothing weight then has to
+paper over.
+
 ### Choosing the smoothing weight
 
 `l_curve` solves at many weights over the same Green's matrix and tabulates
