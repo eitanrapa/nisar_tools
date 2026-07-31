@@ -420,6 +420,23 @@ class SlipModel:
 
     # -- fit ---------------------------------------------------------------
     @property
+    def inversion(self):
+        """The :class:`SlipInversion` this model came out of.
+
+        Worth having in public because the Green's matrix is the expensive part
+        and it is already built: re-solving at another smoothing weight, or
+        sweeping :meth:`SlipInversion.l_curve`, costs nothing extra through this
+        handle and a full re-assembly without it. That matters most after
+        :func:`~nisar_tools.slip.predict.iterate_sampling`, which returns a model
+        built on observations the caller never assembled a matrix for.
+
+        ⚠️ A model from :meth:`load` has no matrix -- ``G`` is deliberately not
+        saved -- so the object comes back with ``g is None`` and can be read but
+        not re-solved.
+        """
+        return self._inversion
+
+    @property
     def converged(self):
         """True if the solver stopped on a tolerance rather than the iteration cap.
 

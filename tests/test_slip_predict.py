@@ -327,3 +327,43 @@ def test_residual_is_observed_minus_modelled(setup, coarse):
     obs, model = coarse
     np.testing.assert_allclose(model.residual, model.data - model.prediction)
     assert model.rms_misfit == pytest.approx(np.sqrt(np.mean(model.residual ** 2)))
+
+
+def test_iterate_sampling_hands_back_a_reusable_inversion(setup, tmp_path):
+    """``model.inversion`` is what lets the notebook sweep an L-curve over the
+    *refined* sampling without paying for a second Green's matrix.
+
+    Without it the caller has only ``obs``, and rebuilding ``SlipInversion`` from
+    it re-assembles G -- measured at ~25 s for 1106 elements against 8000
+    observations, and the loop has just built exactly that matrix internally.
+    """
+    trace, frame, mesh, _, scenes = setup
+    obs, model, _ = iterate_sampling(
+        scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+        max_rounds=2, spacing=4000.0, solve_kwargs={"smoothing": 0.3}, verbose=False,
+    )
+    inversion = model.inversion
+    assert inversion.obs.n == obs.n
+    assert inversion.g is not None
+    assert inversion.g.shape[0] == obs.n
+
+    # Re-solving through the handle costs no assembly and agrees with a fresh solve.
+    again = inversion.solve(smoothing=0.3)
+    np.testing.assert_allclose(again.strike_slip, model.strike_slip, atol=1e-9)
+
+
+def test_a_loaded_model_has_no_matrix_to_reuse(setup, tmp_path):
+    """``G`` is deliberately not saved, so the handle comes back without one --
+    readable, but not re-solvable. Better to say so than to hand back a stub that
+    fails somewhere further in."""
+    from nisar_tools.slip import SlipModel
+
+    trace, frame, mesh, _, scenes = setup
+    obs = Observations.from_los(scenes["asc"], name="asc", frame=frame, trace=trace,
+                                **_SAMPLING)
+    model = SlipInversion(mesh, obs).solve(smoothing=0.3)
+    model.save(tmp_path / "m.slip.zip")
+
+    back = SlipModel.load(tmp_path / "m.slip.zip")
+    assert back.inversion.g is None
+    np.testing.assert_allclose(back.residual, back.data - back.prediction)
