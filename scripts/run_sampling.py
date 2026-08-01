@@ -27,7 +27,7 @@ from nisar_tools.slip import ARCSEC_10, iterate_sampling, resample_all, scene_re
 from nisar_tools.slip.plot import plot_coverage, plot_mesh, plot_samples
 from slip_config import (
     BOUNDS, INVERSION, LOOP, LOS_STAGE, OBS_STAGE, OUT_DIR, SCENES, SMOOTHING,
-    banner, geometry, load_scene, save_figure, workspace,
+    banner, geometry, load_scene, mesh_summary, save_figure, workspace,
 )
 
 
@@ -35,7 +35,7 @@ def main():
     banner("stage 1: sampling")
     ws = workspace()
     trace, frame, mesh = geometry()
-    print(f"    {trace!r}\n    {mesh!r}\n", flush=True)
+    print(f"    {trace!r}\n    {mesh!r}\n    {mesh_summary(mesh)}\n", flush=True)
 
     scenes = {name: load_scene(spec, ws) for name, spec in SCENES.items()}
     for name, stack in scenes.items():

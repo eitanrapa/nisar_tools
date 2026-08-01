@@ -30,8 +30,8 @@ import numpy as np
 from nisar_tools.slip import SlipInversion
 from nisar_tools.slip.plot import plot_fit, plot_slip
 from slip_config import (
-    BOUNDS, INVERSION, MESH, OUT_DIR, SMOOTHING, VELOCITY_MODEL, banner,
-    geometry, load_observations, save_figure, workspace,
+    BOUNDS, INVERSION, OUT_DIR, SMOOTHING, VELOCITY_MODEL, banner,
+    geometry, load_observations, mesh_summary, save_figure, workspace,
 )
 
 
@@ -40,7 +40,7 @@ def main():
     ws = workspace(create=False)
     trace, frame, mesh = geometry()
     obs = load_observations(ws, frame)
-    print(f"    {obs!r}\n    {mesh!r}\n", flush=True)
+    print(f"    {obs!r}\n    {mesh!r}\n    {mesh_summary(mesh)}\n", flush=True)
 
     inversion = SlipInversion(mesh, obs, **INVERSION)
     print(f"{inversion!r}  -- Green's matrix built", flush=True)
@@ -69,7 +69,7 @@ def main():
         "n_parameters": int(inversion.n_param),
         "tracks": obs.tracks,
         "smoothing": float(SMOOTHING),
-        "mesh": {k: float(v) for k, v in MESH.items()},
+        "mesh": mesh_summary(mesh),
         "variance_reduction": float(model.variance_reduction),
         "rms_misfit_m": float(model.rms_misfit),
         "roughness": float(model.roughness),

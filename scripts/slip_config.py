@@ -18,9 +18,24 @@ The Green's matrix is **not** passed between stages: it is the largest object in
 the problem and is deliberately never saved (``SlipModel.save`` omits it). Each
 stage re-assembles it, which measured ~25 s at 1106 elements against 8000
 observations -- far cheaper than the alternatives.
+
+Everything here is edited in place, and the settings worth changing between runs
+also read an environment variable, so a detached job can be re-launched at a new
+value without touching the file:
+
+    NISAR_WORK_DIR      where the workspace and every output live
+    NISAR_FAULT         the fault trace (.kml or two-column lon/lat ASCII)
+    NISAR_EDGE_LENGTH   element size, metres
+    NISAR_MAX_DEPTH     bottom of the fault, metres
+    NISAR_DIP           one dip, or a list -- vertical if unset (see DIPS)
+    NISAR_SEGMENTS      segment files, one per dip (see SEGMENT_FILES)
+    NISAR_BIAS_W        depth-level grading (see CURVE)
+    NISAR_SMOOTHING     the weight stage 3 solves at
+    NISAR_MAX_ROUNDS    sampling rounds; 0 stops at the coarse data-driven set
 """
 
 import os
+import re
 from pathlib import Path
 
 import matplotlib
@@ -28,8 +43,32 @@ matplotlib.use("Agg")            # headless: before pyplot is imported anywhere
 
 import matplotlib.pyplot as plt  # noqa: E402
 
-from nisar_tools import LOSStack, Workspace                        # noqa: E402
-from nisar_tools.slip import FaultMesh, FaultTrace, VelocityModel  # noqa: E402
+from nisar_tools import LOSStack, Workspace                                    # noqa: E402
+from nisar_tools.slip import (                                                 # noqa: E402
+    FaultMesh, FaultSegment, FaultTrace, VelocityModel,
+)
+
+
+# -- parsing the environment overrides ---------------------------------------
+def _dips(value):
+    """``None``, one dip, or a list of dips -> ``None`` or a list of floats."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        value = [v for v in re.split(r"[,\s]+", value.strip()) if v]
+    elif isinstance(value, (int, float)):
+        value = [value]
+    return [float(v) for v in value] or None
+
+
+def _paths(value):
+    """The same, for a list of file paths."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        value = [v for v in re.split(r"[,\s]+", value.strip()) if v]
+    return [Path(v).expanduser() for v in value] or None
+
 
 # -- where -------------------------------------------------------------------
 WORK_DIR = Path(os.environ.get("NISAR_WORK_DIR", "workdir")).expanduser()
@@ -58,6 +97,44 @@ SCENES = {
 #: whether the whole chain works before committing an hour to the fine one.
 MESH = dict(max_depth=float(os.environ.get("NISAR_MAX_DEPTH", 20e3)),
             edge_length=float(os.environ.get("NISAR_EDGE_LENGTH", 3e3)))
+
+#: Fault dip. ``None`` extrudes the trace straight down; one number dips the
+#: whole fault; a list gives one dip per straight *deep segment*, in order along
+#: strike. Edit the fallback below to fix it here, or set ``NISAR_DIP=75`` /
+#: ``NISAR_DIP=70,80,85`` to override without touching the file.
+#:
+#: Dips **above 90 are meaningful**, not an error -- the fault leans the other
+#: way (the reference's Myanmar configuration uses ``[75 75 70 80 85 90 100]``).
+#: A vertical mesh has nowhere to put dip-slip signal except into strike-slip or
+#: the residual, so this is worth setting whenever the fault is known to dip.
+DIPS = _dips(os.environ.get("NISAR_DIP", None))
+
+#: Where the deep segments come from when ``DIPS`` names more than one. ``None``
+#: chops the trace into ``len(DIPS)`` equal chords, which is enough to say "the
+#: western third dips 70, the rest 85". Otherwise a list of four-number segment
+#: files (``x_begin y_begin x_end y_end``, metres in the local frame), one per
+#: dip; ``NISAR_SEGMENTS`` takes the same list, comma- or space-separated.
+SEGMENT_FILES = _paths(os.environ.get("NISAR_SEGMENTS", None))
+
+#: Options that exist only on the curved constructor.
+#:
+#: ``bias_w`` thickens the depth levels geometrically downward, putting the fine
+#: elements where surface data can actually resolve slip -- a patch at 2 km is
+#: resolved far more sharply than one at 18 km, so even levels spend parameters
+#: where they cannot be recovered. Measured on the real trace, 8 levels over
+#: 20 km: 1.15 runs 1.8 km levels at the surface to 4.2 km at the base, 1.3 runs
+#: 1.1 km to 5.5 km. It is orthogonal to the geometry, so it applies to a
+#: vertical fault too -- ``FaultMesh.vertical`` does not take it, so ``DIPS=None``
+#: with ``bias_w != 1`` routes through ``curved(uniform_dip=90)``, which is
+#: bit-identical to ``vertical()``. Note ``neighbor_smoothing`` weights every
+#: edge equally, so graded levels make the smoother anisotropic with depth;
+#: ``ds_ratio`` is the knob if that matters.
+#:
+#: ``smoothness`` is the surface fit's regularizer weight (the reference's
+#: 0.008). Only two depths are constrained -- the trace and the segments' bottom
+#: lines -- so the regularizer *is* the dip profile between them, not a cosmetic
+#: knob. ``None`` takes the reference default.
+CURVE = dict(bias_w=float(os.environ.get("NISAR_BIAS_W", 1.0)), smoothness=None)
 
 #: ``ramp`` gives each *named* track its own nuisance terms. Without it an
 #: interferogram's arbitrary constant lands in the slip as broad, deep, fictitious
@@ -138,7 +215,57 @@ def geometry():
     """
     trace = FaultTrace.from_file(FAULT)
     frame = trace.local_frame()
-    return trace, frame, FaultMesh.vertical(trace, frame, **MESH)
+    return trace, frame, fault_mesh(trace, frame)
+
+
+def fault_mesh(trace, frame):
+    """The mesh described by ``MESH`` / ``DIPS`` / ``SEGMENT_FILES`` / ``CURVE``.
+
+    Vertical stays on :meth:`FaultMesh.vertical` rather than the equivalent
+    ``curved(uniform_dip=90)`` so that a run configured as it was before this
+    option existed goes down exactly the same code path.
+    """
+    if DIPS is None:
+        if CURVE["bias_w"] == 1.0:
+            return FaultMesh.vertical(trace, frame, **MESH)
+        return FaultMesh.curved(trace, frame, uniform_dip=90.0, **MESH, **CURVE)
+
+    if len(DIPS) == 1:
+        return FaultMesh.curved(trace, frame, uniform_dip=DIPS[0], **MESH, **CURVE)
+
+    segments = (FaultSegment.from_files(SEGMENT_FILES) if SEGMENT_FILES
+                else FaultSegment.from_trace(trace, frame, len(DIPS)))
+    if len(segments) != len(DIPS):
+        # `from_segments` broadcasts, so a mismatch would otherwise surface as a
+        # numpy shape error naming neither of the two settings that disagree.
+        raise ValueError(
+            f"{len(DIPS)} dips {DIPS} against {len(segments)} segments -- "
+            "DIPS and SEGMENT_FILES must have the same length (or leave "
+            "SEGMENT_FILES=None to chop the trace into len(DIPS) equal chords)"
+        )
+    return FaultMesh.curved(trace, frame, segments=segments, dips=DIPS,
+                            **MESH, **CURVE)
+
+
+def mesh_summary(mesh):
+    """A JSON-safe description of the geometry, for the log and ``summary.json``.
+
+    Read off the *mesh* rather than off ``DIPS``, because the two can legitimately
+    disagree: ``curved(uniform_dip=90)`` reports itself as vertical. Recording what
+    ran is the point -- ``MESH`` alone would describe a dipping fault as though it
+    were the vertical one.
+    """
+    out = {"kind": mesh.attrs.get("kind", "vertical"),
+           "n_elements": int(mesh.n_elements)}
+    out.update({k: float(v) for k, v in MESH.items()})
+    for key in ("dip_deg", "bias_w", "smoothness", "min_curvature_radius"):
+        if key in mesh.attrs:
+            out[key] = float(mesh.attrs[key])
+    if "dips" in mesh.attrs:
+        out["dips"] = [float(d) for d in mesh.attrs["dips"]]
+    if "segments" in mesh.attrs:
+        out["segments"] = [[float(v) for v in seg] for seg in mesh.attrs["segments"]]
+    return out
 
 
 def load_scene(spec, ws):

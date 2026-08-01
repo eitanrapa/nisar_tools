@@ -41,7 +41,7 @@ from nisar_tools.slip import SlipInversion
 from nisar_tools.slip.plot import plot_l_curve
 from slip_config import (
     BOUNDS, INVERSION, LCURVE_WEIGHTS, OUT_DIR, banner, geometry,
-    load_observations, sampling_kind, save_figure, workspace,
+    load_observations, mesh_summary, sampling_kind, save_figure, workspace,
 )
 
 
@@ -58,7 +58,7 @@ def main():
     # overwrite each other under the same filename.
     kind = sampling_kind(obs)
     suffix = "" if kind == "model" else "_bootstrap"
-    print(f"    {obs!r}\n    {mesh!r}", flush=True)
+    print(f"    {obs!r}\n    {mesh!r}\n    {mesh_summary(mesh)}", flush=True)
     print(f"    sampling: {kind}-driven, {ratio:.1f}x the slip parameters\n", flush=True)
 
     if kind == "bootstrap":
