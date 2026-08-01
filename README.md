@@ -553,6 +553,14 @@ third dips 70, the rest 85". For one dip everywhere, `uniform_dip=75.0`.
   is a *vertical* fault with graded depth resolution — `FaultMesh.vertical` does
   not take it. One consequence: the neighbour smoother weights every edge equally,
   so graded levels make it anisotropic with depth.
+- **`bias_w` alone does not fix how much grading you get** — `down_dip_levels`
+  does. There are `down_dip_levels - 1` intervals with thicknesses
+  `bias_w ** (0 … down_dip_levels - 2)`, so the deepest level is
+  `bias_w ** (down_dip_levels - 2)` times the shallowest. Left as `None` the count
+  comes from `edge_length` (`round(max_depth / edge_length) + 1`, which is **8** at
+  20 km / 3 km), so a `bias_w` picked for a target ratio has to be set alongside the
+  count it was computed for: `5 ** (1/15)` is a 5× grading at 17 levels and a 1.9×
+  grading at the default 8.
 - **`uniform_dip=90` reproduces `FaultMesh.vertical` bit for bit**, so switching
   constructor changes nothing already computed. That needs care: `cos(radians(90))`
   is 1.2e-12, not 0, and the triangular-dislocation solution loses *every digit* in
@@ -672,7 +680,7 @@ can be re-launched at a new value without touching the file:
 | `NISAR_EDGE_LENGTH`, `NISAR_MAX_DEPTH` | element size and fault bottom, metres |
 | `NISAR_DIP` | `75` for one dip everywhere, `70,80,85` for one per deep segment; unset means vertical |
 | `NISAR_SEGMENTS` | segment files, one per dip; unset chops the trace into equal chords |
-| `NISAR_BIAS_W` | depth-level grading (see "A fault that dips") |
+| `NISAR_BIAS_W`, `NISAR_DOWN_DIP_LEVELS` | depth-level grading, and the level count that makes it mean a definite ratio (see "A fault that dips") |
 | `NISAR_SMOOTHING` | the weight stage 3 solves at |
 | `NISAR_MAX_ROUNDS` | sampling rounds; `0` stops at the coarse data-driven set |
 

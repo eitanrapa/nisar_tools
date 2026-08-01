@@ -30,6 +30,8 @@ value without touching the file:
     NISAR_DIP           one dip, or a list -- vertical if unset (see DIPS)
     NISAR_SEGMENTS      segment files, one per dip (see SEGMENT_FILES)
     NISAR_BIAS_W        depth-level grading (see CURVE)
+    NISAR_DOWN_DIP_LEVELS  node levels down dip -- what makes NISAR_BIAS_W mean
+                        a definite ratio (see CURVE)
     NISAR_SMOOTHING     the weight stage 3 solves at
     NISAR_MAX_ROUNDS    sampling rounds; 0 stops at the coarse data-driven set
 """
@@ -68,6 +70,10 @@ def _paths(value):
     if isinstance(value, str):
         value = [v for v in re.split(r"[,\s]+", value.strip()) if v]
     return [Path(v).expanduser() for v in value] or None
+
+
+def _int_or_none(value):
+    return None if value is None or value == "" else int(value)
 
 
 # -- where -------------------------------------------------------------------
@@ -130,11 +136,33 @@ SEGMENT_FILES = _paths(os.environ.get("NISAR_SEGMENTS", None))
 #: edge equally, so graded levels make the smoother anisotropic with depth;
 #: ``ds_ratio`` is the knob if that matters.
 #:
+#: ``down_dip_levels`` is the number of node levels from the surface to
+#: ``max_depth``, and it is what makes ``bias_w`` mean a definite amount of
+#: grading: there are ``down_dip_levels - 1`` intervals with thicknesses
+#: ``bias_w ** (0 .. down_dip_levels - 2)``, so
+#:
+#:     deepest / shallowest = bias_w ** (down_dip_levels - 2)
+#:
+#: ``None`` derives it from ``edge_length`` exactly as ``FaultMesh.vertical``
+#: does (``round(max_depth / edge_length) + 1``), which at the 20 km / 3 km
+#: default is **8** -- so ``bias_w = 5 ** (1/15)`` grades by 1.90x there, and by
+#: the 5x it was chosen for only at ``down_dip_levels = 17``. Set the two
+#: together or the ratio is not the one you asked for.
+#:
 #: ``smoothness`` is the surface fit's regularizer weight (the reference's
 #: 0.008). Only two depths are constrained -- the trace and the segments' bottom
 #: lines -- so the regularizer *is* the dip profile between them, not a cosmetic
-#: knob. ``None`` takes the reference default.
-CURVE = dict(bias_w=float(os.environ.get("NISAR_BIAS_W", 1.0)), smoothness=None)
+#: knob. ``None`` takes the reference default. Ignored on the ``uniform_dip``
+#: paths, which are closed-form and have nothing for a gridder to decide.
+CURVE = dict(bias_w=float(os.environ.get("NISAR_BIAS_W", 1.0)),
+             down_dip_levels=_int_or_none(os.environ.get("NISAR_DOWN_DIP_LEVELS")),
+             smoothness=None)
+
+#: The ``CURVE`` values ``FaultMesh.vertical`` already implements, so a config
+#: using only these can stay on the frozen constructor. Anything else has to go
+#: through ``curved(uniform_dip=90)`` -- which is bit-identical -- or it would be
+#: silently dropped, since ``vertical()`` takes none of these keywords.
+_CURVE_NOOP = {"bias_w": 1.0, "down_dip_levels": None, "smoothness": None}
 
 #: ``ramp`` gives each *named* track its own nuisance terms. Without it an
 #: interferogram's arbitrary constant lands in the slip as broad, deep, fictitious
@@ -223,10 +251,13 @@ def fault_mesh(trace, frame):
 
     Vertical stays on :meth:`FaultMesh.vertical` rather than the equivalent
     ``curved(uniform_dip=90)`` so that a run configured as it was before this
-    option existed goes down exactly the same code path.
+    option existed goes down exactly the same code path -- but only while
+    ``CURVE`` asks for nothing, since ``vertical()`` accepts none of its
+    keywords and would drop them without a word.
     """
     if DIPS is None:
-        if CURVE["bias_w"] == 1.0:
+        if all(CURVE.get(k) == v for k, v in _CURVE_NOOP.items()) \
+                and not set(CURVE) - set(_CURVE_NOOP):
             return FaultMesh.vertical(trace, frame, **MESH)
         return FaultMesh.curved(trace, frame, uniform_dip=90.0, **MESH, **CURVE)
 
