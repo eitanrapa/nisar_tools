@@ -40,7 +40,7 @@ import numpy as np
 from nisar_tools.slip import SlipInversion
 from nisar_tools.slip.plot import plot_l_curve
 from slip_config import (
-    BOUNDS, INVERSION, LCURVE_WEIGHTS, OUT_DIR, banner, geometry,
+    BOUNDS, LCURVE_WEIGHTS, OUT_DIR, banner, geometry, inversion_kwargs,
     load_observations, mesh_summary, sampling_kind, save_figure, workspace,
 )
 
@@ -75,7 +75,7 @@ def main():
 
     # One Green's matrix for the whole sweep -- that is the point of doing this
     # here rather than re-solving from scratch per weight.
-    inversion = SlipInversion(mesh, obs, **INVERSION)
+    inversion = SlipInversion(mesh, obs, **inversion_kwargs())
     print(f"{inversion!r}\nsweeping {LCURVE_WEIGHTS}", flush=True)
 
     curve, models = inversion.l_curve(LCURVE_WEIGHTS, **BOUNDS)

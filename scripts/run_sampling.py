@@ -23,11 +23,12 @@ Writes, as each is produced, so an interrupted run keeps what it finished:
 
 import pandas as pd
 
-from nisar_tools.slip import ARCSEC_10, iterate_sampling, resample_all, scene_report
-from nisar_tools.slip.plot import plot_coverage, plot_mesh, plot_samples
+from nisar_tools.slip import ARCSEC_10, iterate_sampling, resample_all
+from nisar_tools.slip.plot import plot_mesh, plot_samples
 from slip_config import (
-    BOUNDS, INVERSION, LOOP, LOS_STAGE, OBS_STAGE, OUT_DIR, SCENES, SMOOTHING,
-    banner, geometry, load_scene, mesh_summary, save_figure, workspace,
+    BOUNDS, LOOP, LOS_STAGE, OBS_STAGE, OUT_DIR, SCENES, SMOOTHING,
+    banner, geometry, inversion_kwargs, load_scene, mesh_summary,
+    sampling_parameters, save_figure, workspace,
 )
 
 
@@ -51,26 +52,17 @@ def main():
         print(f"{name}: -> {dict(stack.ds.sizes)} @ {ARCSEC_10:.1f} m in the frame",
               flush=True)
 
-    # Measured per scene, not inherited: `rms_min` is a noise level, and set below
-    # it the quadtree cannot stop splitting and just runs down to `width_min`.
-    sampling = {}
-    for name, stack in gridded.items():
-        report = scene_report(stack, trace, frame, mesh=mesh)
-        sampling[name] = dict(
-            rms_min=report.attrs["rms_min"], width_min=report.attrs["width_min"],
-            width_max=30_000.0, exclude_within=report.attrs["exclude_within"],
-        )
-        print(f"{name}: noise {1e3 * report.attrs['noise_floor']:.1f} mm, "
-              f"two-sided {100 * report.attrs['two_sided_fraction']:.0f}%, "
-              f"geometry_ok={report.attrs['geometry_consistent']}", flush=True)
-        print(f"      -> {sampling[name]}", flush=True)
-        save_figure(plot_coverage(report, name=name)[0], f"coverage_{name}")
+    # Measured on the *resampled* stacks, and per scene rather than inherited:
+    # `rms_min` is a noise level, and set below it the quadtree cannot stop
+    # splitting and just runs down to `width_min`. `slip_config.SAMPLING` pins
+    # values on top of the measurement, and the log says which.
+    sampling = sampling_parameters(gridded, trace, frame, mesh)
 
     print("\nround 0 is data-driven and coarse; every later round is model-driven",
           flush=True)
     obs, model, history = iterate_sampling(
         gridded, mesh, trace, frame, sampling,
-        inversion_kwargs=INVERSION,
+        inversion_kwargs=inversion_kwargs(),
         solve_kwargs={"smoothing": SMOOTHING, **BOUNDS},
         **LOOP,
     )

@@ -32,8 +32,14 @@ value without touching the file:
     NISAR_BIAS_W        depth-level grading (see CURVE)
     NISAR_DOWN_DIP_LEVELS  node levels down dip -- what makes NISAR_BIAS_W mean
                         a definite ratio (see CURVE)
+    NISAR_ENGINE        "layered" (default) or "halfspace" (see ENGINE_KIND)
     NISAR_SMOOTHING     the weight stage 3 solves at
     NISAR_MAX_ROUNDS    sampling rounds; 0 stops at the coarse data-driven set
+
+⚠️ Keep the geometry variables identical across all three stages. Every stage
+rebuilds the mesh from this file, and ``load_observations`` checks only the
+*frame*, not the mesh -- so changing a dip between stages would sweep a different
+mesh than was sampled for, with no error. Export them once per session.
 """
 
 import os
@@ -47,8 +53,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from nisar_tools import LOSStack, Workspace                                    # noqa: E402
 from nisar_tools.slip import (                                                 # noqa: E402
-    FaultMesh, FaultSegment, FaultTrace, VelocityModel,
+    EdgrnTables, FaultMesh, FaultSegment, FaultTrace, LayeredPointSource,
+    VelocityModel, run_edgrn, scene_report,
 )
+from nisar_tools.slip.plot import plot_coverage                                # noqa: E402
 
 
 # -- parsing the environment overrides ---------------------------------------
@@ -77,32 +85,89 @@ def _int_or_none(value):
 
 
 # -- where -------------------------------------------------------------------
-WORK_DIR = Path(os.environ.get("NISAR_WORK_DIR", "workdir")).expanduser()
+WORK_DIR = Path(os.environ.get(
+    "NISAR_WORK_DIR", "/raid/class239/erapaport/workdir")).expanduser()
 OUT_DIR = WORK_DIR / "model_sampling"
 FIG_DIR = OUT_DIR / "figures"
-FAULT = Path(os.environ.get("NISAR_FAULT",
-                            "~/Downloads/Venezuela_fault_trace.kml")).expanduser()
+FAULT = Path(os.environ.get(
+    "NISAR_FAULT",
+    "/raid/class239/erapaport/share/Venezuela/Venezuela_fault_trace_2.kml",
+)).expanduser()
+
+#: Where the EDGRN tables are generated and then cached -- see :func:`engine`.
+EDGRN_DIR = WORK_DIR / "edgrn_venezuela"
 
 #: Stage names inside the workspace, so the three scripts agree on them.
 OBS_STAGE = "slip_observations"
 LOS_STAGE = "los_{name}_frame"
 
 # -- what --------------------------------------------------------------------
-#: One entry per scene: a ``.grd`` directory, or a persisted ``los`` stage name.
+#: Applied to every scene on load, as ``(lon_min, lon_max, lat_min, lat_max)``.
+#: ``None`` keeps the full footprint; a per-scene ``"crop"`` key overrides it.
+CROP = (-70.0, -66.0, 9.0, 11.5)
+
+#: One entry per scene: ``"stage"`` for a persisted ``los`` stage in the
+#: workspace, or ``"grd"`` for a directory of GMT grids.
+#:
+#: The **key is the track name**, and it is load-bearing -- ``ramp`` keys its
+#: nuisance columns on it, so one entry per scene is what lets each carry its own
+#: arbitrary offset. Do not merge scenes into one raster to save entries:
+#: measured, that cost a factor of 3.5 in peak slip while variance reduction
+#: stayed at 98%, so it does not warn you.
+#:
+#: This mapping is the *only* place the scenes are listed. ``run_sampling.py``
+#: does the ``Observations.from_los`` per scene and the ``Observations.concat``
+#: for you (inside ``iterate_sampling``, with ``normalize="sqrt_count"``), so
+#: there is no parallel list of ``from_los`` calls to keep in step with this one.
+#:
+#: ``units``/``sign``/``look_direction`` matter only for ``grd`` entries: a
+#: ``.grd`` cannot record them, and ``units`` and ``sign`` are silent when wrong.
+_ALOS = "/raid/class239/yuri/A2/Venezuela/clean"
 SCENES = {
-    "D134": {
-        "grd": "~/Downloads/D134",
-        "units": "cm", "sign": +1,
-        "direction": "descending", "look_direction": "right",
-    },
-    # "D126": {"stage": "los_D126"},
+    "A162": {"stage": "los_A162_full_mask"},
+    "A061": {"stage": "los_A061_full_mask"},
+    "D126": {"stage": "los_D126_full_mask"},
+    "D054": {"stage": "los_D054_full_mask"},
+    "D134": {"grd": f"{_ALOS}/D134", "units": "cm", "sign": +1,
+             "direction": "descending", "look_direction": "right"},
+    "D135": {"grd": f"{_ALOS}/D135", "units": "cm", "sign": +1,
+             "direction": "descending", "look_direction": "right"},
 }
+
+#: Extra keyword arguments for :func:`scene_report`.
+#:
+#: ``min_distance`` is how far from the trace the noise floor is measured: near
+#: blocks carry real deformation gradient and bias it upward. It defaults to
+#: ``4 * max_depth``, which at a 40 km fault is **160 km** -- further than this
+#: crop reaches (~138 km from the trace), so leaving it unset raises "No blocks
+#: survive". This value is required here, not a preference.
+SCENE_REPORT = dict(min_distance=50e3)
+
+#: Per-scene sampling parameters, keyed by ``SCENES`` name, overriding what
+#: :func:`scene_report` measures. ``{}`` (the default) measures all of them,
+#: which is the right choice: they are statements about the data.
+#:
+#: ⚠️ Numbers pinned here must have been measured on the **resampled** stacks.
+#: Stage 1 puts every scene on a common 10-arcsec lattice first, and the reachable
+#: quadtree cell sizes are a dyadic ladder set by the pixel size -- so a
+#: ``width_min`` read off a native-resolution report lands on a different rung
+#: here, and block-averaging onto the common grid lowers the noise floor that
+#: ``rms_min`` is measuring. ``exclude_within`` is the one worth pinning
+#: deliberately: its floor is ``width_min / 2``, and anything above that is a
+#: judgement about unwrapping and near-fault model error that no measurement can
+#: make for you. Overriding is silent, so the log prints which keys were pinned.
+#:
+#:     SAMPLING = {"D126": dict(exclude_within=4000.0)}
+SAMPLING = {}
+
+#: The coarsest quadtree cell, shared by every scene. Rarely the binding limit.
+WIDTH_MAX = 30_000.0
 
 #: ``NISAR_EDGE_LENGTH`` overrides the element size without editing this file --
 #: worth having on a detached runner, where a coarse pass is how you find out
 #: whether the whole chain works before committing an hour to the fine one.
-MESH = dict(max_depth=float(os.environ.get("NISAR_MAX_DEPTH", 20e3)),
-            edge_length=float(os.environ.get("NISAR_EDGE_LENGTH", 3e3)))
+MESH = dict(max_depth=float(os.environ.get("NISAR_MAX_DEPTH", 40e3)),
+            edge_length=float(os.environ.get("NISAR_EDGE_LENGTH", 5e3)))
 
 #: Fault dip. ``None`` extrudes the trace straight down; one number dips the
 #: whole fault; a list gives one dip per straight *deep segment*, in order along
@@ -127,93 +192,43 @@ SEGMENT_FILES = _paths(os.environ.get("NISAR_SEGMENTS", None))
 #: ``bias_w`` thickens the depth levels geometrically downward, putting the fine
 #: elements where surface data can actually resolve slip -- a patch at 2 km is
 #: resolved far more sharply than one at 18 km, so even levels spend parameters
-#: where they cannot be recovered. Measured on the real trace, 8 levels over
-#: 20 km: 1.15 runs 1.8 km levels at the surface to 4.2 km at the base, 1.3 runs
-#: 1.1 km to 5.5 km. It is orthogonal to the geometry, so it applies to a
-#: vertical fault too -- ``FaultMesh.vertical`` does not take it, so ``DIPS=None``
-#: with ``bias_w != 1`` routes through ``curved(uniform_dip=90)``, which is
-#: bit-identical to ``vertical()``. Note ``neighbor_smoothing`` weights every
-#: edge equally, so graded levels make the smoother anisotropic with depth;
-#: ``ds_ratio`` is the knob if that matters.
+#: where they cannot be recovered. It is orthogonal to the geometry, so it applies
+#: to a vertical fault too: ``FaultMesh.vertical`` does not take it, so a config
+#: asking for it routes through ``curved(uniform_dip=90)``, which is bit-identical.
 #:
-#: ``down_dip_levels`` is the number of node levels from the surface to
-#: ``max_depth``, and it is what makes ``bias_w`` mean a definite amount of
-#: grading: there are ``down_dip_levels - 1`` intervals with thicknesses
+#: ``down_dip_levels`` is what makes ``bias_w`` mean a definite amount of grading:
+#: there are ``down_dip_levels - 1`` intervals with thicknesses
 #: ``bias_w ** (0 .. down_dip_levels - 2)``, so
 #:
 #:     deepest / shallowest = bias_w ** (down_dip_levels - 2)
 #:
-#: ``None`` derives it from ``edge_length`` exactly as ``FaultMesh.vertical``
-#: does (``round(max_depth / edge_length) + 1``), which at the 20 km / 3 km
-#: default is **8** -- so ``bias_w = 5 ** (1/15)`` grades by 1.90x there, and by
-#: the 5x it was chosen for only at ``down_dip_levels = 17``. Set the two
-#: together or the ratio is not the one you asked for.
+#: ``5 ** (1/15)`` at 17 levels is therefore exactly 5x -- 0.99 km levels at the
+#: surface to 4.96 km at 40 km depth. Left as ``None`` the count comes from
+#: ``edge_length`` instead and the ratio is not the one the exponent was chosen
+#: for, so the two must be set together.
 #:
-#: ``smoothness`` is the surface fit's regularizer weight (the reference's
-#: 0.008). Only two depths are constrained -- the trace and the segments' bottom
-#: lines -- so the regularizer *is* the dip profile between them, not a cosmetic
-#: knob. ``None`` takes the reference default. Ignored on the ``uniform_dip``
-#: paths, which are closed-form and have nothing for a gridder to decide.
-CURVE = dict(bias_w=float(os.environ.get("NISAR_BIAS_W", 1.0)),
-             down_dip_levels=_int_or_none(os.environ.get("NISAR_DOWN_DIP_LEVELS")),
-             smoothness=None)
+#: ⚠️ At 5 km along strike those top levels are 5:1 elements. ``basis="node"``
+#: below is what makes that tolerable: its Laplace-Beltrami smoother is
+#: cotangent-weighted by the actual triangle geometry, where element-basis
+#: ``neighbor_smoothing`` weights every edge equally. Revisit the grading before
+#: switching basis.
+#:
+#: ``smoothness`` is the surface fit's regularizer weight (the reference's 0.008).
+#: Only two depths are constrained -- the trace and the segments' bottom lines --
+#: so the regularizer *is* the dip profile between them, not a cosmetic knob.
+#: ``None`` takes the reference default. Ignored on the ``uniform_dip`` paths,
+#: which are closed-form and have nothing for a gridder to decide.
+CURVE = dict(
+    bias_w=float(os.environ.get("NISAR_BIAS_W", 5 ** (1 / 15))),
+    down_dip_levels=_int_or_none(os.environ.get("NISAR_DOWN_DIP_LEVELS", 17)),
+    smoothness=None,
+)
 
 #: The ``CURVE`` values ``FaultMesh.vertical`` already implements, so a config
 #: using only these can stay on the frozen constructor. Anything else has to go
 #: through ``curved(uniform_dip=90)`` -- which is bit-identical -- or it would be
 #: silently dropped, since ``vertical()`` takes none of these keywords.
 _CURVE_NOOP = {"bias_w": 1.0, "down_dip_levels": None, "smoothness": None}
-
-#: ``ramp`` gives each *named* track its own nuisance terms. Without it an
-#: interferogram's arbitrary constant lands in the slip as broad, deep, fictitious
-#: patches -- and with two scenes merged into one raster it cost a factor of 3.5
-#: in peak slip while variance reduction stayed at 98%.
-#:
-#: ``velocity_model`` belongs here rather than only at the ``moment()`` call:
-#: :attr:`SlipModel.moment_magnitude` reads it off the *inversion*, so without it
-#: the reported Mw silently falls back to a flat 30 GPa while an explicitly
-#: computed M0 uses the real rigidity -- two numbers in one summary that do not
-#: describe the same Earth.
-INVERSION = dict(ramp="offset")
-
-#: Bounds and polarity. Right-lateral faults (San Sebastian) need strike-slip
-#: pinned non-positive, because positive strike-slip is LEFT-lateral here.
-BOUNDS = dict(polarity=(-1, 0, 0), strike=(-6.0, 6.0), dip=(-2.0, 2.0))
-
-#: The weight `run_inversion.py` solves at. Read it off `run_lcurve.py`'s corner.
-#: ``NISAR_SMOOTHING`` overrides it, so stage 3 can be re-run at a new weight
-#: without editing this file -- which is the common case after looking at the curve.
-#:
-#: Measured on the real D134 scene, 100 elements, `ramp="offset"`:
-#:
-#:     lambda   1000    100      10       3       1     0.3     0.1    0.03
-#:     VR %     21.96  22.15   36.70   80.10   95.40   97.68   98.37   98.48
-#:     max |s|  0.000  0.004   0.308   1.678   2.862   3.926   5.569   6.000
-#:
-#: so the corner is around **0.3-1.0**. Above ~30 the smoothing wins outright and
-#: the model comes back flat zero at a plausible-looking 22% VR; below ~0.03 the
-#: strike bound saturates and the *bound*, not the data, is setting the answer.
-#: `solve()` normalises the operator by its own row count, so this stays roughly
-#: mesh-refinement invariant.
-SMOOTHING = float(os.environ.get("NISAR_SMOOTHING", 0.3))
-
-#: Weights `run_lcurve.py` sweeps -- wide enough to show both failure modes, so
-#: the corner is visibly a corner and not just the end of the range. Swept
-#: large -> small internally; cost is dominated by the roughest end.
-LCURVE_WEIGHTS = [30.0, 10.0, 3.0, 1.0, 0.5, 0.3, 0.1, 0.03]
-
-#: `iterate_sampling`: round 0 data-driven and coarse, the rest model-driven.
-#:
-#: ``NISAR_MAX_ROUNDS=0`` stops after round 0, so stage 1 writes the **coarse,
-#: data-driven** sampling. That is the way to L-curve *before* letting a model
-#: steer the sampling -- but read what it gives you with care: round 0 is
-#: deliberately under-sampled, and on the test mesh it produced 154 samples
-#: against 240 slip parameters. A corner picked on an under-determined problem
-#: sits at more smoothing than one picked on the final, well-determined one,
-#: because there the regularization is supplying missing rank rather than
-#: trading misfit against roughness.
-LOOP = dict(max_rounds=int(os.environ.get("NISAR_MAX_ROUNDS", 4)),
-            spacing=2000.0, tol=0.01)
 
 #: Depth-dependent rigidity, from Crust2.0 for Venezuela. Passing it matters:
 #: `moment_magnitude` falls back to a flat 30 GPa, and this crust runs 34-46 GPa
@@ -226,7 +241,93 @@ VELOCITY_MODEL = VelocityModel(
     name="Venezuela_crust2.0",
 )
 
-INVERSION["velocity_model"] = VELOCITY_MODEL
+#: ``"layered"`` looks each element's point sources up in EDGRN tables built from
+#: ``VELOCITY_MODEL``; ``"halfspace"`` uses the homogeneous engine.
+#:
+#: ``NISAR_ENGINE=halfspace`` checks that the whole chain runs without waiting on
+#: the Fortran or paying the layered assembly cost. A half-space gives the whole
+#: crust one rigidity, which biases shallow slip low and deep slip high, so it is
+#: a smoke test rather than an answer -- **except in stage 1**, where the model
+#: only chooses quadtree cells and the observations it writes carry no trace of
+#: which engine picked them. Sampling with the half-space and inverting layered is
+#: the same reasoning as Wang & Fialko's "preliminary model", and it is much faster.
+ENGINE_KIND = os.environ.get("NISAR_ENGINE", "layered").lower()
+
+#: Quadrature accuracy for the layered engine. The order is chosen per element
+#: *and* per observation, which measured 52x fewer source-receiver evaluations at
+#: this tolerance than the reference's fixed 91 points; ``None`` restores the
+#: fixed rule.
+EDGRN_TOLERANCE = 3e-3
+
+#: ``ramp`` gives each *named* track its own nuisance terms. Without it an
+#: interferogram's arbitrary constant lands in the slip as broad, deep, fictitious
+#: patches -- and with two scenes merged into one raster it cost a factor of 3.5
+#: in peak slip while variance reduction stayed at 98%.
+#:
+#: ``"offset"`` solves a constant per track; ``"linear"`` adds x/y gradients,
+#: which is what absorbs an orbital or ionospheric ramp. With six tracks that is
+#: 18 nuisance columns against 6 -- worth running both and comparing, since for a
+#: long east-west strike-slip fault the far-field arctangent step and a gradient
+#: perpendicular to strike genuinely compete, so ``"linear"`` can eat real signal.
+#:
+#: ``basis="node"`` solves for slip at the mesh nodes with a continuous
+#: piecewise-linear field between them: fewer parameters than triangles, and the
+#: smoothing operator switches to Laplace-Beltrami automatically.
+#:
+#: ``velocity_model`` belongs here rather than only at the ``moment()`` call:
+#: :attr:`SlipModel.moment_magnitude` reads it off the *inversion*, so without it
+#: the reported Mw silently falls back to a flat 30 GPa while an explicitly
+#: computed M0 uses the real rigidity -- two numbers in one summary that do not
+#: describe the same Earth.
+#:
+#: The engine is **not** listed here: :func:`inversion_kwargs` attaches it, so the
+#: tables are built (or read from cache) once per process rather than at import.
+INVERSION = dict(ramp="offset", basis="node", velocity_model=VELOCITY_MODEL)
+
+#: Everything :meth:`SlipInversion.solve` takes except the weight, shared by the
+#: L-curve sweep and the final solve so the two cannot disagree.
+#:
+#: Right-lateral faults (San Sebastian) need strike-slip pinned non-positive,
+#: because positive strike-slip is LEFT-lateral here.
+#:
+#: ``max_iter`` is well below the 400 default. That is a deliberate trade on a
+#: wide sweep -- its cost is dominated by the few weights that run to the cap, and
+#: their statistics are meaningless anyway -- but it means "did not converge" is
+#: expected at the rough end rather than exceptional. Stage 2 lists which weights
+#: hit it; if the corner itself is capped, raise this before reading the curve.
+BOUNDS = dict(polarity=(-1, 0, 0), strike=(-6.0, 6.0), dip=(-2.0, 2.0),
+              max_iter=60)
+
+#: The weight `run_inversion.py` solves at. Read it off `run_lcurve.py`'s corner.
+#: ``NISAR_SMOOTHING`` overrides it, so stage 3 can be re-run at a new weight
+#: without editing this file -- which is the common case after looking at the curve.
+#:
+#: ⚠️ Both failure modes are invisible in variance reduction: too much smoothing
+#: and the model goes flat while VR still reads a plausible 22%; too little and
+#: the strike bound saturates, so the *bound*, not the data, sets the answer.
+#: Stage 2 flags both. `solve()` normalises the operator by its own row count, so
+#: a weight stays roughly invariant under mesh refinement -- but **not** across a
+#: change of basis or engine, so re-read the curve after either. The value below
+#: is a placeholder in the middle of the sweep, not a measurement.
+SMOOTHING = float(os.environ.get("NISAR_SMOOTHING", 200.0))
+
+#: Weights `run_lcurve.py` sweeps -- wide enough to show both failure modes, so
+#: the corner is visibly a corner and not just the end of the range. Swept
+#: large -> small internally; cost is dominated by the roughest end.
+LCURVE_WEIGHTS = [10000.0, 5000.0, 2000.0, 1000.0, 500.0, 200.0,
+                  100.0, 50.0, 20.0, 10.0, 5.0, 2.0]
+
+#: `iterate_sampling`: round 0 data-driven and coarse, the rest model-driven.
+#:
+#: ``NISAR_MAX_ROUNDS=0`` stops after round 0, so stage 1 writes the **coarse,
+#: data-driven** sampling. That is the way to L-curve *before* letting a model
+#: steer the sampling -- but read what it gives you with care: round 0 is
+#: deliberately under-sampled, and where there are fewer observations than
+#: parameters the smoothing is supplying missing rank rather than trading misfit
+#: against roughness, so its corner sits at more smoothing than the final,
+#: well-determined problem wants.
+LOOP = dict(max_rounds=int(os.environ.get("NISAR_MAX_ROUNDS", 4)),
+            spacing=2000.0, tol=0.01)
 
 
 # -- shared helpers ----------------------------------------------------------
@@ -287,7 +388,8 @@ def mesh_summary(mesh):
     were the vertical one.
     """
     out = {"kind": mesh.attrs.get("kind", "vertical"),
-           "n_elements": int(mesh.n_elements)}
+           "n_elements": int(mesh.n_elements),
+           "n_down": int(mesh.attrs.get("n_down", 0))}
     out.update({k: float(v) for k, v in MESH.items()})
     for key in ("dip_deg", "bias_w", "smoothness", "min_curvature_radius"):
         if key in mesh.attrs:
@@ -299,17 +401,102 @@ def mesh_summary(mesh):
     return out
 
 
+#: Built once per process by :func:`inversion_kwargs`; EDGRN tables are megabytes
+#: and every stage needs the same ones.
+_INVERSION_CACHE = None
+
+
+def engine():
+    """The forward engine named by ``ENGINE_KIND``.
+
+    The EDGRN tables are cached on disk, so the Fortran runs once and the later
+    stages read ``EDGRN_DIR/edgrn.inp`` back instead of regenerating identical
+    tables. ``None`` is the half-space default, which :class:`SlipInversion`
+    interprets as :class:`HalfSpaceTDE`.
+    """
+    if ENGINE_KIND in ("halfspace", "half_space", "tde"):
+        print("    engine: HOMOGENEOUS HALF-SPACE (NISAR_ENGINE=halfspace) -- "
+              "fine for stage 1, a smoke test for stages 2 and 3", flush=True)
+        return None
+    if ENGINE_KIND != "layered":
+        raise ValueError(
+            f"NISAR_ENGINE={ENGINE_KIND!r}; use 'layered' or 'halfspace'")
+
+    inp = EDGRN_DIR / "edgrn.inp"
+    if inp.exists():
+        try:
+            tables = EdgrnTables.from_input_file(inp)
+            print(f"    engine: layered, cached tables from {inp}", flush=True)
+            return LayeredPointSource(tables, tolerance=EDGRN_TOLERANCE)
+        except Exception as exc:                                   # noqa: BLE001
+            print(f"    cached tables at {inp} unusable ({exc}); regenerating",
+                  flush=True)
+    print(f"    engine: layered, running EDGRN into {EDGRN_DIR}", flush=True)
+    tables = run_edgrn(VELOCITY_MODEL, EDGRN_DIR)
+    return LayeredPointSource(tables, tolerance=EDGRN_TOLERANCE)
+
+
+def inversion_kwargs():
+    """``INVERSION`` with the engine attached.
+
+    Every stage builds its ``SlipInversion`` through this rather than splatting
+    ``INVERSION`` directly: the engine is the one setting that costs something to
+    construct, and leaving it out of the dict is what would silently invert a
+    layered configuration with half-space physics.
+    """
+    global _INVERSION_CACHE
+    if _INVERSION_CACHE is None:
+        _INVERSION_CACHE = dict(INVERSION, engine=engine())
+    return _INVERSION_CACHE
+
+
 def load_scene(spec, ws):
     """One scene, from a ``.grd`` quadruple or a persisted ``los`` stage."""
     if "stage" in spec:
-        return LOSStack.from_zarr(ws.path(spec["stage"]))
-    directory = Path(spec["grd"]).expanduser()
-    return LOSStack.from_grd(
-        directory / "los_cm.grd", directory / "look_e.grd",
-        directory / "look_n.grd", directory / "look_u.grd",
-        units=spec.get("units", "m"), sign=spec.get("sign", 1),
-        direction=spec.get("direction"), look_direction=spec.get("look_direction"),
-    )
+        stack = LOSStack.from_zarr(ws.path(spec["stage"]))
+    else:
+        directory = Path(spec["grd"]).expanduser()
+        stack = LOSStack.from_grd(
+            directory / "los_cm.grd", directory / "look_e.grd",
+            directory / "look_n.grd", directory / "look_u.grd",
+            units=spec.get("units", "m"), sign=spec.get("sign", 1),
+            direction=spec.get("direction"),
+            look_direction=spec.get("look_direction"),
+        )
+    box = spec.get("crop", CROP)
+    return stack.crop(*box) if box else stack
+
+
+def sampling_parameters(gridded, trace, frame, mesh):
+    """``{name: from_los kwargs}`` per scene: measured, then overridden.
+
+    Measured rather than inherited: ``rms_min`` is a noise level, and set below it
+    the quadtree cannot stop splitting and just runs down to ``width_min``.
+    ``SAMPLING`` pins values on top, and this prints which -- an override is
+    otherwise indistinguishable from a measurement in the log.
+
+    Takes the *resampled* stacks, since that is the grid the quadtree will run on
+    and the reachable cell sizes are a dyadic ladder set by the pixel size.
+    """
+    sampling = {}
+    for name, stack in gridded.items():
+        report = scene_report(stack, trace, frame, mesh=mesh, **SCENE_REPORT)
+        measured = dict(
+            rms_min=report.attrs["rms_min"], width_min=report.attrs["width_min"],
+            width_max=WIDTH_MAX, exclude_within=report.attrs["exclude_within"],
+        )
+        pinned = dict(SAMPLING.get(name, {}))
+        sampling[name] = {**measured, **pinned}
+
+        print(f"{name}: noise {1e3 * report.attrs['noise_floor']:.1f} mm, "
+              f"two-sided {100 * report.attrs['two_sided_fraction']:.0f}%, "
+              f"geometry_ok={report.attrs['geometry_consistent']}", flush=True)
+        print(f"      measured {measured}", flush=True)
+        if pinned:
+            print(f"      PINNED   {pinned}  (from SAMPLING -- the measured line "
+                  "above is what this resampled scene actually says)", flush=True)
+        save_figure(plot_coverage(report, name=name)[0], f"coverage_{name}")
+    return sampling
 
 
 def load_observations(ws, frame):

@@ -681,6 +681,7 @@ can be re-launched at a new value without touching the file:
 | `NISAR_DIP` | `75` for one dip everywhere, `70,80,85` for one per deep segment; unset means vertical |
 | `NISAR_SEGMENTS` | segment files, one per dip; unset chops the trace into equal chords |
 | `NISAR_BIAS_W`, `NISAR_DOWN_DIP_LEVELS` | depth-level grading, and the level count that makes it mean a definite ratio (see "A fault that dips") |
+| `NISAR_ENGINE` | `layered` (default, EDGRN tables from the velocity model) or `halfspace` |
 | `NISAR_SMOOTHING` | the weight stage 3 solves at |
 | `NISAR_MAX_ROUNDS` | sampling rounds; `0` stops at the coarse data-driven set |
 
@@ -688,6 +689,17 @@ A coarse pass (`NISAR_EDGE_LENGTH=6000`) is how you find out whether the whole
 chain works before committing an hour to the fine one. The geometry that actually
 ran is printed at the top of every log and recorded in `summary.json`, so a dipping
 run is never mistaken for a vertical one later.
+
+Two more settings live only in the file, because they are per-scene:
+`SCENE_REPORT` (extra arguments for `scene_report` — `min_distance` in particular,
+whose `4 × max_depth` default can exceed the scene on a deep fault) and `SAMPLING`
+(pinned per-scene sampling parameters, empty by default so they are measured).
+
+**`NISAR_ENGINE=halfspace` is a smoke test for stages 2 and 3 but a legitimate
+choice for stage 1.** Stage 1's model only picks quadtree cells, and the
+observations it writes carry no trace of which engine picked them — so sampling
+with the half-space and inverting layered is Wang & Fialko's "preliminary model"
+argument, and it skips a layered assembly per round.
 
 ### Launching
 
