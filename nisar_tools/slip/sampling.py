@@ -272,6 +272,29 @@ class Observations:
         out.attrs["frame"] = frame
         out.attrs["tracks"] = [t for item in items for t in item.ds.attrs.get("tracks", [])]
         out.attrs["normalize"] = normalize
+
+        # ``drop_conflicts`` compares the per-track ``quadtree`` dicts *whole*, and
+        # ``rms_min``/``width_min``/``exclude_within`` are measured per scene -- so
+        # with more than one track they always conflict and the key vanishes,
+        # taking ``field`` with it. ``field`` describes the *method* (data- or
+        # model-driven), which every track in a round shares, so merge one level
+        # deeper and keep what they agree on. Losing it is silent and downstream:
+        # a model-driven multi-track set is otherwise indistinguishable from a
+        # coarse data-driven one once it has been persisted.
+        quadtrees = [item.ds.attrs.get("quadtree") for item in items]
+        if quadtrees and all(isinstance(q, dict) for q in quadtrees):
+            shared = {k: v for k, v in quadtrees[0].items()
+                      if all(k in q and q[k] == v for q in quadtrees[1:])}
+            if shared:
+                out.attrs["quadtree"] = shared
+            # The per-scene numbers are the ones that legitimately differ, and
+            # they are the record of how each track was sampled. Keep them beside
+            # the shared part rather than dropping them on the floor.
+            out.attrs["quadtree_per_track"] = {
+                str(name): dict(q)
+                for item, q in zip(items, quadtrees)
+                for name in item.ds.attrs.get("tracks", [])
+            }
         if weights:
             out.attrs["track_weights"] = dict(weights)
         return cls(out)

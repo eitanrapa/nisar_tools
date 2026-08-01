@@ -166,6 +166,32 @@ def test_concat_applies_named_track_weights(trace, frame):
     np.testing.assert_allclose(merged.ds["weight"].values, 3.0)
 
 
+def test_concat_keeps_the_sampling_method_across_tracks(trace, frame):
+    """`field` must survive concat even when the per-scene numbers differ.
+
+    ``combine_attrs="drop_conflicts"`` compares the ``quadtree`` dicts whole, and
+    ``rms_min``/``width_min``/``exclude_within`` are measured *per scene* -- so any
+    real multi-track set conflicts and used to lose the key entirely, ``field``
+    with it. A model-driven set then read back as a coarse data-driven one, which
+    is silent: the L-curve it produces is right, but labelled and filed as the
+    wrong kind. Single-track sets never exercised this.
+    """
+    a = _sample(trace, frame, name="A", rms_min=0.008, width_min=2500.0)
+    b = _sample(trace, frame, name="B", rms_min=0.011, width_min=3500.0)
+    for obs in (a, b):                      # what a model-driven round stamps
+        obs.ds.attrs["quadtree"] = {**obs.ds.attrs["quadtree"], "field": "model"}
+
+    combined = Observations.concat([a, b])
+
+    assert combined.ds.attrs["quadtree"]["field"] == "model"
+    # ...and only what they agree on: the per-scene numbers are not shared.
+    assert "rms_min" not in combined.ds.attrs["quadtree"]
+    # They are kept beside it rather than dropped, so the record survives.
+    per_track = combined.ds.attrs["quadtree_per_track"]
+    assert per_track["A"]["rms_min"] == pytest.approx(0.008)
+    assert per_track["B"]["width_min"] == pytest.approx(3500.0)
+
+
 def test_concat_refuses_mixed_frames(trace, frame):
     from nisar_tools.slip import LocalFrame
 
