@@ -145,6 +145,17 @@ def plot_fit(model, track=None, cmap="RdBu_r", trace=None):
     obs = model.obs
     track = track or obs.tracks[0]
     sel = obs.track_mask(track)
+    if not sel.any():
+        # Otherwise this surfaces as "zero-size array to reduction operation
+        # maximum" from the colour-scale line below, which names nothing. The
+        # usual cause is a track name read off a *different* Observations than
+        # the one the model carries -- a stale notebook variable, or a config
+        # whose SCENES keys were renamed since the model was saved.
+        raise ValueError(
+            f"No observations for track {track!r}. This model has {obs.tracks}. "
+            "Track names come from the Observations the model was built on; "
+            "use model.obs.tracks, or omit track= for the first one."
+        )
     x = obs.ds["x"].values[sel] / 1e3
     y = obs.ds["y"].values[sel] / 1e3
     panels = [

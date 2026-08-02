@@ -69,6 +69,19 @@ def test_plot_fit_shares_one_scale_between_data_and_model(solved):
     matplotlib.pyplot.close(fig)
 
 
+def test_plot_fit_names_the_tracks_when_given_one_that_is_not_there(solved):
+    """A wrong track name used to surface as a numpy reduction error.
+
+    The empty selection reached the colour-scale line as `np.abs([]).max()`,
+    raising "zero-size array to reduction operation maximum which has no
+    identity" -- which names neither the track nor the model. The usual cause is
+    a name read off a *different* Observations than the model carries.
+    """
+    *_, model = solved
+    with pytest.raises(ValueError, match="No observations for track 'nope'"):
+        slip_plot.plot_fit(model, track="nope")
+
+
 def test_plot_samples(solved):
     trace, _, obs, _, _ = solved
     fig, ax = slip_plot.plot_samples(obs, trace=trace)
