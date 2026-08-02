@@ -659,6 +659,7 @@ configured from one file:
 | `run_sampling.py` | put every scene on one lattice, then iterate sample → solve → re-sample until the model settles | minutes; the expensive one |
 | `run_lcurve.py` | sweep the smoothing weight over those observations | one Green's matrix, many solves |
 | `run_inversion.py` | solve once at the chosen weight; write the model, its text table, `summary.json` and the review figures | seconds |
+| `archive_run.py` | move the last solve's outputs into a tagged subdirectory, so the next one doesn't overwrite it | instant |
 
 Split three ways because only stage 1 is expensive to redo. They share
 `scripts/slip_config.py`, so a mesh or a sampling parameter cannot drift between
@@ -770,6 +771,22 @@ refined sampling wants. Treat it as a starting point for stage 1, not as the ans
 Stage 2 also flags what misfit and roughness cannot show: weights whose model came
 back flat, weights where the slip bound saturated, and weights that hit the
 iteration cap.
+
+### Comparing several solves
+
+Stage 3 writes to fixed names, so re-solving at a new weight or a different
+`ramp` replaces the previous result. Run `archive_run.py` in between and each
+solve keeps its own directory:
+
+```bash
+python scripts/archive_run.py                  # -> run_lam1000_offset_1696el/
+NISAR_SMOOTHING=500 python -u scripts/run_inversion.py
+```
+
+The tag is read off `summary.json` rather than passed in, so it describes the run
+that happened rather than what you meant to type. Only stage 3's outputs move —
+the sampling and the sweep (`history.csv`, `l_curve*`, the mesh and coverage
+figures) describe work that is still current, and stay put.
 
 ## Workspaces
 
