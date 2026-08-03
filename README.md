@@ -574,6 +574,50 @@ third dips 70, the rest 85". For one dip everywhere, `uniform_dip=75.0`.
   whose arbitrary diagonals are the winding hazard the lattice triangulation exists
   to avoid. The reference's own demo sets `biasL = 1`.
 
+#### From a bottom trace instead of dips
+
+If the fault's bottom edge has been mapped, give it directly and skip the angles.
+`bottom_trace` takes a `FaultTrace` or a path — the same `.kml`/text reader the
+surface trace uses:
+
+```python
+mesh = FaultMesh.curved(trace, frame,
+                        bottom_trace="fault-bottom.kml",   # map view of the bottom edge
+                        bottom_depth=None,                 # None -> max_depth
+                        max_depth=40e3, edge_length=5e3)
+```
+
+Nothing downstream changes, because a dip was never used as an angle in the first
+place: `FaultSegment.project` converts it into a bottom line and only the line is
+fitted. A bottom trace *is* that line, already digitised.
+
+- **A KML carries no usable depth** — Google Earth writes every vertex at
+  altitude 0 — so `bottom_depth` says what the line means, defaulting to the base
+  of the mesh. Setting it **shallower** than `max_depth` is the useful case, not a
+  mistake: the levels below the control row are set by the regularizer alone,
+  which continues the dip linearly, so a trace digitised at a 15 km locking depth
+  still builds a sensible 40 km mesh. Deeper than `max_depth` is refused —
+  `gridfit` clips control points into its lattice, so it would be silently
+  flattened onto the bottom row instead of ignored.
+- **The dip may reverse along strike**, which is the case dips express badly. Where
+  the bottom trace crosses the surface trace the fault leans the other way; a dip
+  list can only say that with hand-tuned values straddling 90. The San Sebastián
+  pair does exactly this — bottom edge ~10 km north of the trace for the western
+  33 km, up to 7 km south for the remaining 230 km, giving 75.9°…100.1° at 40 km
+  depth. `mesh.attrs["bottom_dip_flips"]` and `dip_range_deg` record it, and the
+  runners print both.
+- ⚠️ **A bottom trace drawn past the ends of the surface trace is trimmed, and this
+  is not cosmetic.** `to_curvilinear` clamps to the polyline, so an overhanging
+  point reports its distance to the *endpoint* — along-strike component included —
+  and every such point piles onto one arc length. Measured on the real pair, a
+  17 km overhang turned a −7.5 km offset into −18.3 km: a 65° dip at the tip of an
+  otherwise 76–90° fault, silent and plausible-looking. Samples whose reported
+  offset is inflated are dropped with a `RuntimeWarning` naming the count; an end
+  vertex that merely reaches a little past the end at a bend is dropped quietly,
+  since it constrains nothing its neighbours do not.
+- The same folding guard applies, stated as the offset at the base of the mesh
+  rather than as a dip. Mutually exclusive with `segments=`/`uniform_dip=`.
+
 ### A layered crust, and nodal slip
 
 **A layered medium.** A homogeneous half-space gives the whole crust one rigidity,
@@ -681,6 +725,8 @@ can be re-launched at a new value without touching the file:
 | `NISAR_EDGE_LENGTH`, `NISAR_MAX_DEPTH` | element size and fault bottom, metres |
 | `NISAR_DIP` | `75` for one dip everywhere, `70,80,85` for one per deep segment; unset means vertical |
 | `NISAR_SEGMENTS` | segment files, one per dip; unset chops the trace into equal chords |
+| `NISAR_BOTTOM` | a digitised bottom trace, which defines the dip instead of `NISAR_DIP` — setting both is refused |
+| `NISAR_BOTTOM_DEPTH` | what depth that bottom trace sits at; unset means the base of the mesh |
 | `NISAR_BIAS_W`, `NISAR_DOWN_DIP_LEVELS` | depth-level grading, and the level count that makes it mean a definite ratio (see "A fault that dips") |
 | `NISAR_ENGINE` | `layered` (default, EDGRN tables from the velocity model) or `halfspace` |
 | `NISAR_SMOOTHING` | the weight stage 3 solves at |

@@ -132,7 +132,8 @@ class FaultMesh:
 
     @classmethod
     def curved(cls, trace, frame=None, *, segments=None, dips=None, uniform_dip=None,
-               surface=None, max_depth=20e3, edge_length=3e3, top_depth=0.0,
+               surface=None, bottom_trace=None, bottom_depth=None,
+               max_depth=20e3, edge_length=3e3, top_depth=0.0,
                down_dip_levels=None, bias_w=1.0, bias_l=1.0, smoothness=None,
                depth_control=None, **fit_kwargs):
         """A fault that dips, built from one dip per deep segment.
@@ -144,10 +145,15 @@ class FaultMesh:
         (:class:`~nisar_tools.slip.surface.FaultSurface`); and the mesh nodes are
         that surface sampled on the ``(s, z)`` lattice.
 
-        Three ways to say what the geometry is, in decreasing generality:
+        Four ways to say what the geometry is, in decreasing generality:
 
         * ``surface=`` -- a :class:`~nisar_tools.slip.surface.FaultSurface` you
           fitted yourself.
+        * ``bottom_trace=`` -- a digitised bottom edge, at ``bottom_depth``
+          (default ``max_depth``). The dip is whatever connects the two traces,
+          so it varies continuously along strike and may reverse direction where
+          the bottom trace crosses the surface trace -- which a list of dips can
+          only express with hand-tuned values straddling 90 degrees.
         * ``segments=`` and ``dips=`` -- the reference's
           ``cfg.geometry.segmentFiles`` / ``segmentDipDegrees``. ``segments`` may
           be an integer, in which case the trace is chopped into that many equal
@@ -187,6 +193,12 @@ class FaultMesh:
                 "resolution with depth, which is what resolution actually needs, and "
                 "note the reference's own demo configuration sets biasL = 1."
             )
+        if bottom_depth is not None and bottom_trace is None:
+            raise ValueError(
+                "bottom_depth= only means anything with bottom_trace=; it is the "
+                "depth the digitised bottom edge sits at. Use max_depth to set how "
+                "deep the mesh goes."
+            )
         unknown = set(fit_kwargs) - _FIT_KWARGS
         if unknown:
             raise TypeError(
@@ -209,7 +221,7 @@ class FaultMesh:
         # nominally vertical fault would land tens of microns off its own trace.
         surface, kind = _resolve_surface(
             resampled, frame, s, depths, surface, segments, dips, uniform_dip,
-            smoothness, depth_control, fit_kwargs,
+            bottom_trace, bottom_depth, smoothness, depth_control, fit_kwargs,
         )
 
         # `cross_nodes` is indexed by ascending z (deepest row first); the mesh
@@ -566,18 +578,19 @@ def _snap_vertical_columns(cross, depths):
 
 
 def _resolve_surface(trace, frame, s, depths, surface, segments, dips, uniform_dip,
-                     smoothness, depth_control, fit_kwargs):
+                     bottom_trace, bottom_depth, smoothness, depth_control, fit_kwargs):
     """Turn whichever geometry description the caller gave into a FaultSurface."""
     from .surface import DEFAULT_SMOOTHNESS, FaultSurface, centres as _centres
 
     z_nodes = -depths[::-1]
     given = [name for name, value in
-             (("surface", surface), ("segments", segments), ("uniform_dip", uniform_dip))
+             (("surface", surface), ("bottom_trace", bottom_trace),
+              ("segments", segments), ("uniform_dip", uniform_dip))
              if value is not None]
     if len(given) != 1:
         raise ValueError(
-            "FaultMesh.curved needs exactly one of surface=, segments= or "
-            f"uniform_dip=; got {given or ['none']}"
+            "FaultMesh.curved needs exactly one of surface=, bottom_trace=, "
+            f"segments= or uniform_dip=; got {given or ['none']}"
         )
 
     if surface is not None:
@@ -588,6 +601,15 @@ def _resolve_surface(trace, frame, s, depths, surface, segments, dips, uniform_d
                 "with the same edge_length, max_depth and down_dip_levels."
             )
         return surface, "curved"
+
+    if bottom_trace is not None:
+        built = FaultSurface.from_bottom_trace(
+            trace, frame, bottom_trace, s_nodes=s, z_nodes=z_nodes,
+            bottom_depth=bottom_depth, depth_control=depth_control,
+            smoothness=DEFAULT_SMOOTHNESS if smoothness is None else smoothness,
+            **fit_kwargs,
+        )
+        return built, "curved"
 
     if uniform_dip is not None:
         # Closed form: at depth d every node steps d/tan(dip) along its own

@@ -80,8 +80,18 @@ def _paths(value):
     return [Path(v).expanduser() for v in value] or None
 
 
+def _path(value):
+    """The same, for a single optional file path."""
+    paths = _paths(value)
+    return None if paths is None else paths[0]
+
+
 def _int_or_none(value):
     return None if value is None or value == "" else int(value)
+
+
+def _float_or_none(value):
+    return None if value is None or value == "" else float(value)
 
 
 # -- where -------------------------------------------------------------------
@@ -186,6 +196,28 @@ DIPS = _dips(os.environ.get("NISAR_DIP", None))
 #: files (``x_begin y_begin x_end y_end``, metres in the local frame), one per
 #: dip; ``NISAR_SEGMENTS`` takes the same list, comma- or space-separated.
 SEGMENT_FILES = _paths(os.environ.get("NISAR_SEGMENTS", None))
+
+#: A digitised *bottom* trace: the map-view line where the fault reaches
+#: ``BOTTOM_DEPTH``. Set it (or ``NISAR_BOTTOM=/path/to/fault-bottom.kml``) and the
+#: dip is whatever connects the two traces -- no angles at all. Mutually exclusive
+#: with ``DIPS``, and read with the same ``FaultTrace.from_file`` as ``FAULT``, so
+#: ``.kml`` and plain text both work.
+#:
+#: This is the better description whenever the bottom edge is actually known,
+#: because the dip then varies continuously along strike and may **reverse**
+#: where the bottom trace crosses the surface trace -- which ``DIPS`` can express
+#: only with hand-tuned values straddling 90. The San Sebastian pair does exactly
+#: that: the bottom edge runs ~10 km north of the trace for the western 33 km and
+#: up to 7 km south for the remaining 230 km.
+BOTTOM_TRACE = _path(os.environ.get("NISAR_BOTTOM", None))
+
+#: What depth ``BOTTOM_TRACE`` sits at. ``None`` means the base of the mesh
+#: (``MESH["max_depth"]``), which is the usual reading. A KML carries no usable
+#: depth -- Google Earth writes every vertex at altitude 0 -- so this cannot be
+#: taken from the file. Setting it *shallower* than ``max_depth`` is legitimate
+#: and useful (a bottom trace digitised at a locking depth); the levels below it
+#: continue the dip linearly. Deeper is refused.
+BOTTOM_DEPTH = _float_or_none(os.environ.get("NISAR_BOTTOM_DEPTH", None))
 
 #: Options that exist only on the curved constructor.
 #:
@@ -356,6 +388,20 @@ def fault_mesh(trace, frame):
     ``CURVE`` asks for nothing, since ``vertical()`` accepts none of its
     keywords and would drop them without a word.
     """
+    if BOTTOM_TRACE is not None:
+        if DIPS is not None:
+            # `curved` would refuse this too, but naming the *settings* is what
+            # makes it fixable from the log of a detached run.
+            raise ValueError(
+                f"BOTTOM_TRACE ({BOTTOM_TRACE.name}) and DIPS ({DIPS}) both set -- "
+                "a bottom trace already says where the fault goes at depth, so a "
+                "dip would be a second, contradicting answer. Unset NISAR_DIP to "
+                "use the bottom trace, or NISAR_BOTTOM to use the dips."
+            )
+        return FaultMesh.curved(trace, frame,
+                                bottom_trace=FaultTrace.from_file(BOTTOM_TRACE),
+                                bottom_depth=BOTTOM_DEPTH, **MESH, **CURVE)
+
     if DIPS is None:
         if all(CURVE.get(k) == v for k, v in _CURVE_NOOP.items()) \
                 and not set(CURVE) - set(_CURVE_NOOP):
@@ -391,13 +437,24 @@ def mesh_summary(mesh):
            "n_elements": int(mesh.n_elements),
            "n_down": int(mesh.attrs.get("n_down", 0))}
     out.update({k: float(v) for k, v in MESH.items()})
-    for key in ("dip_deg", "bias_w", "smoothness", "min_curvature_radius"):
+    for key in ("dip_deg", "bias_w", "smoothness", "min_curvature_radius",
+                "bottom_depth"):
         if key in mesh.attrs:
             out[key] = float(mesh.attrs[key])
     if "dips" in mesh.attrs:
         out["dips"] = [float(d) for d in mesh.attrs["dips"]]
     if "segments" in mesh.attrs:
         out["segments"] = [[float(v) for v in seg] for seg in mesh.attrs["segments"]]
+    if "bottom_trace" in mesh.attrs:
+        # The dip range and the flip flag are the whole point of recording this:
+        # a bottom trace crossing the surface trace reverses which way the fault
+        # leans, and nothing else in a run's output would ever say so.
+        out["bottom_trace"] = str(mesh.attrs["bottom_trace"])
+        out["bottom_samples"] = int(mesh.attrs["bottom_samples"])
+        out["bottom_trimmed"] = int(mesh.attrs["bottom_trimmed"])
+        out["bottom_dip_flips"] = bool(mesh.attrs["bottom_dip_flips"])
+        out["bottom_cross_range"] = [float(v) for v in mesh.attrs["bottom_cross_range"]]
+        out["dip_range_deg"] = [float(v) for v in mesh.attrs["dip_range_deg"]]
     return out
 
 

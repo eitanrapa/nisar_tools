@@ -8,6 +8,8 @@ fitted surface can quietly wander into the numerically hostile band beside
 vertical.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -347,12 +349,190 @@ def test_segment_dips_bend_the_surface(setup):
     assert step[0] > step[-1] * 2, "60 degrees must step further than 85"
 
 
+# -- geometry from a digitised bottom trace -----------------------------------
+
+def _bottom_from_offset(trace, frame, offset, edge_length=6e3, extend=0.0):
+    """A bottom trace sitting ``offset`` metres off ``trace``'s left-hand normal.
+
+    ``offset`` may be a scalar or one value per resampled vertex. ``extend``
+    pushes both ends outward along strike, which is what a real digitisation does
+    when it is drawn past the ends of the mapped surface trace.
+    """
+    resampled = trace.resample(edge_length, frame)
+    x, y = resampled.to_local(frame)
+    nx, ny = resampled.normals(frame)
+    bx, by = x + offset * nx, y + offset * ny
+    if extend:
+        for i, j in ((0, 1), (-1, -2)):
+            step = np.array([bx[i] - bx[j], by[i] - by[j]])
+            step /= np.hypot(*step)
+            bx = np.insert(bx, 0 if i == 0 else bx.size, bx[i] + extend * step[0])
+            by = np.insert(by, 0 if i == 0 else by.size, by[i] + extend * step[1])
+    return FaultTrace(*frame.to_lonlat(bx, by), name="bottom")
+
+
+@pytest.mark.parametrize("dip", [80.0, 70.0, 60.0])
+def test_bottom_trace_reproduces_a_uniform_dip(setup, dip):
+    """The load-bearing equivalence: a bottom trace *is* a dip, said differently.
+
+    Placing the bottom trace exactly where ``uniform_dip`` would put the bottom
+    edge has to reproduce that mesh. Getting it wrong in any of the three places
+    the two paths differ -- arc-length densification, the projection into
+    ``(s, cross)``, or the sign of the normal -- moves nodes by kilometres, so a
+    tolerance of metres on a 6 km element pins all of them at once.
+    """
+    trace, frame = setup
+    bottom = _bottom_from_offset(trace, frame, dip_offset(20e3, dip))
+    fitted = FaultMesh.curved(trace, frame, bottom_trace=bottom,
+                              max_depth=20e3, edge_length=6e3)
+    reference = FaultMesh.curved(trace, frame, uniform_dip=dip,
+                                 max_depth=20e3, edge_length=6e3)
+
+    offset = np.linalg.norm(fitted.nodes - reference.nodes, axis=1)
+    assert np.median(offset) < 1.0
+    assert offset.max() < 20.0, "well under a hundredth of an element"
+    np.testing.assert_allclose(fitted.dip, reference.dip, atol=0.1)
+    assert fitted.attrs["bottom_depth"] == pytest.approx(20e3)
+    assert fitted.attrs["bottom_dip_flips"] is False
+
+
+def test_bottom_trace_overhang_is_trimmed(setup):
+    """The silent failure this constructor exists to guard against.
+
+    ``to_curvilinear`` clamps to the polyline, so a bottom-trace point drawn past
+    the end of the surface trace reports its distance to the *endpoint* -- along
+    strike component included -- and every such point piles onto one ``s`` value.
+    Untrimmed they drag that end of the fit into a much shallower dip. Measured on
+    the real San Sebastian pair a 17 km overhang turned -7.5 km into -18.3 km.
+    """
+    trace, frame = setup
+    clean = _bottom_from_offset(trace, frame, dip_offset(20e3, 70.0))
+    overhanging = _bottom_from_offset(trace, frame, dip_offset(20e3, 70.0), extend=30e3)
+
+    reference = FaultMesh.curved(trace, frame, bottom_trace=clean,
+                                 max_depth=20e3, edge_length=6e3)
+    with pytest.warns(RuntimeWarning, match="past the ends"):
+        trimmed = FaultMesh.curved(trace, frame, bottom_trace=overhanging,
+                                   max_depth=20e3, edge_length=6e3)
+
+    assert trimmed.attrs["bottom_trimmed"] > 10
+    # The overhang is discarded rather than absorbed: the two meshes agree.
+    assert np.linalg.norm(trimmed.nodes - reference.nodes, axis=1).max() < 20.0
+
+    # A clean bottom trace stays silent. It may still drop a sample -- offsetting
+    # an end vertex along its own normal reaches a little past the end of the
+    # trace at any bend -- but that one carries no distance the neighbours do not,
+    # so warning about it would train the reader to ignore the warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        FaultMesh.curved(trace, frame, bottom_trace=clean,
+                         max_depth=20e3, edge_length=6e3)
+
+
+def test_bottom_trace_may_cross_the_surface_trace(setup):
+    """A bottom trace that crosses reverses the dip direction along strike.
+
+    This is the case a list of dips can only express with hand-tuned values
+    straddling 90, and it is what the real San Sebastian bottom trace does: north
+    of the surface trace for the western third, south for the rest. The elements
+    where it passes through vertical are an accident of the fit, so they must be
+    snapped to exactly vertical rather than left in the band where the triangular
+    dislocation loses every digit.
+    """
+    trace, frame = setup
+    resampled = trace.resample(6e3, frame)
+    lean = np.linspace(6e3, -6e3, len(resampled))       # crosses in the middle
+    bottom = _bottom_from_offset(trace, frame, lean)
+    mesh = FaultMesh.curved(trace, frame, bottom_trace=bottom,
+                            max_depth=20e3, edge_length=6e3)
+
+    assert mesh.attrs["bottom_dip_flips"] is True
+    low, high = mesh.attrs["bottom_cross_range"]
+    assert low < 0 < high, "the fault leans both ways"
+    assert min(mesh.attrs["dip_range_deg"]) < 90 < max(mesh.attrs["dip_range_deg"])
+
+    offenders = np.abs(mesh.dip - 90.0) < VERTICAL_TOL_DEG
+    assert not np.any(offenders & (mesh.dip != 90.0)), (
+        "elements inside the tolerance must be exactly vertical, not nearly so"
+    )
+
+
+def test_bottom_trace_shallower_than_the_mesh_extrapolates(setup):
+    """A bottom trace at a locking depth still builds a deeper mesh.
+
+    The control row then sits inside the lattice and the levels below it are set
+    by the regularizer alone, which continues the dip rather than flattening it --
+    so the fault keeps leaning the same way all the way down.
+    """
+    trace, frame = setup
+    bottom = _bottom_from_offset(trace, frame, dip_offset(10e3, 70.0))
+    mesh = FaultMesh.curved(trace, frame, bottom_trace=bottom, bottom_depth=10e3,
+                            max_depth=20e3, edge_length=6e3)
+
+    assert mesh.attrs["bottom_depth"] == pytest.approx(10e3)
+    n_along = mesh.attrs["n_along"]
+    cross = np.hypot(*(mesh.nodes[-n_along:, :2] - mesh.nodes[:n_along, :2]).T)
+    # Twice the depth, so roughly twice the offset -- the dip did not roll over.
+    assert 1.6 < np.median(cross) / dip_offset(10e3, 70.0) < 2.4
+
+
+def test_bottom_depth_outside_the_mesh_is_refused(setup):
+    trace, frame = setup
+    bottom = _bottom_from_offset(trace, frame, dip_offset(20e3, 70.0))
+    # Deeper than the mesh would be clipped onto the bottom row by the gridder,
+    # quietly building a shallower fault than asked for.
+    with pytest.raises(ValueError, match="bottom_depth"):
+        FaultMesh.curved(trace, frame, bottom_trace=bottom, bottom_depth=50e3,
+                         max_depth=20e3, edge_length=6e3)
+    with pytest.raises(ValueError, match="bottom_depth"):
+        FaultMesh.curved(trace, frame, bottom_trace=bottom, bottom_depth=0.0,
+                         max_depth=20e3, edge_length=6e3)
+
+
+def test_bottom_depth_alone_does_not_pass_silently(setup):
+    trace, frame = setup
+    with pytest.raises(ValueError, match="only means anything with bottom_trace"):
+        FaultMesh.curved(trace, frame, uniform_dip=70.0, bottom_depth=10e3,
+                         max_depth=20e3, edge_length=6e3)
+
+
+def test_bottom_trace_folding_guard():
+    """Same limit as a too-shallow dip, stated in terms of the trace."""
+    angle = np.linspace(-np.pi / 2, np.pi / 2, 41)
+    radius = 0.05                                   # ~5.5 km, degrees of latitude
+    trace = FaultTrace(-68.0 + radius * np.cos(angle), 10.0 + radius * np.sin(angle))
+    frame = trace.local_frame()
+    bottom = _bottom_from_offset(trace, frame, -30e3, edge_length=2e3)
+
+    with pytest.raises(ValueError, match="radius of curvature"):
+        FaultMesh.curved(trace, frame, bottom_trace=bottom,
+                         max_depth=20e3, edge_length=2e3)
+
+
+def test_bottom_trace_reads_a_file(setup, tmp_path):
+    """A path is accepted, through the same reader ``FAULT`` already uses."""
+    trace, frame = setup
+    bottom = _bottom_from_offset(trace, frame, dip_offset(20e3, 70.0))
+    path = tmp_path / "bottom.dat"
+    path.write_text("\n".join(f"{lo} {la}" for lo, la in zip(bottom.lon, bottom.lat)))
+
+    from_path = FaultMesh.curved(trace, frame, bottom_trace=path,
+                                 max_depth=20e3, edge_length=6e3)
+    from_object = FaultMesh.curved(trace, frame, bottom_trace=bottom,
+                                   max_depth=20e3, edge_length=6e3)
+    np.testing.assert_allclose(from_path.nodes, from_object.nodes)
+    assert from_path.attrs["bottom_trace"] == "bottom"
+
+
 def test_curved_needs_exactly_one_geometry_description(setup):
     trace, frame = setup
     with pytest.raises(ValueError, match="exactly one of"):
         FaultMesh.curved(trace, frame)
     with pytest.raises(ValueError, match="exactly one of"):
         FaultMesh.curved(trace, frame, uniform_dip=70.0, segments=2, dips=[70.0, 80.0])
+    bottom = _bottom_from_offset(trace, frame, dip_offset(20e3, 70.0))
+    with pytest.raises(ValueError, match="exactly one of"):
+        FaultMesh.curved(trace, frame, uniform_dip=70.0, bottom_trace=bottom)
 
 
 def test_folding_guard_refuses_a_hairpin():

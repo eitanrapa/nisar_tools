@@ -21,11 +21,13 @@ rather than substituting a generic smoother:
   cloud with a hole through the middle, which is exactly this cloud's shape.
 """
 
+import warnings
+
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import lsqr
 
-from .trace import VERTICAL_TOL_DEG, dip_offset  # noqa: F401  (re-exported)
+from .trace import VERTICAL_TOL_DEG, FaultTrace, dip_offset  # noqa: F401  (re-exported)
 
 #: Default smoothing weight, matching the reference's Myanmar configuration
 #: (``cfg.geometry.surfaceFitSmoothness``).
@@ -315,6 +317,163 @@ class FaultSurface:
         surface.attrs.update(
             dips=[float(d) for d in dips],
             segments=[[s.x_begin, s.y_begin, s.x_end, s.y_end] for s in segments],
+            max_depth=max_depth,
+            surface_weight_ratio=float(surface_weight_ratio),
+            min_curvature_radius=float(radius),
+        )
+        return surface
+
+    @classmethod
+    def from_bottom_trace(cls, trace, frame, bottom, s_nodes, z_nodes,
+                          bottom_depth=None, depth_control=None,
+                          smoothness=DEFAULT_SMOOTHNESS,
+                          surface_weight_ratio=SURFACE_WEIGHT_RATIO,
+                          samples_per_cell=SAMPLES_PER_CELL, **kwargs):
+        """Build the control cloud from a surface trace plus a *bottom* trace.
+
+        The same fit as :meth:`from_segments`, but the bottom line is digitised
+        rather than derived from a dip. Nothing downstream of the control cloud
+        changes, because dips were never used as angles in the first place: a dip
+        is turned into a bottom line by
+        :meth:`~nisar_tools.slip.trace.FaultSegment.project` and only the line is
+        fitted. A bottom trace *is* that line, so this constructor simply skips
+        the angle.
+
+        ``bottom`` is a :class:`~nisar_tools.slip.trace.FaultTrace` or a path to
+        one -- ``.kml`` or the same whitespace-separated text
+        :meth:`~nisar_tools.slip.trace.FaultTrace.from_file` already reads. It is
+        the *map view* position of the fault's bottom edge; a KML carries no
+        usable depth (Google Earth writes every vertex at altitude 0), so the
+        depth it represents is ``bottom_depth``, defaulting to the base of the
+        mesh.
+
+        ``bottom_depth`` **below** ``max_depth`` is the useful case and not a
+        mistake: the control row then sits inside the lattice and the levels
+        under it are set by the regularizer alone, which continues the dip
+        linearly. So a bottom trace digitised at a 15 km locking depth still
+        gives a sensible 40 km mesh. Deeper than ``max_depth`` is refused --
+        :func:`gridfit` clips control points into the lattice, so it would be
+        silently flattened onto the bottom row rather than ignored.
+
+        Two things this has to do that :meth:`from_segments` does not. The bottom
+        line is a *polyline*, not a chord, so it is densified by arc length
+        (via :meth:`~nisar_tools.slip.trace.FaultTrace.resample`) instead of by
+        interpolating between two endpoints. And a digitised bottom trace
+        routinely runs past the ends of the surface trace, which
+        :meth:`~nisar_tools.slip.trace.FaultTrace.to_curvilinear` cannot express:
+        it clamps to the polyline, so an overhanging point reports the full
+        distance to the *endpoint*, along-strike component and all, and every
+        such point piles onto one ``s``. Measured on the San Sebastian pair, a
+        17 km overhang turned a -7.5 km offset into -18.3 km -- a 65 degree dip
+        at the tip of an otherwise 76-90 degree fault, with nothing to notice.
+        Those samples are dropped, with a warning naming how many.
+        """
+        if not isinstance(bottom, FaultTrace):
+            bottom = FaultTrace.from_file(bottom)
+
+        s_nodes = np.asarray(s_nodes, dtype=float).ravel()
+        z_nodes = np.asarray(z_nodes, dtype=float).ravel()
+        max_depth = float(-np.min(z_nodes))
+        top_depth = float(-np.max(z_nodes))
+        bottom_depth = max_depth if bottom_depth is None else float(bottom_depth)
+        if not top_depth < bottom_depth <= max_depth:
+            raise ValueError(
+                f"bottom_depth={bottom_depth / 1e3:.1f} km must lie below the top of "
+                f"the mesh ({top_depth / 1e3:.1f} km) and no deeper than its base "
+                f"({max_depth / 1e3:.1f} km). A deeper bottom trace would be clipped "
+                "onto the bottom row of the fit lattice rather than honoured, which "
+                "would quietly build a shallower fault than asked for."
+            )
+
+        s_min, s_max = float(s_nodes.min()), float(s_nodes.max())
+        edge_length = (s_max - s_min) / max(1, s_nodes.size - 1)
+
+        # Densify along the bottom polyline itself, at the same spacing the
+        # surface-trace block below uses, so the two blocks carry comparable
+        # numbers of rows and `surface_weight_ratio` means what it says.
+        dense = bottom.resample(edge_length / samples_per_cell, frame)
+        bx, by = dense.to_local(frame)
+        s_bottom, cross_bottom = trace.to_curvilinear(bx, by, frame)
+
+        _, _, nearest, t = trace._nearest_segment(bx, by, frame)
+        last = len(trace) - 2
+        overhang = ((nearest == 0) & (t <= 0.0)) | ((nearest == last) & (t >= 1.0))
+        n_trimmed = int(overhang.sum())
+        if n_trimmed and np.any(~overhang):
+            # A sample whose reported offset is no larger than the interior's was
+            # not really overhanging -- offsetting an end vertex along its own
+            # normal reaches a little past the end of the trace at any bend, and
+            # dropping it costs a constraint the neighbours already carry. Warn
+            # only when the clamped distance is inflated, which is the case that
+            # silently drags that end of the fit.
+            worst_out = float(np.abs(cross_bottom[overhang]).max())
+            worst_in = float(np.abs(cross_bottom[~overhang]).max())
+            if worst_out > 1.01 * worst_in:
+                warnings.warn(
+                    f"{n_trimmed} of {overhang.size} bottom-trace samples project "
+                    f"past the ends of the surface trace (worst offset "
+                    f"{worst_out / 1e3:.1f} km, against {worst_in / 1e3:.1f} km "
+                    "inside) and were dropped: their distance to the trace is "
+                    "measured to its endpoint, so it is along-strike overhang and "
+                    "not dip. Trim the bottom trace, or extend the surface trace "
+                    "to cover it.",
+                    RuntimeWarning, stacklevel=2,
+                )
+        s_bottom, cross_bottom = s_bottom[~overhang], cross_bottom[~overhang]
+        if s_bottom.size < 3:
+            raise ValueError(
+                "Fewer than three bottom-trace samples project onto the surface "
+                "trace; the two traces do not overlap along strike."
+            )
+
+        # The fit extrapolates the dip below the control row, so the offset that
+        # has to clear the fold limit is the one at the base of the mesh.
+        radius = trace.min_curvature_radius(frame)
+        worst = float(np.max(np.abs(cross_bottom))) * max_depth / bottom_depth
+        if worst >= radius:
+            raise ValueError(
+                f"The bottom trace is {worst / 1e3:.1f} km off the surface trace at "
+                f"{max_depth / 1e3:.1f} km depth, which exceeds the trace's smallest "
+                f"radius of curvature ({radius / 1e3:.1f} km), so the projected "
+                "surface folds through itself and the mesh would contain inverted "
+                "elements. Use a shallower fault, a bottom trace closer to the "
+                "surface trace, or a smoother trace."
+            )
+
+        n_along = max(2, int(round(samples_per_cell * (s_nodes.size - 1))))
+        s_dense = np.linspace(s_min, s_max, n_along)
+
+        s_all = [s_dense, s_bottom]
+        z_all = [np.zeros_like(s_dense), np.full(s_bottom.size, -bottom_depth)]
+        c_all = [np.zeros_like(s_dense), cross_bottom]
+        w_all = [np.full(s_dense.size, float(surface_weight_ratio)),
+                 np.ones(s_bottom.size)]
+
+        if depth_control is not None:
+            cx, cy, cz = (np.asarray(a, dtype=float).ravel() for a in depth_control)
+            s_c, c_c = trace.to_curvilinear(cx, cy, frame)
+            s_all.append(s_c)
+            z_all.append(-np.abs(cz))
+            c_all.append(c_c)
+            w_all.append(np.ones(s_c.size))
+
+        surface = cls.from_control_points(
+            np.concatenate(s_all), np.concatenate(z_all), np.concatenate(c_all),
+            s_nodes, z_nodes, smoothness=smoothness, weights=np.concatenate(w_all),
+            **kwargs,
+        )
+        # Reported, not just recorded: a bottom trace that crosses the surface
+        # trace flips which way the fault leans, and nothing else in the pipeline
+        # would say so.
+        dips = np.degrees(np.arctan2(bottom_depth, cross_bottom))
+        surface.attrs.update(
+            bottom_trace=bottom.name,
+            bottom_depth=float(bottom_depth),
+            bottom_samples=int(s_bottom.size),
+            bottom_trimmed=n_trimmed,
+            bottom_cross_range=[float(cross_bottom.min()), float(cross_bottom.max())],
+            bottom_dip_flips=bool(np.any(cross_bottom > 0) and np.any(cross_bottom < 0)),
+            dip_range_deg=[float(dips.min()), float(dips.max())],
             max_depth=max_depth,
             surface_weight_ratio=float(surface_weight_ratio),
             min_curvature_radius=float(radius),
