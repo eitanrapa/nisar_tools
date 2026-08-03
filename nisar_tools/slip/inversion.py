@@ -639,7 +639,12 @@ class SlipModel:
         if unknown:
             raise KeyError(
                 f"Unknown field(s) {sorted(unknown)}; available: {sorted(grid.data_vars)}")
-        return [write_grd(grid[name].rio.write_crs(self.mesh.frame.crs),
+        # `local_crs`, matching what `surface_displacement` already tagged the grid
+        # with. Re-tagging with the frame's bare projection here is the exact
+        # crs/local_crs mix-up that method's comment warns about: the grid is in
+        # local metres, so the bare projection writes the file 500 km east and
+        # 1167 km south of the fault -- plausible-looking, and wrong.
+        return [write_grd(grid[name].rio.write_crs(self.mesh.frame.local_crs),
                           outdir / f"{name}.grd") for name in fields]
 
     # -- output ------------------------------------------------------------

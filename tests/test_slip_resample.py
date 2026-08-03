@@ -209,6 +209,32 @@ def test_surface_displacement_is_georeferenced_where_the_fault_is(setup, scenes)
     assert lat == pytest.approx(_LAT.mean(), abs=1.0)
 
 
+def test_to_grd_writes_the_field_where_the_fault_is(setup, scenes, tmp_path):
+    """The half of the mix-up the test above did not reach.
+
+    ``surface_displacement`` tagging the grid correctly is not enough: ``to_grd``
+    re-tagged it with the frame's bare projection on the way out, which put the
+    written file 10.6 degrees of latitude -- about 1180 km -- south of the fault.
+    Checking the CRS of the in-memory grid could not catch that; only reading the
+    file back can.
+    """
+    from nisar_tools.geo import read_grd
+    from nisar_tools.slip import SlipInversion
+
+    trace, frame, mesh = setup
+    obs = Observations.from_los(scenes["asc"], name="asc", frame=frame, trace=trace,
+                                rms_min=0.006, width_min=8000.0, width_max=40000.0,
+                                exclude_within=8000.0)
+    model = SlipInversion(mesh, obs).solve(smoothing=0.3)
+    (path, *_) = model.to_grd(tmp_path / "grd", fields=("ux",),
+                              spacing=10000.0, pad=30e3)
+
+    grid = read_grd(path)
+    y_name, x_name = grid.dims[-2], grid.dims[-1]
+    assert float(grid[x_name].mean()) == pytest.approx(_LON.mean(), abs=1.0)
+    assert float(grid[y_name].mean()) == pytest.approx(_LAT.mean(), abs=1.0)
+
+
 def test_frame_round_trips_through_a_dict(setup):
     _, frame, _ = setup
     rebuilt = LocalFrame.from_dict(frame.to_dict())
