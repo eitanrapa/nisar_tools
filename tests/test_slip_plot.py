@@ -53,6 +53,67 @@ def test_plot_slip_rejects_an_unknown_component(solved):
     *_, model = solved
     with pytest.raises(ValueError, match="component must be"):
         slip_plot.plot_slip(model, component="tensile")
+    with pytest.raises(ValueError, match="component must be"):
+        slip_plot.plot_slip_3d(model, component="tensile")
+
+
+@pytest.mark.parametrize("component", ["magnitude", "strike", "dip"])
+def test_plot_slip_3d_draws_every_element(solved, component):
+    trace, mesh, _, _, model = solved
+    fig, ax = slip_plot.plot_slip_3d(model, component=component, trace=trace)
+
+    assert hasattr(ax, "add_collection3d"), "must be a 3-D axes"
+    (collection,) = [c for c in ax.collections if hasattr(c, "do_3d_projection")]
+    # A Poly3DCollection has no 2-D paths until it projects, so this also pins
+    # that the figure actually renders rather than merely being assembled.
+    fig.canvas.draw()
+    assert len(collection.get_paths()) == mesh.n_elements
+    assert ax.get_zlabel().startswith("Depth")
+    # Depth runs from the base of the fault up to the free surface.
+    assert ax.get_zlim()[1] == pytest.approx(mesh.nodes[:, 2].max() / 1e3)
+    matplotlib.pyplot.close(fig)
+
+
+def test_plot_slip_3d_matches_the_unrolled_colour_scale(solved):
+    """The two views are meant to be compared by eye, so a signed component has
+    to land on the same symmetric scale in both."""
+    *_, model = solved
+    fig2d, ax2d = slip_plot.plot_slip(model, component="strike")
+    fig3d, ax3d = slip_plot.plot_slip_3d(model, component="strike")
+
+    flat = ax2d.collections[0]
+    solid = [c for c in ax3d.collections if hasattr(c, "do_3d_projection")][0]
+    assert solid.get_clim() == flat.get_clim()
+    assert solid.get_cmap().name == flat.get_cmap().name == "RdBu_r"
+    matplotlib.pyplot.close(fig2d)
+    matplotlib.pyplot.close(fig3d)
+
+
+def test_plot_slip_3d_exaggerates_every_axis_but_the_longest(solved):
+    """At true scale a 200 km fault 18 km deep is an unreadable sliver.
+
+    The stretch is what makes the dip visible, and leaving the long axis alone is
+    what keeps it from simply cancelling out.
+    """
+    *_, model = solved
+    fig, ax = slip_plot.plot_slip_3d(model, exaggeration=4.0)
+    aspect = np.asarray(ax.get_box_aspect(), dtype=float)
+
+    assert aspect.argmax() == 0, "along strike (east here) stays the long axis"
+    true_scale = slip_plot.plot_slip_3d(model, exaggeration=1.0)[1].get_box_aspect()
+    # matplotlib renormalises what it is handed, so only the *relative* stretch
+    # between the axes is observable -- which is the whole content of the knob.
+    ratio = aspect / np.asarray(true_scale, dtype=float)
+    np.testing.assert_allclose(ratio / ratio[0], [1.0, 4.0, 4.0])
+    matplotlib.pyplot.close(fig)
+
+
+def test_plot_slip_3d_refuses_a_flat_axes(solved):
+    *_, model = solved
+    _, flat = matplotlib.pyplot.subplots()
+    with pytest.raises(TypeError, match="needs a 3-D axes"):
+        slip_plot.plot_slip_3d(model, ax=flat)
+    matplotlib.pyplot.close("all")
 
 
 def test_plot_fit_shares_one_scale_between_data_and_model(solved):

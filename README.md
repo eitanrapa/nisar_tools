@@ -458,6 +458,30 @@ it is available before any model exists. Read it against `plot_samples`: element
 much smaller than the data constraining them are what the smoothing weight then
 has to paper over.
 
+`plot_slip(model)` draws the **unrolled** fault, along-strike distance against
+depth. That is the right default — the unrolling is exact, since the fault is
+parameterized by exactly those two coordinates — but it projects the dip away by
+construction. On a dipping or curved mesh use `plot_slip_3d(model, trace=trace)`,
+which shades the same per-element field on the same colour scale so the two can be
+read against each other:
+
+```python
+from nisar_tools.slip.plot import plot_slip_3d
+
+fig, ax = plot_slip_3d(model, component="strike", trace=trace,
+                       exaggeration=4.0, view=(22, -70))
+```
+
+- **`exaggeration` stretches every axis except the longest one**, and it is not
+  cosmetic: the Venezuela mesh is 264 × 25 × 40 km, so at true scale
+  (`exaggeration=1`) it renders as an unreadable sliver. Stretching the two short
+  axes *together* preserves the apparent dip whenever the fault strikes near a
+  grid axis; on a diagonally striking fault the dip is distorted like any
+  vertically exaggerated section.
+- **`view=(60, -90)` looks down on the surface**, which is where a dip *reversal*
+  is easiest to see — the case a bottom trace produces and the unrolled panel
+  cannot show at all.
+
 ### Choosing the smoothing weight
 
 `l_curve` solves at many weights over the same Green's matrix and tabulates misfit

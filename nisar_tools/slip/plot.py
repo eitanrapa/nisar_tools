@@ -3,14 +3,53 @@
 Slip on a **vertical** fault is best read on an *unrolled* section -- along-strike
 distance against depth -- rather than in 3-D. The unrolling is exact, since the
 fault is parameterized by exactly those two coordinates, and it wastes no space
-on a projection that would show a nearly edge-on plane. A dipping fault will want
-a 3-D view; the ``(s, z)`` panel stays correct for it too, just less complete.
+on a projection that would show a nearly edge-on plane. That panel stays correct
+for a dipping fault too, but it projects the dip away by construction, so
+:func:`plot_slip_3d` is the view that shows where the fault actually goes.
 
 Every function returns ``(fig, ax)`` and draws nothing on import, matching
 :mod:`nisar_tools.plot`.
 """
 
 import numpy as np
+
+
+def _slip_component(model, component):
+    """The per-element field named by ``component``.
+
+    Shared by the 2-D and 3-D views so the two cannot drift apart -- they are
+    meant to be compared by eye, which only works if "strike slip" means the
+    same array and the same colour scale in both.
+    """
+    element = model.element_slip
+    values = {
+        "magnitude": np.hypot(*element.T),
+        "strike": element[:, 0],
+        "dip": element[:, 1],
+    }
+    if component not in values:
+        raise ValueError(f"component must be one of {sorted(values)}")
+    return values[component]
+
+
+def _scale_slip(coll, value, component, vmin, vmax):
+    """Symmetric diverging scale for a signed component, plain range otherwise.
+
+    A signed field needs zero pinned to the middle of the colour map, or the
+    colour of "no slip" drifts with the data range and two models stop being
+    comparable.
+    """
+    if component != "magnitude":
+        limit = np.abs(value).max() or 1.0
+        coll.set_cmap("RdBu_r")
+        coll.set_clim(-limit if vmin is None else vmin, limit if vmax is None else vmax)
+    else:
+        coll.set_clim(vmin, vmax)
+
+
+def _slip_title(model, component):
+    return (f"{component} slip -- VR {model.variance_reduction:.1f}%, "
+            f"Mw {model.moment_magnitude:.2f}, max {model.max_slip:.2f} m")
 
 
 def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
@@ -32,29 +71,14 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     from matplotlib.collections import PolyCollection
 
     mesh = model.mesh
-    element = model.element_slip
-    values = {
-        "magnitude": np.hypot(*element.T),
-        "strike": element[:, 0],
-        "dip": element[:, 1],
-    }
-    if component not in values:
-        raise ValueError(f"component must be one of {sorted(values)}")
-    value = values[component]
+    value = _slip_component(model, component)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 3.2))
 
     coll = PolyCollection(mesh.param_vertices / 1e3, array=value, cmap=cmap,
                           edgecolors="none")
-    if component != "magnitude":
-        # A signed field wants a symmetric diverging scale about zero, or the
-        # colour of "no slip" drifts with the data range.
-        limit = np.abs(value).max() or 1.0
-        coll.set_cmap("RdBu_r")
-        coll.set_clim(-limit if vmin is None else vmin, limit if vmax is None else vmax)
-    else:
-        coll.set_clim(vmin, vmax)
+    _scale_slip(coll, value, component, vmin, vmax)
     ax.add_collection(coll)
 
     ax.set_xlim(mesh.params[:, 0].min() / 1e3, mesh.params[:, 0].max() / 1e3)
@@ -62,11 +86,83 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     ax.set_xlabel("Distance along strike (km)")
     ax.set_ylabel("Depth (km)")
     ax.set_aspect("equal")
-    if title is None:
-        title = (f"{component} slip -- VR {model.variance_reduction:.1f}%, "
-                 f"Mw {model.moment_magnitude:.2f}, max {model.max_slip:.2f} m")
-    ax.set_title(title)
+    ax.set_title(_slip_title(model, component) if title is None else title)
     plt.colorbar(coll, ax=ax, label="Slip (m)", pad=0.02)
+    return ax.figure, ax
+
+
+def plot_slip_3d(model, component="magnitude", ax=None, cmap="magma_r",
+                 vmin=None, vmax=None, title=None, exaggeration=4.0,
+                 view=(22.0, -70.0), trace=None, edgecolors="0.4"):
+    """Slip on the fault surface in three dimensions, in local-frame kilometres.
+
+    What :func:`plot_slip` cannot show: the unrolled section is parameterized by
+    arc length and depth, so it projects the dip away by construction. On a
+    curved or dipping mesh -- especially one built from a bottom trace, where the
+    dip varies along strike and may reverse -- this is the view that shows where
+    the fault actually goes.
+
+    Slip is drawn **per element**, on the same colour scale
+    :func:`plot_slip` uses, so the two figures can be read against each other.
+
+    ``exaggeration`` stretches every axis except the longest one. A real fault is
+    far longer along strike than it is deep -- the San Sebastian mesh is
+    264 x 25 x 40 km -- so at true scale (``exaggeration=1``) it renders as an
+    unreadable sliver. Because the *two* short axes are stretched together, the
+    apparent dip is preserved whenever the fault strikes near a grid axis, which
+    is the case this default is chosen for; on a fault striking diagonally the
+    across-strike direction has components on both stretched and unstretched
+    axes, and the dip is then distorted like any vertically exaggerated section.
+
+    ``view`` is ``(elevation, azimuth)`` in degrees. The default looks along
+    strike from slightly above; ``(60, -90)`` looks down on the surface, which is
+    where a dip reversal is easiest to see.
+    """
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    mesh = model.mesh
+    value = _slip_component(model, component)
+
+    if ax is None:
+        ax = plt.figure(figsize=(13, 6)).add_subplot(projection="3d")
+    elif not hasattr(ax, "add_collection3d"):
+        raise TypeError(
+            "plot_slip_3d needs a 3-D axes; make one with "
+            "fig.add_subplot(projection='3d')"
+        )
+
+    coll = Poly3DCollection(mesh.vertices / 1e3, cmap=cmap,
+                            edgecolors=edgecolors, linewidths=0.15)
+    # Poly3DCollection ignores `array=` in the constructor, unlike PolyCollection.
+    coll.set_array(value)
+    _scale_slip(coll, value, component, vmin, vmax)
+    ax.add_collection3d(coll)
+
+    nodes = mesh.nodes / 1e3
+    ax.set_xlim(nodes[:, 0].min(), nodes[:, 0].max())
+    ax.set_ylim(nodes[:, 1].min(), nodes[:, 1].max())
+    ax.set_zlim(nodes[:, 2].min(), nodes[:, 2].max())
+
+    span = nodes.max(axis=0) - nodes.min(axis=0)
+    stretch = np.full(3, float(exaggeration))
+    stretch[int(np.argmax(span))] = 1.0
+    # Guard a degenerate axis (a single depth level, say) so the box stays valid.
+    ax.set_box_aspect(np.maximum(span / span.max() * stretch, 1e-3))
+
+    if trace is not None and mesh.frame is not None:
+        tx, ty = trace.to_local(mesh.frame)
+        ax.plot(tx / 1e3, ty / 1e3, np.zeros_like(tx), "r-", lw=1.4, zorder=5)
+
+    ax.view_init(elev=view[0], azim=view[1])
+    ax.set_xlabel("East (km)", labelpad=18)
+    ax.set_ylabel("North (km)", labelpad=8)
+    ax.set_zlabel("Depth (km)", labelpad=2)
+    ax.tick_params(labelsize=7, pad=1)
+    ax.set_title(_slip_title(model, component) if title is None else title)
+    # A roomier pad than the flat panels use: a 3-D axes reserves no space for
+    # its z label, so a tight colorbar lands on top of "Depth (km)".
+    ax.figure.colorbar(coll, ax=ax, label="Slip (m)", shrink=0.6, pad=0.10)
     return ax.figure, ax
 
 
