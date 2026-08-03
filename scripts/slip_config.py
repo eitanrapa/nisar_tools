@@ -435,6 +435,7 @@ def mesh_summary(mesh):
     """
     out = {"kind": mesh.attrs.get("kind", "vertical"),
            "n_elements": int(mesh.n_elements),
+           "n_nodes": int(mesh.n_nodes),
            "n_down": int(mesh.attrs.get("n_down", 0))}
     out.update({k: float(v) for k, v in MESH.items()})
     for key in ("dip_deg", "bias_w", "smoothness", "min_curvature_radius",

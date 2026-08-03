@@ -28,6 +28,7 @@ from slip_config import OUT_DIR
 
 #: Everything `run_inversion.py` writes, and nothing else.
 STAGE_E_FILES = ("slip_model.slip.zip", "slip_model.txt", "summary.json",
+                 "vert_nodes.txt", "vert_elements.txt",
                  "slip_model_UNCONVERGED.slip.zip")
 STAGE_E_FIGS = ("slip.png", "slip_strike.png", "fit_*.png")
 

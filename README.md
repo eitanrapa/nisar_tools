@@ -695,6 +695,32 @@ it. `SlipModel.load` gives back a model that reports every statistic, re-exports
 plots and forward-models new points. `to_text` writes SlipSolve's ten-column
 element table, so existing GMT scripts work unchanged.
 
+`model.to_vertex_text(dir)` writes the two files that let the fault be *rebuilt*,
+which the element table cannot — it describes elements only by their centroids:
+
+| file | rows | columns |
+|---|---|---|
+| `vert_nodes.txt` | one per node | `node_id longitude_deg latitude_deg depth_m along_strike_m strike_slip_m dip_slip_m area_m2 shear_modulus_pa` |
+| `vert_elements.txt` | one per element | `element_id node_1 node_2 node_3` |
+
+Same conventions as `slip_model.txt` throughout: tab-delimited, one header line,
+depth in metres negative-down, slip in metres with positive strike-slip
+left-lateral, **1-based** ids. `element_id` is the same numbering, so row *i* of
+`vert_elements.txt` is row *i* of `slip_model.txt` — the two join without a key.
+
+- **Slip is reported at the nodes**, which under `basis="node"` is what was
+  actually solved for, rather than the per-element mean `to_text` prints. For an
+  element-basis model the values are scattered onto nodes area-weighted instead.
+- **`area_m2` is the node's lumped area** — a third of its 1-ring — so the rows
+  partition the fault and `sum(shear_modulus × area × |slip|)` reproduces
+  `model.moment()` exactly for a nodal model.
+- ⚠️ **That sum does not match the same sum over `slip_model.txt`**, and should not
+  be expected to: the area-weighted scatter conserves each slip *component*
+  exactly (to 3e-16), but a magnitude is not linear — an element's value is the
+  mean of three vectors, which is shorter than the mean of their lengths whenever
+  they disagree. Measured, the two magnitude sums differ by about 0.9%. Neither is
+  a check on the other.
+
 The Green's matrix is deliberately *not* saved: it is the largest object in the
 problem and nothing downstream of a solved model needs it. A loaded model
 therefore **cannot be re-solved at a new weight** — rebuild the `SlipInversion`

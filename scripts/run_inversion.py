@@ -62,11 +62,17 @@ def main():
 
     model.save(OUT_DIR / "slip_model.slip.zip")
     model.to_text(OUT_DIR / "slip_model.txt", shear_modulus=VELOCITY_MODEL)
+    model.to_vertex_text(OUT_DIR, shear_modulus=VELOCITY_MODEL)
 
-    strike = model.strike_slip
+    # Per *element*, deliberately: `model.strike_slip` is the parameter vector, so
+    # under basis="node" it has one entry per node and reporting a fraction of it
+    # as a fraction of elements is off by the whole node/element distinction.
+    strike = model.element_slip[:, 0]
     summary = {
         "n_observations": int(obs.n),
         "n_elements": int(mesh.n_elements),
+        "n_nodes": int(mesh.n_nodes),
+        "basis": model.basis.name,
         "n_parameters": int(inversion.n_param),
         "tracks": obs.tracks,
         "smoothing": float(SMOOTHING),

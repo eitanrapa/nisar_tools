@@ -340,6 +340,85 @@ def test_to_dataset_and_text(recovery, tmp_path):
     assert -180.0 < table[:, 1].min() and table[:, 1].max() < 180.0
 
 
+def test_vertex_tables_rebuild_the_element_table(recovery, tmp_path):
+    """The load-bearing check on the vertex pair: the join has to close.
+
+    Averaging each triangle's three nodal slips must give back the element value
+    ``slip_model.txt`` reports. That single assertion pins the connectivity
+    indexing, the 1-based offset and the column order all at once -- an off-by-one
+    in any of them scatters slip onto the wrong corners and still writes a
+    plausible-looking file.
+
+    A **nodal** model, because there the identity is exact by construction: the
+    element value simply *is* the mean of its three nodes. For an element model the
+    node values come from a lossy scatter and the round trip smooths, so what
+    survives there is the componentwise integral, tested separately below.
+    """
+    mesh, _, obs, _ = recovery
+    model = SlipInversion(mesh, obs, basis="node").solve(
+        smoothing=0.3, polarity=(-1, 0, 0))
+
+    node_path, element_path = model.to_vertex_text(tmp_path)
+    assert node_path.name == "vert_nodes.txt"
+    assert element_path.name == "vert_elements.txt"
+
+    nodes = np.loadtxt(node_path, skiprows=1)
+    elements = np.loadtxt(element_path, skiprows=1, dtype=int)
+    assert nodes.shape == (mesh.n_nodes, 9)
+    assert elements.shape == (mesh.n_elements, 4)
+
+    # 1-based throughout, and every index addresses a row of the node table.
+    np.testing.assert_array_equal(elements[:, 0], np.arange(1, mesh.n_elements + 1))
+    assert elements[:, 1:].min() == 1
+    assert elements[:, 1:].max() == mesh.n_nodes
+
+    connectivity = elements[:, 1:] - 1
+    for column, component in ((5, 0), (6, 1)):
+        np.testing.assert_allclose(nodes[:, column][connectivity].mean(axis=1),
+                                   model.element_slip[:, component], atol=1e-9)
+
+    # Element ids join row for row with the element table.
+    table = np.loadtxt(model.to_text(tmp_path / "slip_model.txt"), skiprows=1)
+    np.testing.assert_array_equal(elements[:, 0], table[:, 0].astype(int))
+    # Geographic, not local metres; depth negative-down like `to_text`'s column 4.
+    assert -180.0 < nodes[:, 1].min() and nodes[:, 1].max() < 180.0
+    assert nodes[:, 3].max() == 0.0 and nodes[:, 3].min() < 0.0
+
+
+def test_nodal_slip_conserves_the_slip_integral_componentwise(setup, recovery):
+    """The element -> node scatter is area-weighted, so it conserves each component.
+
+    Exactly, because ``P``'s rows sum to one and ``lumped_areas == P.T @ areas``.
+    It does **not** conserve the sum of slip *magnitudes* -- an element value is
+    the mean of three vectors, which is shorter than the mean of their lengths --
+    so the two differ by about a percent and neither is a check on the other.
+    """
+    from nisar_tools.slip.basis import NodeBasis
+
+    mesh, _, obs, _ = recovery
+    model = SlipInversion(mesh, obs, ramp="linear", basis="element").solve(
+        smoothing=0.3, polarity=(-1, 0, 0))
+
+    nodal = model.nodal_slip()
+    assert nodal.shape == (mesh.n_nodes, 2)
+    lumped = NodeBasis(mesh).lumped_areas()
+    for component in (0, 1):
+        np.testing.assert_allclose((lumped * nodal[:, component]).sum(),
+                                   (mesh.areas * model.element_slip[:, component]).sum(),
+                                   rtol=1e-12)
+
+
+def test_nodal_slip_is_the_parameter_vector_for_a_nodal_model(recovery):
+    """No transformation at all when the nodes are what was solved for."""
+    mesh, _, obs, _ = recovery
+    model = SlipInversion(mesh, obs, ramp="linear", basis="node").solve(
+        smoothing=0.3, polarity=(-1, 0, 0))
+
+    nodal = model.nodal_slip()
+    np.testing.assert_array_equal(nodal[:, 0], model.strike_slip)
+    np.testing.assert_array_equal(nodal[:, 1], model.dip_slip)
+
+
 def test_unconverged_models_refuse_to_export(recovery, tmp_path):
     """An iteration-capped solve has a meaningless fit; it must not be written out."""
     _, _, _, inversion = recovery
@@ -349,6 +428,8 @@ def test_unconverged_models_refuse_to_export(recovery, tmp_path):
     assert "UNCONVERGED" in repr(model)
     with pytest.raises(ValueError, match="unconverged"):
         model.to_text(tmp_path / "bad.txt")
+    with pytest.raises(ValueError, match="unconverged"):
+        model.to_vertex_text(tmp_path)
 
 
 def test_persist_round_trip(recovery, tmp_path):

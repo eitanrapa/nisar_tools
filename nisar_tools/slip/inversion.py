@@ -700,6 +700,76 @@ class SlipModel:
             ds.attrs["ramp"] = dict(zip(self.ramp_labels, self.ramp.tolist()))
         return ds
 
+    # -- shared by the text writers ----------------------------------------
+    def _refuse_if_unconverged(self):
+        """A capped solve's slip is not an answer, so it does not get written."""
+        if not self.converged:
+            raise ValueError(
+                "Refusing to write an unconverged model "
+                f"(solver status {self.result.status}, {self.result.nit} iterations). "
+                "Raise max_iter or increase the smoothing weight."
+            )
+
+    def _lonlat(self, points):
+        """Geographic coordinates of local-frame ``(n, 2+)`` points."""
+        if self.mesh.frame is None:
+            raise ValueError(
+                "Writing a geographic table needs the mesh's LocalFrame; this mesh "
+                "has none. Rebuild it with frame= so its nodes can be projected."
+            )
+        return self.mesh.frame.to_lonlat(*points[:, :2].T)
+
+    def _mu_at(self, shear_modulus, depths):
+        """Rigidity at each depth: what was passed, else the run's own, else 30 GPa.
+
+        Sampling at the caller's own depths is why this is shared rather than
+        computed once -- an element table wants it at centroids and a node table at
+        nodes, and a layered model gives different answers at the two.
+        """
+        if shear_modulus is None:
+            model = getattr(self._inversion, "velocity_model", None) or \
+                self.options.get("velocity_model")
+            if model is None:
+                shear_modulus = DEFAULT_SHEAR_MODULUS
+            else:
+                from .edgrn import VelocityModel
+
+                shear_modulus = (model if hasattr(model, "at")
+                                 else VelocityModel.from_dict(model))
+        if hasattr(shear_modulus, "at"):
+            shear_modulus = shear_modulus.at(depths, "mu")
+        return np.broadcast_to(np.asarray(shear_modulus, dtype=float), np.shape(depths))
+
+    def nodal_slip(self):
+        """``(n_nodes, 2)`` slip at the mesh's nodes, whatever the basis.
+
+        For a nodal model these *are* the parameters -- ``strike_slip`` and
+        ``dip_slip`` are already indexed like ``mesh.nodes``, so nothing is
+        transformed. For an element model the element values are scattered back
+        onto the nodes area-weighted.
+
+        That scatter conserves the slip integral **componentwise and exactly**:
+        ``P``'s rows sum to one and ``lumped_areas == P.T @ areas``, so
+        ``sum(lumped_areas * nodal) == sum(areas * element)`` for strike and dip
+        slip separately (measured: agreement to 3e-16). It does **not** conserve
+        the sum of slip *magnitudes*, because a magnitude is not linear -- an
+        element's value is the mean of three nodes, and the mean of three vectors
+        is shorter than the mean of their lengths whenever they disagree. Measured
+        on the recovery fixture the two magnitude sums differ by 0.9%, so do not
+        use one as a check on the other.
+        """
+        if self.basis.name == "node":
+            return np.column_stack([self.strike_slip, self.dip_slip])
+
+        from .basis import NodeBasis
+
+        nodal = NodeBasis(self.mesh)
+        scatter, lumped = nodal.projection().T, nodal.lumped_areas()
+        element = self.element_slip
+        return np.column_stack([
+            (scatter @ (self.mesh.areas * element[:, i])) / lumped for i in (0, 1)
+        ])
+
     def to_text(self, path, shear_modulus=None):
         """Write the reference implementation's ten-column element table.
 
@@ -712,27 +782,9 @@ class SlipModel:
         moment in it was actually computed with rather than a constant that may not
         be the one used.
         """
-        if not self.converged:
-            raise ValueError(
-                "Refusing to write an unconverged model "
-                f"(solver status {self.result.status}, {self.result.nit} iterations). "
-                "Raise max_iter or increase the smoothing weight."
-            )
-        lon, lat = self.mesh.frame.to_lonlat(*self.mesh.centroids[:, :2].T)
-        if shear_modulus is None:
-            model = getattr(self._inversion, "velocity_model", None) or \
-                self.options.get("velocity_model")
-            if model is None:
-                shear_modulus = DEFAULT_SHEAR_MODULUS
-            else:
-                from .edgrn import VelocityModel
-
-                shear_modulus = (model if hasattr(model, "at")
-                                 else VelocityModel.from_dict(model))
-        if hasattr(shear_modulus, "at"):
-            shear_modulus = shear_modulus.at(self.mesh.centroids[:, 2], "mu")
-        mu = np.broadcast_to(np.asarray(shear_modulus, dtype=float),
-                             (self.mesh.n_elements,))
+        self._refuse_if_unconverged()
+        lon, lat = self._lonlat(self.mesh.centroids)
+        mu = self._mu_at(shear_modulus, self.mesh.centroids[:, 2])
         element = self.element_slip
         table = np.column_stack([
             np.arange(1, self.mesh.n_elements + 1), lon, lat,
@@ -743,6 +795,78 @@ class SlipModel:
                   "dip_deg\tstrike_slip_m\tdip_slip_m\tarea_m2\tshear_modulus_pa")
         np.savetxt(path, table, delimiter="\t", header=header, comments="")
         return path
+
+    def to_vertex_text(self, outdir, shear_modulus=None):
+        """Write the mesh's vertices and its connectivity as two tables.
+
+        ``to_text`` describes elements by their *centroids*, which is enough to map
+        slip but not to rebuild the fault: it says nothing about where a triangle's
+        corners are or which triangles share one. This pair does, and it reports
+        slip **at the nodes** -- which for ``basis="node"`` is what was actually
+        solved for, rather than the per-element mean ``to_text`` prints.
+
+        ``vert_nodes.txt``, one row per node::
+
+            node_id longitude_deg latitude_deg depth_m along_strike_m
+            strike_slip_m dip_slip_m area_m2 shear_modulus_pa
+
+        ``vert_elements.txt``, one row per element::
+
+            element_id node_1 node_2 node_3
+
+        Conventions follow :meth:`to_text` throughout: tab-delimited, one header
+        line, depth in metres negative-down, slip in metres with positive
+        strike-slip left-lateral, and **1-based** ids. ``element_id`` is the same
+        numbering ``to_text`` uses, so row *i* of ``vert_elements.txt`` is row *i* of
+        ``slip_model.txt`` -- the two join without a key.
+
+        ``area_m2`` is the node's **lumped** area -- a third of its 1-ring -- not an
+        element area, so the rows are a partition of the fault and
+        ``sum(shear_modulus * area * hypot(strike_slip, dip_slip))`` over this file
+        reproduces :meth:`moment` exactly for a nodal model. It does not agree with
+        the same sum over ``slip_model.txt`` to better than about a percent; see
+        :meth:`nodal_slip` for why that is expected rather than an inconsistency.
+
+        Returns both paths.
+        """
+        from pathlib import Path
+
+        from .basis import NodeBasis
+
+        self._refuse_if_unconverged()
+        nodes = self.mesh.nodes
+        lon, lat = self._lonlat(nodes)
+        slip = self.nodal_slip()
+
+        outdir = Path(outdir)
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        node_table = np.column_stack([
+            np.arange(1, self.mesh.n_nodes + 1), lon, lat, nodes[:, 2],
+            self.mesh.params[:, 0], slip[:, 0], slip[:, 1],
+            NodeBasis(self.mesh).lumped_areas(),
+            self._mu_at(shear_modulus, nodes[:, 2]),
+        ])
+        node_path = outdir / "vert_nodes.txt"
+        # `node_id` as an integer, the rest at numpy's default precision: these two
+        # files are joined on their id columns, so an id that reads back as
+        # 1.000000000000000000e+00 in one and 1 in the other is a trap for anything
+        # matching them as text.
+        np.savetxt(node_path, node_table, delimiter="\t", comments="",
+                   fmt=["%d"] + ["%.18e"] * 8,
+                   header=("node_id\tlongitude_deg\tlatitude_deg\tdepth_m\t"
+                           "along_strike_m\tstrike_slip_m\tdip_slip_m\tarea_m2\t"
+                           "shear_modulus_pa"))
+
+        # Integer format: a connectivity index written as 1.000000000000000000e+00
+        # is read back as a float by every consumer and silently indexes nothing.
+        element_path = outdir / "vert_elements.txt"
+        np.savetxt(element_path,
+                   np.column_stack([np.arange(1, self.mesh.n_elements + 1),
+                                    self.mesh.triangles + 1]),
+                   delimiter="\t", fmt="%d", comments="",
+                   header="element_id\tnode_1\tnode_2\tnode_3")
+        return [node_path, element_path]
 
     def persist(self, workspace, name=None, overwrite=False, **params):
         name = name or self.STAGE
