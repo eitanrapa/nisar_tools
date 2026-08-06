@@ -8,6 +8,8 @@ broadcasting over the pair/time dimension.
 imported lazily inside the function rather than at module load.
 """
 
+import warnings
+
 import numpy as np
 import rioxarray  # noqa: F401
 import xarray as xr
@@ -19,6 +21,11 @@ from . import geo
 # destination keeps the reprojection well posed; beyond ~2x the coastline moves
 # by well under a pixel and only costs time.
 _MASK_OVERSAMPLE = 2
+
+#: Warn above this many GMT nodes (~200 MB of float32, plus a reproject of the
+#: same order). The mask tracks the *target* pixel, so this is only reachable at
+#: or near a GSLC's native posting -- see :func:`_warn_if_oversized`.
+_MASK_NODE_BUDGET = 5e7
 
 
 def grid_spacing_arg(x_coords, y_coords, epsg_code, oversample=_MASK_OVERSAMPLE):
@@ -46,6 +53,73 @@ def grid_spacing_arg(x_coords, y_coords, epsg_code, oversample=_MASK_OVERSAMPLE)
     if pyproj.CRS.from_epsg(int(epsg_code)).is_geographic:
         return step
     return f"{step}e"
+
+
+#: Metres per degree, for turning a region span into node counts. Only ever used
+#: against an order-of-magnitude budget, so the spheroid's flattening is noise.
+_M_PER_DEG = 111_000.0
+
+
+def _parse_increment(spacing):
+    """GMT ``-I`` increment as ``(value, unit)``, or ``None`` if not a length.
+
+    A bare number is degrees, ``s`` is arc-seconds and ``e`` is metres. Anything
+    else (``m``, ``k``, GMT's ``+n`` node counts) is left alone rather than
+    guessed at.
+    """
+    text = str(spacing).strip()
+    try:
+        if text.endswith("e"):
+            return float(text[:-1]), "m"
+        if text.endswith("s"):
+            return float(text[:-1]) / 3600.0, "deg"
+        return float(text), "deg"
+    except ValueError:
+        return None
+
+
+def _warn_if_oversized(region, spacing):
+    """Warn before asking GMT for a coastline far finer than it carries.
+
+    :func:`grid_spacing_arg` tracks the *target* pixel, which is the right rule
+    for a multilooked stack and an expensive one at a GSLC's native posting: the
+    node count goes as the inverse square of the increment, so the same crop that
+    needs 2.7e5 nodes at 150 m needs **2.4e8** at 5 m, and a whole frame needs
+    1.1e10 (~44 GB of float32). GSHHG carries nothing like that much shoreline
+    detail, so the extra nodes buy no accuracy at all.
+
+    A warning rather than a floor: masking at native resolution is a legitimate
+    thing to ask for, and quietly coarsening it would move the coastline by up to
+    half a pixel with nothing to show for it. The fix is to pass ``spacing``.
+    """
+    parsed = _parse_increment(spacing)
+    if parsed is None:
+        return
+    step, unit = parsed
+    if step <= 0:
+        return
+    lon_min, lon_max, lat_min, lat_max = region
+    mid_lat = (lat_min + lat_max) / 2
+    # Count in the increment's own units, so nothing has to be converted: GMT
+    # applies an angular increment in degrees on both axes, a length increment
+    # in metres on both.
+    if unit == "deg":
+        nodes = ((lat_max - lat_min) / step) * ((lon_max - lon_min) / step)
+    else:
+        lat_m = (lat_max - lat_min) * _M_PER_DEG
+        lon_m = (lon_max - lon_min) * _M_PER_DEG * np.cos(np.radians(mid_lat))
+        nodes = (lat_m / step) * (lon_m / step)
+    if nodes <= _MASK_NODE_BUDGET:
+        return
+    warnings.warn(
+        f"Water mask at spacing {spacing!r} needs ~{nodes:.2g} GMT nodes "
+        f"(~{nodes * 4 / 1e9:.1f} GB of float32) for this region. The default "
+        "increment tracks the grid's own pixel, which at a GSLC's native posting "
+        "is far finer than the GSHHG shoreline resolves -- pass an explicit "
+        "spacing (e.g. spacing='50e' for 50 m) to cap it.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
@@ -85,6 +159,7 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
         lat_min - buffer,
         lat_max + buffer,
     ]
+    _warn_if_oversized(region_latlon, spacing)
 
     # maskvalues=[wet, dry]: ocean -> NaN, land -> 1, so multiplying a raster
     # by this mask keeps land and blanks water. (pygmt >= 0.12 renamed

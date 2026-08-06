@@ -9,8 +9,15 @@ import numpy as np
 import rioxarray  # noqa: F401
 import xarray as xr
 
-from . import geo
-from ._base import SPATIAL_CHUNK, RasterStackMixin, open_stage, wrapped_phase
+from . import _kernels, geo
+from ._base import (
+    SPATIAL_CHUNK,
+    RasterStackMixin,
+    open_stage,
+    plane_kernel,
+    row_plane_kernel,
+    wrapped_phase,
+)
 from .interferogram import InterferogramStack, make_pairs
 
 
@@ -146,6 +153,123 @@ class GSLCStack(RasterStackMixin):
         )
         return warp_onto_lattice(slc, tx, ty, src_epsg, self.epsg, resampling)
 
+    def mask_water(self, mask_cache=None, resolution="f", spacing=None,
+                   mask_name=None):
+        """Lazily mask water on the SLC. Returns a new stack.
+
+        The same coastline mask :meth:`InterferogramStack.mask_water
+        <nisar_tools.interferogram.InterferogramStack.mask_water>` applies, one
+        stage earlier. Masking here rather than after multilooking is what keeps
+        water out of the *estimate* as well as out of the product:
+        :meth:`form_interferograms` is NaN-aware, so a blanked pixel is dropped
+        from its window's average instead of contributing a decorrelated sample
+        to both the interferogram and its coherence. Pixels whose window then
+        falls below ``min_valid_fraction`` come out NaN, so the coastline is
+        widened by the multilook footprint rather than aliased onto it.
+
+        Lazy: the masked values are **not** written anywhere. Call
+        :meth:`persist` (under a new stage name) if you want them on disk.
+
+        ``mask_cache`` is a :class:`~nisar_tools.workspace.Workspace` used to
+        cache the *coastline mask itself*, keyed on the grid, so GMT is not
+        re-run for the same crop. It is not where the masked data goes.
+
+        ⚠️ ``spacing`` defaults to tracking this stack's own pixel size, and at
+        the SLC stage that is the GSLC's **native** posting -- 5 m on NISAR, so a
+        2.5 m coastline. That is ``looks``\\ ² times the nodes a multilooked stack
+        asks for: a 28 km crop goes from 2.7e5 nodes at 150 m to 2.4e8 at 5 m, and
+        a whole frame to 1.1e10 (~44 GB of float32). GSHHG carries nowhere near
+        that much shoreline detail, so the extra nodes buy nothing;
+        :func:`~nisar_tools.mask.make_water_mask` warns rather than coarsening
+        silently. Pass an explicit ``spacing`` (GMT's ``-I``; a bare number is
+        degrees, ``s`` is arc-seconds, **``e`` is metres**) to cap it -- e.g.
+        ``spacing="50e"`` places the coastline within 50 m while asking for 20x
+        fewer nodes per axis than the 2.5 m default.
+
+        ``resolution`` is the GMT coastline resolution; use a coarser value
+        (e.g. ``"i"``) if the full-resolution GSHHG dataset is unavailable.
+        ``mask_name`` overrides the cache store's name, which otherwise is
+        derived from the grid so masks for different grids coexist.
+        """
+        from .mask import grid_spacing_arg, water_mask_for_grid
+
+        # Resolve here so the recorded value (which feeds the stage hash) is
+        # the increment actually used, not a placeholder None.
+        if spacing is None:
+            spacing = grid_spacing_arg(self.x, self.y, self.epsg)
+
+        mask = water_mask_for_grid(
+            self.x, self.y, self.epsg, workspace=mask_cache, name=mask_name,
+            resolution=resolution, spacing=spacing,
+        )
+        ds = self.ds.copy()
+        # The mask is land=1 / water=NaN; ``where`` needs a boolean condition
+        # (NaN is truthy, so passing the raw mask would keep water pixels).
+        ds["slc"] = self.ds["slc"].where(mask.notnull())
+        ds.attrs.update(self.ds.attrs)
+        ds.attrs["water_mask"] = {"resolution": resolution, "spacing": spacing}
+        return GSLCStack(ds)
+
+    def mask_edges(self, edge_pixels=8, edges="along_track", target_blocks=None):
+        """Mask swath-edge effects on the SLC. Returns a new stack (lazy).
+
+        The same trim :meth:`UnwrappedStack.mask_edges
+        <nisar_tools.unwrap.UnwrappedStack.mask_edges>` applies, moved ahead of
+        multilooking. The near/far-range boundary is where the antenna pattern
+        rolls off and the returns decorrelate; left in place, those samples enter
+        the multilook window and bias both the interferogram *and* the coherence
+        that is supposed to flag them. Blanking them here removes them from the
+        NaN-aware average instead.
+
+        ⚠️ **``edge_pixels`` is in native GSLC pixels here**, not multilooked
+        ones -- 8 px is 40 m at NISAR's 5 m posting, which is nothing. To
+        reproduce a trim of ``N`` pixels applied after multilooking by ``looks``,
+        pass ``N * looks``.
+
+        ``edges="along_track"`` (default) trims only the near/far-range
+        boundaries, scanning each row for its first and last valid sample rather
+        than eroding the footprint -- so a coastline, a lake blanked by
+        :meth:`mask_water` and the frame's azimuth ends are all spared.
+        ``edges="all"`` instead erodes the whole finite footprint. See
+        :func:`~nisar_tools._kernels.along_track_edge_mask` for the geometry the
+        default assumes.
+
+        Complex data is masked to ``nan+0j``, which is the same "no data" the
+        unwritten out-of-swath chunks of a GSLC already decode to, so nothing
+        downstream sees a new kind of gap.
+        """
+        slc = self.ds["slc"]
+
+        if edges == "along_track":
+            # Support is the whole row (which sample is the row's first?), so
+            # there is no halo that would do -- x is gathered and the split runs
+            # along y, where rows are independent.
+            masked = row_plane_kernel(
+                _kernels.mask_edges, slc, target_blocks=target_blocks,
+                edge_pixels=int(edge_pixels), edges="along_track",
+            )
+        elif edges == "all":
+            # Erosion by ``edge_pixels`` cross iterations reaches exactly that
+            # far, so a matching halo decomposes it spatially and the result is
+            # identical to the whole-plane fit.
+            masked = plane_kernel(
+                _kernels.mask_edges, slc, depth=max(1, int(edge_pixels)),
+                target_blocks=target_blocks,
+                edge_pixels=int(edge_pixels), edges="all",
+            )
+        else:
+            raise ValueError(
+                f"edges must be 'along_track' or 'all', got {edges!r}"
+            )
+
+        ds = self.ds.copy()
+        ds["slc"] = masked
+        ds.attrs.update(self.ds.attrs)
+        ds.attrs["edges_masked"] = {
+            "edge_pixels": int(edge_pixels), "edges": edges,
+        }
+        return GSLCStack(ds)
+
     def form_interferograms(
         self, pairs="sequential", looks=5, downsample=True,
         convolution="Uniform", nan_aware=True, min_valid_fraction=0.5,
@@ -194,6 +318,12 @@ class GSLCStack(RasterStackMixin):
         name = name or self.STAGE
         ds = self.ds.chunk(self.disk_chunks("time"))
         full_params = {"stage": name, "epsg": self.epsg, **params}
+        # Only recorded once masked, so a plain slc_stage keeps the hash it had
+        # before these existed (and re-running with a new mask re-computes).
+        if self.ds.attrs.get("water_mask") is not None:
+            full_params["water_mask"] = self.ds.attrs["water_mask"]
+        if self.ds.attrs.get("edges_masked") is not None:
+            full_params["edges_masked"] = self.ds.attrs["edges_masked"]
         reopened = workspace.store(name, ds, full_params, overwrite=overwrite)
         return GSLCStack(reopened)
 

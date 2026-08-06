@@ -53,7 +53,7 @@ def wrapped_phase(da):
 
 
 def plane_kernel(func, field, depth, target_blocks=None, **kwargs):
-    """Run a 2-D plane kernel over a ``(pair, y, x)`` DataArray, chunk by chunk.
+    """Run a 2-D plane kernel over a ``(stack, y, x)`` DataArray, chunk by chunk.
 
     Wraps :func:`_kernels.halo_planes`, which overlaps the spatial axes by
     ``depth`` so the kernel decomposes across chunks instead of forcing one whole
@@ -63,17 +63,48 @@ def plane_kernel(func, field, depth, target_blocks=None, **kwargs):
     raster is usually the whole plane -- so it is rechunked to a working size first
     (see :func:`compute_chunks`), or there would be nothing to decompose.
 
-    Lives here rather than in ``unwrap`` because both ``InterferogramStack`` and
-    ``UnwrappedStack`` need it, and importing it from ``unwrap`` would drag that
-    module's top-level ``import snaphu`` into the interferogram stage.
+    The leading dimension is taken from ``field.dims[0]``, so this serves a
+    ``pair`` axis and a ``GSLCStack``'s ``time`` axis alike.
+
+    Lives here rather than in ``unwrap`` because ``GSLCStack``,
+    ``InterferogramStack`` and ``UnwrappedStack`` all need it, and importing it
+    from ``unwrap`` would drag that module's top-level ``import snaphu`` into the
+    earlier stages.
     """
     if _kernels._is_dask(field.data):
         working = compute_chunks(
             field.sizes["y"], field.sizes["x"], depth, target_blocks
         )
         if working is not None:
-            field = field.chunk({"pair": 1, "y": working[0], "x": working[1]})
+            field = field.chunk(
+                {field.dims[0]: 1, "y": working[0], "x": working[1]}
+            )
     data = _kernels.halo_planes(func, field.data, depth, **kwargs)
+    return xr.DataArray(
+        data, dims=field.dims, coords=field.coords, attrs=field.attrs,
+        name=field.name,
+    )
+
+
+def row_plane_kernel(func, field, target_blocks=None, **kwargs):
+    """Run a row-wise 2-D plane kernel over a ``(stack, y, x)`` DataArray.
+
+    Wraps :func:`_kernels.row_planes` for a kernel whose support is a whole
+    raster row, so it cannot be given a halo. ``x`` is gathered into one chunk
+    and the work is split along ``y`` instead; that is exact, not
+    exact-to-a-halo. Dims, coords and attrs are preserved.
+
+    Like :func:`plane_kernel`, the leading dimension comes from ``field.dims[0]``.
+    """
+    if _kernels._is_dask(field.data):
+        # Only y is free to split, so ask compute_chunks for the row band and
+        # ignore its x suggestion. halo=1: there is no overlap to amortise.
+        working = compute_chunks(
+            field.sizes["y"], field.sizes["x"], halo=1, target_blocks=target_blocks
+        )
+        if working is not None:
+            field = field.chunk({field.dims[0]: 1, "y": working[0], "x": -1})
+    data = _kernels.row_planes(func, field.data, **kwargs)
     return xr.DataArray(
         data, dims=field.dims, coords=field.coords, attrs=field.attrs,
         name=field.name,

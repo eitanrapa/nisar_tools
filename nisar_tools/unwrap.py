@@ -40,6 +40,7 @@ from ._base import (
     compute_chunks,
     open_stage,
     plane_kernel as _plane_kernel,
+    row_plane_kernel as _plane_kernel_rows,
 )
 
 # -- NASA GUNW HDF5 layout (verified from real granules) ----------------------
@@ -1098,29 +1099,6 @@ _SNAPHU_NOISE = (
     "only one tile--disregarding tile overlap values",
     "only one tile--disregarding multiprocessor option",
 )
-
-
-def _plane_kernel_rows(func, field, target_blocks=None, **kwargs):
-    """Run a row-wise 2-D plane kernel over a ``(pair, y, x)`` DataArray.
-
-    Wraps :func:`_kernels.row_planes` for a kernel whose support is a whole
-    raster row, so it cannot be given a halo. ``x`` is gathered into one chunk
-    and the work is split along ``y`` instead; that is exact, not
-    exact-to-a-halo. Dims, coords and attrs are preserved.
-    """
-    if _kernels._is_dask(field.data):
-        # Only y is free to split, so ask compute_chunks for the row band and
-        # ignore its x suggestion. halo=1: there is no overlap to amortise.
-        working = compute_chunks(
-            field.sizes["y"], field.sizes["x"], halo=1, target_blocks=target_blocks
-        )
-        if working is not None:
-            field = field.chunk({"pair": 1, "y": working[0], "x": -1})
-    data = _kernels.row_planes(func, field.data, **kwargs)
-    return xr.DataArray(
-        data, dims=field.dims, coords=field.coords, attrs=field.attrs,
-        name=field.name,
-    )
 
 
 def _plane_kernel_poly(field, degree, exclude, target_blocks=None):

@@ -139,6 +139,61 @@ Every stage is lazy and returns a new object; nothing reaches disk until
 `persist`. The sections below are the choices along that path that are worth
 making deliberately.
 
+### Masking before multilooking
+
+`mask_water` and `mask_edges` are also available on `GSLCStack`, one stage
+earlier than their `InterferogramStack` / `UnwrappedStack` counterparts. Both are
+lazy and record an attr that folds into the persist hash only once set, so an
+existing `slc_stack` store keeps the hash it already had.
+
+```python
+stack.mask_water(mask_cache=ws, spacing="50e").mask_edges(edge_pixels=8 * looks)
+```
+
+Masking here rather than later keeps the blanked samples out of the **estimate**
+as well as the product. `form_interferograms` is NaN-aware, so a blanked pixel is
+dropped from its multilook window's average instead of contributing a
+decorrelated sample to both the interferogram *and* the coherence that is
+supposed to flag it; windows that then fall below `min_valid_fraction` come out
+NaN, so the coastline is widened by the multilook footprint rather than aliased
+onto it.
+
+⚠️ **`edge_pixels` is in native GSLC pixels here**, not multilooked ones. 8 px is
+40 m at NISAR's 5 m posting — nothing. To reproduce a trim of `N` pixels applied
+after multilooking by `looks`, pass `N * looks`.
+
+⚠️ **Pass `spacing` to `mask_water` at this stage.** The default increment tracks
+the grid's own pixel, which is right for a multilooked stack and very expensive at
+a GSLC's native posting — the node count goes as the inverse square of the
+increment:
+
+| region | pixel | GMT increment | nodes | float32 |
+|---|---|---|---|---|
+| 28 km crop | 150 m | `75e` | 2.7e5 | 1 MB |
+| 28 km crop | 50 m | `25e` | 2.5e6 | 10 MB |
+| 28 km crop | **5 m (native)** | `2.5e` | **2.4e8** | **978 MB** |
+| full frame | 150 m | `75e` | 1.2e7 | 48 MB |
+| full frame | **5 m (native)** | `2.5e` | **1.1e10** | **44 GB** |
+
+GSHHG carries nowhere near that much shoreline detail, so the extra nodes buy no
+accuracy at all. `make_water_mask` raises a `RuntimeWarning` above ~5e7 nodes
+rather than coarsening silently — masking at native resolution is a legitimate
+thing to ask for, and quietly moving the coastline by half a pixel to save time
+you didn't ask to save is worse than saying so. `spacing="50e"` places the
+coastline within 50 m and asks for 20× fewer nodes per axis than the default.
+(GMT's `-I`: a bare number is degrees, `s` is arc-seconds, **`e` is metres**.)
+
+`InterferogramStack.mask_edges` exists too, for a stack already persisted past the
+SLC stage — same signature plus `min_coherence`, and `edge_pixels` back in
+multilooked pixels. Run before `unwrap`: the decorrelated fringe is residues for
+SNAPHU to resolve, and resolving them wrongly is what puts a 2π seam into the
+interior. Prefer the SLC-stage trim where the SLCs are still to hand, though —
+trimming at the igram stage blanks a value the multilook has *already* averaged
+the decorrelated samples into, including into the coherence that is meant to flag
+them. Both layers come out on one footprint; the edge scan runs on `igram` alone,
+because coherence is exactly `0.0` outside the swath rather than NaN and scanning
+it for a row's first valid sample would find column 0 on every row.
+
 ### Dropping territory the mainland can't reach
 
 A coastline mask leaves things stranded offshore — islets GSHHG calls land,

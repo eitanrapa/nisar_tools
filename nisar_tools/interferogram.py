@@ -18,6 +18,7 @@ from ._base import (
     compute_chunks,
     open_stage,
     plane_kernel,
+    row_plane_kernel,
     wrapped_phase,
 )
 
@@ -182,6 +183,76 @@ class InterferogramStack(RasterStackMixin):
         ds["coherence"] = self.ds["coherence"].where(keep)
         ds.attrs.update(self.ds.attrs)
         ds.attrs["water_mask"] = {"resolution": resolution, "spacing": spacing}
+        return InterferogramStack(ds)
+
+    def mask_edges(self, edge_pixels=8, min_coherence=None, edges="along_track",
+                   target_blocks=None):
+        """Mask swath-edge effects on the interferogram. Returns a new stack (lazy).
+
+        The same trim :meth:`UnwrappedStack.mask_edges
+        <nisar_tools.unwrap.UnwrappedStack.mask_edges>` applies, run before the
+        unwrap instead of after it: the decorrelated near/far-range fringe is
+        residues for SNAPHU to resolve, and resolving them wrongly is what puts a
+        2*pi seam into the interior. ``min_coherence`` additionally nulls pixels
+        below that coherence, which is the other standard way to keep residues
+        away from the solver.
+
+        ``edges="along_track"`` (default) trims only the near/far-range
+        boundaries, scanning each row for its first and last valid sample rather
+        than eroding the footprint -- so a coastline, a lake blanked by
+        :meth:`mask_water` and the frame's azimuth ends are all spared.
+        ``edges="all"`` erodes the whole finite footprint instead. See
+        :func:`~nisar_tools._kernels.along_track_edge_mask`.
+
+        ⚠️ **Prefer :meth:`GSLCStack.mask_edges
+        <nisar_tools.stack.GSLCStack.mask_edges>` where the SLCs are still to
+        hand.** Trimming here blanks a value the multilook has *already* averaged
+        the decorrelated samples into -- including into the coherence that is
+        supposed to flag them. Masking before multilooking drops them from that
+        average instead. This method is for a stack already persisted past the SLC
+        stage. Note ``edge_pixels`` is in multilooked pixels here, and in native
+        ones there.
+
+        Both ``igram`` and ``coherence`` end up on one footprint, as
+        :meth:`mask_water` does. The edge scan runs on ``igram`` alone: coherence
+        is exactly ``0.0`` outside the swath rather than NaN, so scanning it for a
+        row's first valid sample would find column 0 on every row.
+        """
+        igram = self.ds["igram"]
+        coherence = self.ds["coherence"]
+
+        if edges == "along_track":
+            # Support is the whole row (which sample is the row's first?), so
+            # there is no halo that would do -- x is gathered and the split runs
+            # along y, where rows are independent.
+            masked = row_plane_kernel(
+                _kernels.mask_edges, igram, target_blocks=target_blocks,
+                edge_pixels=int(edge_pixels), edges="along_track",
+            )
+        elif edges == "all":
+            # Erosion by ``edge_pixels`` cross iterations reaches exactly that
+            # far, so a matching halo is exact, not exact-to-a-halo.
+            masked = plane_kernel(
+                _kernels.mask_edges, igram, depth=max(1, int(edge_pixels)),
+                target_blocks=target_blocks,
+                edge_pixels=int(edge_pixels), edges="all",
+            )
+        else:
+            raise ValueError(
+                f"edges must be 'along_track' or 'all', got {edges!r}"
+            )
+
+        if min_coherence is not None:
+            masked = masked.where(coherence >= min_coherence)
+
+        ds = self.ds.copy()
+        ds["igram"] = masked
+        ds["coherence"] = coherence.where(masked.notnull())
+        ds.attrs.update(self.ds.attrs)
+        ds.attrs["edges_masked"] = {
+            "edge_pixels": int(edge_pixels), "min_coherence": min_coherence,
+            "edges": edges,
+        }
         return InterferogramStack(ds)
 
     def remove_unconnected_regions(self, min_size=None, connectivity=1,
@@ -353,6 +424,8 @@ class InterferogramStack(RasterStackMixin):
             full["goldstein"] = self.ds.attrs["goldstein"]
         if self.ds.attrs.get("water_mask") is not None:
             full["water_mask"] = self.ds.attrs["water_mask"]
+        if self.ds.attrs.get("edges_masked") is not None:
+            full["edges_masked"] = self.ds.attrs["edges_masked"]
         if self.ds.attrs.get("unconnected_removed") is not None:
             full["unconnected_removed"] = self.ds.attrs["unconnected_removed"]
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
