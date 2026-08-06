@@ -133,7 +133,8 @@ and the LOS geometry comes from the granule's own `metadata/radarGrid` cube.
 
 ## Pipeline
 
-`GSLC` → `GSLCStack` → `InterferogramStack` → `UnwrappedStack` → `LOSStack`.
+`GSLC` → `GSLCStack` → `InterferogramStack` → `UnwrappedStack` → `LOSStack`,
+with `GSLCStack` → `PixelOffsetStack` branching off for amplitude offset tracking.
 Every stage is lazy and returns a new object; nothing reaches disk until
 `persist`. The sections below are the choices along that path that are worth
 making deliberately.
@@ -254,6 +255,75 @@ returns pixel *indices* instead of lon/lat, with no error — data right,
 georeferencing wrong, nothing downstream notices. That is why the `gmt` engine is
 deliberately not used; NetCDF-4 grids are read with h5py directly, verified
 bit-identical to pygmt.
+
+### Pixel offsets
+
+Amplitude offset tracking, a port of GMTSAR's `xcorr` in its default
+frequency-domain mode. It measures the shift of the backscatter pattern between
+two acquisitions by cross-correlating their amplitude on a coarse lattice — the
+measurement that survives where the interferogram decorrelates, which is the near
+field of a large earthquake.
+
+```python
+offsets = stack.pixel_offsets(step=64)            # or nx=16, ny=32 (xcorr's -nx/-ny)
+offsets = offsets.persist(ws, "offsets")
+offsets.to_text("offsets/")                       # freq_xcorr_pair0.dat
+offsets.to_grd("offsets/")                        # x_offset, y_offset, correlation
+fig, axes = offsets.plot_offsets(pair=0, min_correlation=20)
+```
+
+`PixelOffsetStack` is a georeferenced raster like any other stage, so `crop`,
+`persist` and `to_grd` work on it unchanged.
+
+**What the offsets mean, and what they are not.** `xcorr` runs on radar-geometry
+SLCs, where the two images are unaligned and the offsets are a *coregistration*
+solution in range and azimuth. A NISAR GSLC is **geocoded**: the pair already
+shares one map grid, so there is nothing to coregister, and what comes out is a
+shift in map x/y — ground displacement. That is why the fields are `x_offset` and
+`y_offset` rather than range and azimuth. They are not literally range/azimuth
+offsets and converting them to a 3-D displacement vector needs the geocoding
+geometry, which this does not attempt.
+
+- **Sign**: an offset is positive when the feature sits at a **larger index** in
+  the secondary — `sec_position - ref_position`, the same convention as `xcorr`.
+  `east_offset` and `north_offset` give metres. The northing flip is free, since
+  `y_spacing` is stored signed and is negative on a north-up grid, so a positive
+  `y_offset` (southward) comes out as a negative northing.
+- ⚠️ **A high correlation does not mean an accurate offset.** The `correlation`
+  column is `xcorr`'s own normalised value ×100, the number `fitoffset.csh`
+  thresholds at 20. On a band-limited synthetic field every window scored 96–97
+  while individual offsets scattered by up to **0.4 px**; the correlation says
+  the match is real, not that it is precise. Judge the population, not a location.
+- **`subpixel_window` defaults to 16, not `xcorr`'s 8.** The refinement
+  FFT-interpolates that window, i.e. treats it as periodic, and at 8 samples the
+  correlation peak has not decayed by its edges. Measured worst-case bias over
+  fractional shifts: **0.153 px at 8, 0.040 at 16, 0.130 at 32**. Raising
+  `interp_factor` does *not* help. Pass `subpixel_window=8` to reproduce GMTSAR.
+- **Out-of-swath NaN is handled**; `xcorr` has no concept of it. A window with
+  less than `min_valid_fraction` (0.5) finite samples returns NaN with correlation
+  0, and does not contaminate its neighbours.
+- The window defaults are GMTSAR's: `nx_corr=ny_corr=128`, `xsearch=ysearch=64`,
+  i.e. at NISAR's ~10 m posting a 1.3 km template searched over ±640 m. The
+  transformed patch is `ny_corr + 2*ysearch` by `nx_corr + 2*xsearch`.
+- `x_shift`/`y_shift` centre the search on a known bulk displacement (`xcorr`'s
+  PRM `rshift`/`ashift`) and are added back into the answer.
+
+**The ASCII file is byte-compatible with `xcorr`'s.** `to_text` writes
+`x_pixel x_offset y_pixel y_offset correlation` under `print_results.c`'s own
+format string, leading and trailing space included, so `fitoffset.csh` and any
+`awk '{if ($5 > 20) ...}'` on top of it work unchanged. Pixel indices are 0-based
+and index the **source** GSLC grid, not the coarse lattice. There is no header by
+default, because `xcorr` writes none and an unprefixed one would be compared
+numerically by `awk`; `comment=` opts into `#`-prefixed provenance lines.
+
+Measured on the two real D_071 granules (12 days apart, 5 m posting, a 28 km
+crop): **1015 locations/s**, 97.4% of locations above correlation 20. Their
+integer offset is exactly 0 everywhere — the products are co-registered to the
+whole pixel — over a **uniform** sub-pixel −0.125 px in x and −0.0625 px in y,
+i.e. a real 0.63 m / 0.31 m geolocation difference between the two granules
+rather than anything moving. Correlating one granule against *itself* returns
+0.000 at every location, and a planted whole-pixel shift comes back as the
+planted value plus exactly that same offset.
 
 ### Exporting to GMT `.grd`
 

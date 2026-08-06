@@ -14,6 +14,8 @@ Typical flow::
     igrams = stack.form_interferograms(looks=5).persist(ws, "igrams")
     igrams = igrams.filter_goldstein(alpha=0.5)   # adaptive phase filter
     unw = igrams.unwrap(ws, nproc=8)
+
+    offsets = stack.pixel_offsets(step=64)        # amplitude offset tracking
 """
 
 from . import download
@@ -23,6 +25,7 @@ from .gslc import GSLC
 from .stack import GSLCStack
 from .interferogram import InterferogramStack, make_pairs
 from .los import LOSStack
+from .offsets import PixelOffsetStack
 # Everything needed to set up an inversion, at either end of the three choices
 # (vertical/curved geometry, homogeneous/layered medium, element/nodal slip).
 # The rest of the subpackage -- the samplers, diagnostics and plotting -- stays on
@@ -60,6 +63,7 @@ __all__ = [
     "LOSStack",
     "LayeredPointSource",
     "Observations",
+    "PixelOffsetStack",
     "SlipInversion",
     "SlipModel",
     "UnwrappedStack",

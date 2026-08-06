@@ -1,5 +1,5 @@
 """Numeric kernels for multilooking, interferogram formation, Goldstein phase
-filtering, and SNAPHU sizing.
+filtering, sub-pixel offset tracking, and SNAPHU sizing.
 
 The multilook/interferogram numerics are ported verbatim from the original
 procedural module (kept as ``tests/legacy_reference.py``, the equivalence-test
@@ -18,6 +18,14 @@ exactly, and that is what the equivalence tests pin.
 whole-plane operation validated by its own properties -- an exact ``alpha=0``
 round-trip, phase-noise reduction, and NaN preservation -- rather than against
 the legacy oracle.
+
+:func:`pixel_offsets` has no legacy counterpart either. It ports GMTSAR's
+``xcorr`` in its default frequency-domain mode, and is pinned by properties --
+recovery of a planted integer and sub-pixel shift, and agreement with the
+brute-force time-domain correlator in ``tests/offset_reference.py``, which stands
+in for the ``-time`` mode this deliberately does not port. Unlike every other
+kernel here its output lives on a *coarser* grid than its input, so it cannot go
+through :func:`halo_planes`; :func:`pixel_offsets_dask` decomposes it instead.
 """
 
 import math
@@ -639,6 +647,456 @@ def goldstein_filter_planes(arr, coherence=None, *, alpha=0.5, patch_size=32,
         out[k] = goldstein_filter(flat[k], alpha, patch_size, overlap, psd_smooth,
                                   coherence=ck, **window)
     return out.reshape(arr.shape)
+
+
+# -- sub-pixel amplitude cross-correlation: pixel offsets (GMTSAR xcorr) ------
+
+
+def offset_locations(n, window, count=None, step=None, shift=0):
+    """Window start indices for a correlation-location lattice along one axis.
+
+    Every origin ``o`` satisfies ``o >= 0``, ``o + window <= n`` **and** the same
+    for the secondary's window at ``o + shift``, so both patches lie wholly inside
+    the raster. That inset by half a window at each end is the whole constraint;
+    GMTSAR's :file:`get_locations.c` additionally adds two range columns and drops
+    the first and last "because the data have been extended", which is an artefact
+    of range-compressed SLC padding and has no analogue on a geocoded grid.
+
+    Exactly one of ``count`` (GMTSAR's ``-nx``/``-ny``: that many locations) or
+    ``step`` (the gap between locations, in pixels) must be given. Both produce an
+    **exactly uniform** lattice -- ``count`` rounds the gap down to a whole number
+    of pixels rather than spreading the locations to the far edge -- because the
+    result is a georeferenced raster and rioxarray needs a uniform grid to build
+    its affine transform.
+    """
+    n = int(n)
+    window = int(window)
+    shift = int(shift)
+    if (count is None) == (step is None):
+        raise ValueError("give exactly one of count= or step=")
+
+    # The reference window needs o in [0, n - window]; the secondary's, shifted by
+    # ``shift``, needs o in [-shift, n - shift - window]. Intersect the two.
+    lo = max(0, -shift)
+    span = min(n, n - shift) - window - lo  # last usable origin, relative to lo
+    if span < 0:
+        raise ValueError(
+            f"a {window}-pixel window with an a-priori shift of {shift} does not "
+            f"fit in an axis of {n} samples; use a smaller search or "
+            "correlation window"
+        )
+
+    if count is not None:
+        count = int(count)
+        if count < 1:
+            raise ValueError(f"count must be >= 1, got {count}")
+        if count == 1:
+            return np.array([lo + span // 2], dtype=int)
+        gap = span // (count - 1)
+        if gap < 1:
+            raise ValueError(
+                f"{count} locations do not fit in the {span + 1} usable origins "
+                f"of an axis of {n} samples; use a smaller count"
+            )
+        return lo + gap * np.arange(count, dtype=int)
+
+    step = int(step)
+    if step < 1:
+        raise ValueError(f"step must be >= 1, got {step}")
+    return lo + np.arange(0, span + 1, step, dtype=int)
+
+
+def offset_centre_pixels(origins, window):
+    """The reference-grid pixel index each correlation window is attributed to.
+
+    GMTSAR's ``loc[].x``/``loc[].y``, the values its ASCII output names: the patch
+    runs from ``centre - npx/2``, so the centre is ``origin + window // 2``. An
+    index rather than a half-sample position, so the export names a real pixel and
+    the product's map coordinate can be that pixel's own coordinate.
+    """
+    return np.asarray(origins, dtype=int) + int(window) // 2
+
+
+def _fft_oversample(patches, factor):
+    """FFT-interpolate the trailing two axes of ``patches`` by an integer factor.
+
+    A port of GMTSAR's ``fft_arrange_interpolate``: the spectrum's positive
+    frequencies stay at the front of the longer axis and its negative frequencies
+    move to the back, zeros in between, then the inverse transform is scaled by
+    ``factor`` per axis so the original samples are reproduced exactly. Used for
+    both jobs the reference uses it for -- oversampling the input patches
+    (``do_range_interpolate``) and the correlation surface (``do_highres_corr``).
+
+    Requires even axis lengths, as the reference does: it places the whole Nyquist
+    bin at the negative-frequency end, which is only well defined for even sizes.
+    """
+    factor = int(factor)
+    if factor == 1:
+        return patches
+    ny, nx = patches.shape[-2:]
+    if ny % 2 or nx % 2:
+        raise ValueError(
+            f"FFT oversampling needs even axis lengths, got ({ny}, {nx})"
+        )
+    spec = np.fft.fft2(patches, axes=(-2, -1))
+    hy, hx = ny // 2, nx // 2
+    out = np.zeros(
+        patches.shape[:-2] + (ny * factor, nx * factor), dtype=np.complex128
+    )
+    out[..., :hy, :hx] = spec[..., :hy, :hx]
+    out[..., :hy, -hx:] = spec[..., :hy, hx:]
+    out[..., -hy:, :hx] = spec[..., hy:, :hx]
+    out[..., -hy:, -hx:] = spec[..., hy:, hx:]
+    return np.fft.ifft2(out, axes=(-2, -1)) * float(factor * factor)
+
+
+def _offset_amplitude(patches, oversample):
+    """``(amplitude, valid)`` for a batch of patches, oversampled if asked.
+
+    Invalid samples are zero-filled *before* the interpolation, as they are before
+    every other transform in this module, and the validity mask is upsampled by
+    repetition -- a sample either had data or it did not, and interpolating that
+    answer would invent partial validity.
+    """
+    valid = np.isfinite(patches)  # complex: true only if both parts are finite
+    filled = np.where(valid, patches, 0)
+    if oversample > 1:
+        filled = _fft_oversample(filled.astype(np.complex128), oversample)
+        valid = np.repeat(
+            np.repeat(valid, oversample, axis=-2), oversample, axis=-1
+        )
+    return np.abs(filled).astype(np.float64), valid
+
+
+def _offset_demean(amp, valid):
+    """Subtract each patch's own mean over its *valid* samples, zero-filling.
+
+    Zero is the demeaned baseline, so an invalid sample then contributes nothing
+    to the correlation instead of reading as a bright or dark target.
+    """
+    n = amp.shape[0]
+    counts = valid.reshape(n, -1).sum(axis=1)
+    totals = np.where(valid, amp, 0.0).reshape(n, -1).sum(axis=1)
+    mean = np.where(counts > 0, totals / np.maximum(counts, 1), 0.0)
+    return np.where(valid, amp - mean[:, None, None], 0.0)
+
+
+def pixel_offsets(ref, sec, y_origins, x_origins, *, nx_corr=128, ny_corr=128,
+                  xsearch=64, ysearch=64, x_shift=0, y_shift=0,
+                  interp_factor=16, subpixel_window=16, subpixel=True,
+                  oversample=1, min_valid_fraction=0.5):
+    """Sub-pixel offsets between two images by amplitude cross-correlation.
+
+    A port of GMTSAR's ``xcorr`` in its default frequency-domain mode
+    (``do_freq_xcorr.c``, ``highres_corr.c``, ``do_time_int_xcorr.c``). At each
+    location an ``npy x npx`` patch is cut from both images, where
+    ``npx = nx_corr + 2*xsearch`` and ``npy = ny_corr + 2*ysearch``; both are
+    reduced to amplitude and demeaned; the *secondary* is masked to its central
+    ``ny_corr x nx_corr`` template so the circular FFT correlation cannot wrap
+    around; the correlation surface is the inverse transform of
+    ``F(ref) * conj(F(sec))``; and its peak over lags in ``[-search, +search)``
+    gives the integer offset, refined by FFT-interpolating an
+    ``subpixel_window``-wide window of the surface (raised to the 0.25 power, as
+    the reference does) by ``interp_factor``.
+
+    **Sign**: an offset is positive when the feature sits at a *larger* index in
+    ``sec`` than in ``ref``, i.e. it is ``sec_position - ref_position``. Same
+    convention as the reference's ``xoff``/``yoff``.
+
+    ``x_shift``/``y_shift`` are an a-priori integer shift applied to the
+    secondary's patch and added back to the result (the reference's PRM
+    ``rshift``/``ashift``); they let the search window be centred on a known bulk
+    displacement.
+
+    ``oversample`` FFT-interpolates both patches before correlating, the reference's
+    ``-range_interp``. It defaults to **1 (off)**: the reference oversamples range
+    only, and does it by keeping the middle half of the interpolated line while
+    calling it the same window -- which silently halves the correlation window's
+    ground extent. On a geocoded grid there is no distinguished range axis, so this
+    oversamples both axes symmetrically instead, and the offsets are divided by the
+    factor on the way out.
+
+    Returns ``(x_offset, y_offset, correlation)``, each ``(len(y_origins),
+    len(x_origins))`` float32. ``correlation`` is the reference's normalised
+    time-domain value at the peak, ``100 * |sum a*b| / sqrt(sum a^2 * sum b^2)``
+    over the template -- the number ``fitoffset.csh`` thresholds at 20 -- and the
+    offsets are NaN (with correlation 0) wherever fewer than ``min_valid_fraction``
+    of a patch's samples are finite.
+
+    ``subpixel_window`` defaults to **16, not the reference's 8**, and this is the
+    one departure that changes an answer rather than a convention. The refinement
+    FFT-interpolates that window, which treats it as periodic; at 8 samples a
+    correlation peak has not decayed by the window's edges, and the resulting
+    ringing drags the interpolated maximum around. Measured on a band-limited
+    field, worst bias over fractional shifts 0 to 0.88, and the rms over all of
+    them:
+
+    ======================  ======  ======  ======
+    ``subpixel_window``          8      16      32
+    ----------------------  ------  ------  ------
+    max abs bias (px)       0.1528  0.0397  0.1300
+    rms error (px)          0.0938  0.0944  0.2006
+    ======================  ======  ======  ======
+
+    So 16 cuts the bias 3.8x for the same scatter and ~18% more time in this step;
+    32 is worse again, its window reaching into the peak's sidelobes. Raising
+    ``interp_factor`` does **not** help -- 16 and 64 bias identically -- which is
+    what shows this is the window and not the interpolation step size, and a
+    parabola fit to the same surfaces is unbiased, which is what shows the surface
+    itself is right. Pass ``subpixel_window=8`` to reproduce the reference.
+
+    The window only matters where the correlation peak is *wide*. On real NISAR
+    GSLC, which is close to critically sampled and so nearly white, 8, 16 and 32
+    were measured to agree exactly, and correlating a real granule against itself
+    returns 0.000 at every location.
+
+    Departures from the reference, all deliberate: the correlation sums are
+    accumulated in float64 rather than through the reference's ``(int)`` cast of
+    the demeaned amplitudes (an artefact of its short-integer SLCs -- NISAR GSLC
+    amplitudes are O(1) floats, which that cast would truncate to zero);
+    invalid samples are handled at all; ``np.fft.fftshift`` replaces the
+    ``(-1)^(i+j)`` checkerboard (identical for even sizes, correct for odd);
+    ``highres_corr.c``'s ``jpeak = j - ny2/2`` (which should read ``nx2/2``, and is
+    invisible only because the sub-pixel window is square by default) is not
+    reproduced; and the reference's rescale of the surface to the peak value is
+    dropped, being a uniform positive scale that cannot move an argmax.
+    """
+    for name, value in (("nx_corr", nx_corr), ("ny_corr", ny_corr),
+                        ("xsearch", xsearch), ("ysearch", ysearch),
+                        ("subpixel_window", subpixel_window)):
+        if int(value) < 2 or int(value) % 2:
+            raise ValueError(f"{name} must be an even integer >= 2, got {value}")
+    if int(interp_factor) < 1:
+        raise ValueError(f"interp_factor must be >= 1, got {interp_factor}")
+    if int(oversample) < 1:
+        raise ValueError(f"oversample must be >= 1, got {oversample}")
+    if not (0.0 <= min_valid_fraction <= 1.0):
+        raise ValueError(
+            f"min_valid_fraction must be in [0, 1], got {min_valid_fraction}"
+        )
+
+    ref = np.asarray(ref)
+    sec = np.asarray(sec)
+    if ref.shape != sec.shape:
+        raise ValueError(
+            f"ref and sec must have the same shape, got {ref.shape} and {sec.shape}"
+        )
+
+    over = int(oversample)
+    ifc = int(interp_factor)
+    npy = int(ny_corr) + 2 * int(ysearch)
+    npx = int(nx_corr) + 2 * int(xsearch)
+    x_shift, y_shift = int(x_shift), int(y_shift)
+
+    y_origins = np.asarray(y_origins, dtype=int).ravel()
+    x_origins = np.asarray(x_origins, dtype=int).ravel()
+    if y_origins.size == 0 or x_origins.size == 0:
+        raise ValueError("no correlation locations were given")
+
+    ny, nx = ref.shape[-2:]
+    for axis, origins, size, shift, win in (("y", y_origins, ny, y_shift, npy),
+                                            ("x", x_origins, nx, x_shift, npx)):
+        first = min(int(origins.min()), int(origins.min()) + shift)
+        last = max(int(origins.max()), int(origins.max()) + shift) + win
+        if first < 0 or last > size:
+            raise ValueError(
+                f"{axis} windows run outside the raster: need "
+                f"[{first}, {last}) within [0, {size}). Build the lattice with "
+                "offset_locations, which insets it by half a window."
+            )
+
+    # Oversampled window geometry. Every index below is in oversampled samples;
+    # the offsets are divided by ``over`` once, at the very end.
+    hy, hx = int(ysearch) * over, int(xsearch) * over   # search half-widths
+    ty, tx = int(ny_corr) * over, int(nx_corr) * over   # template extent
+    wy, wx = npy * over, npx * over                     # whole patch
+    n2 = int(subpixel_window)
+
+    # The secondary is masked to its central template, which is what stops the
+    # circular correlation from wrapping a match around the patch edge.
+    template = np.zeros((wy, wx))
+    template[hy:hy + ty, hx:hx + tx] = 1.0
+
+    gy, gx = y_origins.size, x_origins.size
+    out_x = np.full((gy, gx), np.nan, dtype=np.float32)
+    out_y = np.full((gy, gx), np.nan, dtype=np.float32)
+    out_c = np.zeros((gy, gx), dtype=np.float32)
+
+    # One band of locations at a time, as goldstein_filter batches its patches: a
+    # whole-grid batch would hold ``nloc * npy * npx`` doubles (many times the
+    # raster), while a band is ``ncol`` patches and every FFT is one call.
+    for iy, oy in enumerate(y_origins):
+        ref_p = np.stack([ref[oy:oy + npy, ox:ox + npx] for ox in x_origins])
+        sec_p = np.stack([
+            sec[oy + y_shift:oy + y_shift + npy, ox + x_shift:ox + x_shift + npx]
+            for ox in x_origins
+        ])
+        ncol = ref_p.shape[0]
+
+        a, a_valid = _offset_amplitude(ref_p, over)
+        b, b_valid = _offset_amplitude(sec_p, over)
+
+        # The reference contributes over its whole search patch, the secondary only
+        # through its template, so each is scored over the samples it actually uses.
+        a_frac = a_valid.reshape(ncol, -1).mean(axis=1)
+        b_frac = b_valid[:, hy:hy + ty, hx:hx + tx].reshape(ncol, -1).mean(axis=1)
+        keep = (a_frac >= min_valid_fraction) & (b_frac >= min_valid_fraction)
+
+        a = _offset_demean(a, a_valid)
+        b = _offset_demean(b, b_valid)
+
+        # ifft(F(a) . conj(F(b)))[m] = sum_n a[n+m] b[n], so the peak lag m is
+        # ref_position - sec_position and the offset is its negative. abs(), not
+        # real(), to match the reference's Cabs of a complex-FFT result.
+        spec = np.fft.rfft2(a, axes=(-2, -1)) * np.conj(
+            np.fft.rfft2(b * template, axes=(-2, -1))
+        )
+        full = np.abs(np.fft.irfft2(spec, s=(wy, wx), axes=(-2, -1)))
+        full = np.fft.fftshift(full, axes=(-2, -1))
+        surface = full[:, wy // 2 - hy:wy // 2 + hy, wx // 2 - hx:wx // 2 + hx]
+
+        peak = surface.reshape(ncol, -1).argmax(axis=1)
+        ipk, jpk = np.unravel_index(peak, surface.shape[-2:])
+        lag_y, lag_x = ipk - hy, jpk - hx
+
+        frac_y = np.zeros(ncol)
+        frac_x = np.zeros(ncol)
+        if subpixel and ifc > 1:
+            # A window of the surface centred on each peak, zero-padded where it
+            # runs off the edge. The reference skips those samples instead, leaving
+            # whatever was in its freshly malloc'd buffer.
+            md = np.zeros((ncol, n2, n2))
+            for k in range(ncol):
+                r0, c0 = int(ipk[k]) - n2 // 2, int(jpk[k]) - n2 // 2
+                r_lo, r_hi = max(0, r0), min(2 * hy, r0 + n2)
+                c_lo, c_hi = max(0, c0), min(2 * hx, c0 + n2)
+                if r_hi > r_lo and c_hi > c_lo:
+                    md[k, r_lo - r0:r_hi - r0, c_lo - c0:c_hi - c0] = (
+                        surface[k, r_lo:r_hi, c_lo:c_hi]
+                    )
+            fine = _fft_oversample(np.power(md, 0.25), ifc).real
+            fpk = fine.reshape(ncol, -1).argmax(axis=1)
+            fi, fj = np.unravel_index(fpk, fine.shape[-2:])
+            # The peak sample sits at md[n2//2], hence at fine[n2//2 * ifc].
+            frac_y = (fi - (n2 // 2) * ifc) / float(ifc)
+            frac_x = (fj - (n2 // 2) * ifc) / float(ifc)
+
+        for k in range(ncol):
+            if not keep[k]:
+                continue
+            # The reference's calc_time_corr, at the peak lag. Note the numerator
+            # equals surface[k, ipk, jpk] by construction; it is recomputed here
+            # only so the three sums share one joint validity mask.
+            r0, c0 = hy + int(lag_y[k]), hx + int(lag_x[k])
+            aa = a[k, r0:r0 + ty, c0:c0 + tx]
+            bb = b[k, hy:hy + ty, hx:hx + tx]
+            both = (a_valid[k, r0:r0 + ty, c0:c0 + tx]
+                    & b_valid[k, hy:hy + ty, hx:hx + tx])
+            av, bv = aa[both], bb[both]
+            denom = math.sqrt(float(np.dot(av, av)) * float(np.dot(bv, bv)))
+            if denom > 0.0:
+                out_c[iy, k] = 100.0 * abs(float(np.dot(av, bv))) / denom
+
+        out_x[iy] = np.where(
+            keep, (-lag_x - frac_x) / over + x_shift, np.nan
+        ).astype(np.float32)
+        out_y[iy] = np.where(
+            keep, (-lag_y - frac_y) / over + y_shift, np.nan
+        ).astype(np.float32)
+
+    return out_x, out_y, out_c
+
+
+def pixel_offsets_planes(ref, sec, y_origins, x_origins, **kwargs):
+    """Apply :func:`pixel_offsets` to each trailing 2D plane pair of ``ref``/``sec``.
+
+    Returns the three outputs stacked on a **new leading axis** --
+    ``(3, *leading, gy, gx)``, ordered ``x_offset, y_offset, correlation`` -- rather
+    than as a tuple, so a single ``da.map_blocks`` can carry all three out of one
+    task. :func:`pixel_offsets_dask` splits the axis apart again.
+    """
+    ref = np.asarray(ref)
+    sec = np.asarray(sec)
+    gy = np.asarray(y_origins).size
+    gx = np.asarray(x_origins).size
+    if ref.ndim == 2:
+        return np.stack(pixel_offsets(ref, sec, y_origins, x_origins, **kwargs))
+
+    flat_ref = ref.reshape((-1,) + ref.shape[-2:])
+    flat_sec = sec.reshape((-1,) + sec.shape[-2:])
+    out = np.empty((3, flat_ref.shape[0], gy, gx), dtype=np.float32)
+    for k in range(flat_ref.shape[0]):
+        out[:, k] = np.stack(
+            pixel_offsets(flat_ref[k], flat_sec[k], y_origins, x_origins, **kwargs)
+        )
+    return out.reshape((3,) + ref.shape[:-2] + (gy, gx))
+
+
+def pixel_offsets_dask(ref, sec, y_origins, x_origins, *, locations_per_tile=16,
+                       nx_corr=128, ny_corr=128, xsearch=64, ysearch=64,
+                       x_shift=0, y_shift=0, **kwargs):
+    """:func:`pixel_offsets` over dask ``(pair, y, x)`` arrays, tile by tile.
+
+    The *location lattice* is tiled, not the raster: each task takes a
+    ``locations_per_tile`` square block of locations, is handed the one fine-pixel
+    window covering all of their patches (and their shifted secondary patches), and
+    returns that block's coarse answers. As in :func:`goldstein_filter_dask` the
+    windows are sliced explicitly rather than through ``map_overlap``, which has no
+    way to express an output grid coarser than its input.
+
+    Read amplification is ``((k*step + window) / (k*step))**2`` for
+    ``k = locations_per_tile``: about 1.5x at the defaults. Lowering it reads more
+    and makes more, smaller tasks; it changes nothing about the result, which is
+    why it does not belong in a stage's parameter hash.
+
+    Returns the three dask arrays ``(x_offset, y_offset, correlation)``.
+    """
+    params = dict(
+        nx_corr=nx_corr, ny_corr=ny_corr, xsearch=xsearch, ysearch=ysearch,
+        x_shift=x_shift, y_shift=y_shift, **kwargs,
+    )
+    if not _is_dask(ref):
+        stacked = pixel_offsets_planes(ref, sec, y_origins, x_origins, **params)
+        return stacked[0], stacked[1], stacked[2]
+
+    import dask.array as da
+
+    y_origins = np.asarray(y_origins, dtype=int).ravel()
+    x_origins = np.asarray(x_origins, dtype=int).ravel()
+    npy = int(ny_corr) + 2 * int(ysearch)
+    npx = int(nx_corr) + 2 * int(xsearch)
+    y_shift, x_shift = int(y_shift), int(x_shift)
+    tile = max(1, int(locations_per_tile))
+    lead = ref.chunks[:-2]
+    meta = np.empty((0,) * (ref.ndim + 1), dtype=np.float32)
+
+    def _block(ref_win, sec_win, ys=None, xs=None):
+        return pixel_offsets_planes(ref_win, sec_win, ys, xs, **params)
+
+    rows = []
+    for j0 in range(0, y_origins.size, tile):
+        ys = y_origins[j0:j0 + tile]
+        cols = []
+        for i0 in range(0, x_origins.size, tile):
+            xs = x_origins[i0:i0 + tile]
+            # The covering window has to hold both images' patches, and the
+            # secondary's are displaced by the a-priori shift.
+            py0 = min(int(ys[0]), int(ys[0]) + y_shift)
+            py1 = max(int(ys[-1]), int(ys[-1]) + y_shift) + npy
+            px0 = min(int(xs[0]), int(xs[0]) + x_shift)
+            px1 = max(int(xs[-1]), int(xs[-1]) + x_shift) + npx
+            spatial = ((py1 - py0,), (px1 - px0,))
+            ref_win = ref[..., py0:py1, px0:px1].rechunk(lead + spatial)
+            sec_win = sec[..., py0:py1, px0:px1].rechunk(ref_win.chunks)
+            cols.append(da.map_blocks(
+                _block, ref_win, sec_win,
+                ys=ys - py0, xs=xs - px0,
+                chunks=((3,),) + lead + ((ys.size,), (xs.size,)),
+                new_axis=0, dtype=np.float32, meta=meta,
+            ))
+        rows.append(cols)
+    out = da.block(rows)
+    return out[0], out[1], out[2]
 
 
 # -- unwrapped-phase cleaning: edge masking, spline outlier rejection, deramp --
