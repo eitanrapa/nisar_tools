@@ -451,7 +451,7 @@ class PixelOffsetStack(RasterStackMixin):
     # -- plotting ----------------------------------------------------------
     def plot_offsets(self, pair=0, units="pixels", min_correlation=0.0,
                      quiver=False, robust=False,
-                     n_sigma=DEFAULT_N_SIGMA, vmax=None):
+                     n_sigma=DEFAULT_N_SIGMA, vmax=None, **kwargs):
         """Plot one pair's offset field. See :func:`nisar_tools.plot.plot_offsets`.
 
         ``robust=True`` plots :meth:`robust_offsets` of both components instead of
@@ -463,7 +463,8 @@ class PixelOffsetStack(RasterStackMixin):
         needs a gated sample) and ``n_sigma``. ``vmax`` sets the symmetric colour
         limit explicitly; with ``robust=True`` a value near the expected
         displacement, e.g. ``vmax=0.5`` px, is usually more legible than the
-        automatic 98th-percentile scale.
+        automatic 98th-percentile scale. ``cmap`` and ``nan_color`` pass through to
+        :func:`nisar_tools.plot.plot_offsets`.
         """
         from .plot import plot_offsets
 
@@ -511,6 +512,7 @@ class PixelOffsetStack(RasterStackMixin):
             quiver=quiver,
             vmax=vmax,
             centred=robust,
+            **kwargs,
         )
 
     def __repr__(self):

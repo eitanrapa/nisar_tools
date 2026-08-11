@@ -415,7 +415,15 @@ that is not displacement:
 
 Statistics are computed per pair and per component, and the removed median and
 robust sigma are reported in the result's `attrs` — the median is itself a
-measurement of how far apart the two products are geolocated. ⚠️ `n_sigma`
+measurement of how far apart the two products are geolocated.
+
+⚠️ **Invalid samples are painted grey, and that is not cosmetic.** A diverging
+colormap is near-white at its midpoint and matplotlib leaves NaN transparent, so
+on a white figure a **zero offset and a dropped location are the same pixel** —
+precisely the confusion `robust_offsets` walks into, since it centres the field on
+zero and can drop a third of it. `plot_offsets` sets both the colormap's bad
+colour and the axes facecolor (the lon/lat reprojection's own margin is not drawn
+at all, so the colormap alone does not cover it); `nan_color=` overrides. ⚠️ `n_sigma`
 interacts with signal amplitude: the sigma is measured over the whole scene
 including the signal, so a large displacement widens the cut (it will not clip
 itself) while a quiet scene gets a tight one. Raise `n_sigma` before suspecting

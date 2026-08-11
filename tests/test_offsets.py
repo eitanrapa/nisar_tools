@@ -843,6 +843,30 @@ def test_plot_offsets_robust_plots_the_centred_field(gslc_factory):
     matplotlib.pyplot.close(fig)
 
 
+def test_plot_offsets_distinguishes_a_zero_offset_from_no_data(gslc_factory):
+    """A diverging colormap is near-white at 0 and matplotlib leaves NaN clear.
+
+    On a white figure that makes "measured, and it did not move" and "not
+    measured" the same pixel -- and after ``robust_offsets`` most of the field is
+    near zero while a third of it can be dropped. Both halves are needed: the
+    colormap paints invalid samples, the axes paint the reprojection's own margin,
+    which imshow does not draw at all.
+    """
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fig, axes = offsets.plot_offsets(pair=0, robust=True)
+
+    zero = np.asarray(matplotlib.colors.to_rgba("white"))
+    for ax in axes:
+        blank = np.asarray(matplotlib.colors.to_rgba(ax.get_facecolor()))
+        bad = np.asarray(ax.get_images()[0].get_cmap().get_bad())
+        assert np.allclose(blank, bad)              # one colour for "no data"
+        assert np.abs(blank[:3] - zero[:3]).max() > 0.2   # and it is not zero's
+        assert blank[3] == 1.0                      # opaque, not see-through
+    matplotlib.pyplot.close(fig)
+
+
 def test_plot_offsets_rejects_unknown_units(gslc_factory):
     offsets = _offsets_in_memory(gslc_factory)
     with pytest.raises(ValueError, match="units must be"):

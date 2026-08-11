@@ -11,6 +11,12 @@ import xarray as xr
 
 from . import geo
 
+#: Colour for samples with no measurement. Mid grey: dark enough to separate from
+#: a diverging colormap's near-white midpoint, unsaturated so it cannot be read as
+#: a value on a red/blue ramp, and light enough not to dominate a field that is
+#: half invalid (a GSLC is ~45% out of swath before anything else is dropped).
+NAN_COLOR = "0.62"
+
 
 def _to_latlon(data, epsg_code):
     if isinstance(data, xr.DataArray):
@@ -82,7 +88,7 @@ def plot_los_displacement(los, epsg_code=None):
 
 def plot_offsets(x_offset, y_offset, correlation=None, epsg_code=None,
                  units="pixels", min_correlation=0.0, quiver=False,
-                 vmax=None, centred=False):
+                 vmax=None, centred=False, cmap="RdBu_r", nan_color=NAN_COLOR):
     """Plot a pixel-offset field as two panels, x beside y.
 
     Both panels share **one** symmetric diverging scale, taken from the 98th
@@ -95,6 +101,13 @@ def plot_offsets(x_offset, y_offset, correlation=None, epsg_code=None,
     their median removed (see
     :meth:`~nisar_tools.offsets.PixelOffsetStack.robust_offsets`), so the plot
     says which quantity is on screen.
+
+    ``nan_color`` is not cosmetic on an offset field. A diverging colormap is
+    near-white at its midpoint and matplotlib leaves invalid samples transparent,
+    so on a white figure **a zero offset and a dropped location are the same
+    pixel** -- and after :meth:`robust_offsets` most of the field is near zero
+    while a third of it can be dropped. Painting the invalid samples a neutral grey
+    is what separates "measured, and it did not move" from "not measured".
 
     Returns ``(fig, axes)``, with ``axes`` a length-2 array.
     """
@@ -114,18 +127,26 @@ def plot_offsets(x_offset, y_offset, correlation=None, epsg_code=None,
     names = (("East", "North") if units == "metres" else ("Map x", "Map y"))
     suffix = " (median removed)" if centred else ""
 
+    # A copy, or set_bad would mutate the globally registered colormap.
+    colormap = plt.get_cmap(cmap).copy()
+    colormap.set_bad(nan_color)
+
     fig, axes = plt.subplots(1, 2, figsize=(16, 7), dpi=150, sharey=True)
     for ax, field, name in zip(axes, (x_field, y_field), names):
+        # The reprojection to lon/lat leaves its own out-of-coverage margin, which
+        # imshow draws as nothing at all rather than as a bad sample, so the axes
+        # have to carry the same colour for the panel to read as one surface.
+        ax.set_facecolor(nan_color)
         field.plot.imshow(
             ax=ax,
-            cmap="RdBu_r",
+            cmap=colormap,
             vmin=None if vmax is None else -vmax,
             vmax=vmax,
             cbar_kwargs={"label": label, "shrink": 0.8},
         )
         ax.set_title(f"{name} offset{suffix}", fontsize=14, pad=10)
         ax.set_xlabel("Longitude", fontsize=12)
-        ax.grid(color="gray", linestyle="--", alpha=0.5)
+        ax.grid(color="white", linestyle="--", alpha=0.5)
     axes[0].set_ylabel("Latitude", fontsize=12)
     axes[1].set_ylabel("")
 
