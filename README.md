@@ -320,11 +320,14 @@ measurement that survives where the interferogram decorrelates, which is the nea
 field of a large earthquake.
 
 ```python
-offsets = stack.pixel_offsets(step=64)            # or nx=16, ny=32 (xcorr's -nx/-ny)
+offsets = stack.pixel_offsets()                   # or step=, or nx=/ny= (xcorr's -nx/-ny)
 offsets = offsets.persist(ws, "offsets")
 offsets.to_text("offsets/")                       # freq_xcorr_pair0.dat
 offsets.to_grd("offsets/")                        # x_offset, y_offset, correlation
-fig, axes = offsets.plot_offsets(pair=0, min_correlation=20)
+
+# Almost always what you want to look at -- see "Reading the field" below.
+fig, axes = offsets.plot_offsets(pair=0, robust=True, vmax=0.5)
+clean = offsets.robust_offsets("x_offset")        # the same numbers, as a DataArray
 ```
 
 `PixelOffsetStack` is a georeferenced raster like any other stage, so `crop`,
@@ -349,19 +352,74 @@ geometry, which this does not attempt.
   thresholds at 20. On a band-limited synthetic field every window scored 96–97
   while individual offsets scattered by up to **0.4 px**; the correlation says
   the match is real, not that it is precise. Judge the population, not a location.
-- **`subpixel_window` defaults to 16, not `xcorr`'s 8.** The refinement
-  FFT-interpolates that window, i.e. treats it as periodic, and at 8 samples the
-  correlation peak has not decayed by its edges. Measured worst-case bias over
-  fractional shifts: **0.153 px at 8, 0.040 at 16, 0.130 at 32**. Raising
-  `interp_factor` does *not* help. Pass `subpixel_window=8` to reproduce GMTSAR.
+  This is why `robust_offsets` exists.
 - **Out-of-swath NaN is handled**; `xcorr` has no concept of it. A window with
   less than `min_valid_fraction` (0.5) finite samples returns NaN with correlation
   0, and does not contaminate its neighbours.
-- The window defaults are GMTSAR's: `nx_corr=ny_corr=128`, `xsearch=ysearch=64`,
-  i.e. at NISAR's ~10 m posting a 1.3 km template searched over ±640 m. The
-  transformed patch is `ny_corr + 2*ysearch` by `nx_corr + 2*xsearch`.
+- ⚠️ **The window defaults are not GMTSAR's.** `xcorr` uses `nx_corr=ny_corr=128`
+  with `xsearch=ysearch=64`, sized for a radar-geometry pair that still has to be
+  coregistered. A geocoded pair is already aligned to the whole pixel, so most of
+  that search covers lags that cannot occur and each is another chance at a false
+  peak. The defaults here are **`nx_corr=ny_corr=64`, `xsearch=ysearch=16`** — a
+  320 m template searched over ±80 m at NISAR's 5 m posting — which on real data
+  halved the false-peak rate (4.2% → 2.5%) and left the measured displacement
+  gradient unchanged. The transformed patch is `ny_corr + 2*ysearch` by
+  `nx_corr + 2*xsearch`.
+- ⚠️ **`nx_corr` is the resolution; `step` is only the sampling.** A denser lattice
+  gives more samples of the same template-wide average, so to localise a
+  discontinuity better you shrink `nx_corr`, not `step`. `step` defaults to **16**
+  (80 m), which deliberately oversamples the 64 px template — adjacent estimates
+  share 83% of their data and are not independent. It makes a readable map; it
+  does not add information. Use `step=nx_corr//2` for independent estimates at a
+  quarter of the cost.
+- **`subpixel_window` follows `xcorr` at 8**, and the reason changed with the
+  window sizes above. The refinement FFT-interpolates that window, i.e. treats it
+  as periodic, and at 8 samples the correlation peak has not decayed by its edges,
+  which *biases* the result. A wider window cuts that bias, and at `nx_corr=128,
+  xsearch=64` it did so for free — which is why 16 used to be the default. At a
+  64 px template it is not free:
+
+  | `subpixel_window` | max abs bias | scatter after centring |
+  |---|---|---|
+  | **8** | 0.136 px | **0.094 px** |
+  | 16 | 0.079 px | 0.193 px |
+
+  The scatter is what matters, because `robust_offsets` subtracts the field's own
+  median and so removes a uniform bias exactly while leaving scatter untouched.
+  Pass `subpixel_window=16` when the *absolute* offset matters rather than its
+  variation, and keep it well under `2*search` — the window is clipped to the
+  correlation surface and zero-padded beyond it, so one as wide as the surface
+  biases every peak that is not already centred (this now raises).
 - `x_shift`/`y_shift` centre the search on a known bulk displacement (`xcorr`'s
-  PRM `rshift`/`ashift`) and are added back into the answer.
+  PRM `rshift`/`ashift`) and are added back into the answer. Prefer them to a
+  wider `xsearch`: recentring the search costs nothing, enlarging it costs false
+  peaks.
+
+**Reading the field: `robust_offsets`.** The raw offsets are not yet ground
+motion. `offsets.robust_offsets("x_offset")` — and `plot_offsets(robust=True)`,
+which applies it to both components — does three things, each removing something
+that is not displacement:
+
+1. drops locations below `min_correlation` (default 20, `fitoffset.csh`'s own);
+2. drops locations more than `n_sigma` (default 6) **MAD**-based robust standard
+   deviations from the median. ⚠️ This is the only thing that removes the **false
+   peaks**, and no correlation cut finds them: a window that fails to match still
+   reports an argmax, which pins at the edge of the search and comes back as
+   ±(search − 0.5) px *with a high correlation*. Measured at **3–4%** of locations
+   on a real A061 crop;
+3. subtracts the median, which is the pair's **bulk geolocation offset** — −1.06 px
+   (−5.3 m) between two real D_071 granules, agreeing between crops 20 km apart to
+   0.06 px. It is several times the deformation in the same scene and constant
+   across it, so the raw field plots the difference between two products and hides
+   the ground motion.
+
+Statistics are computed per pair and per component, and the removed median and
+robust sigma are reported in the result's `attrs` — the median is itself a
+measurement of how far apart the two products are geolocated. ⚠️ `n_sigma`
+interacts with signal amplitude: the sigma is measured over the whole scene
+including the signal, so a large displacement widens the cut (it will not clip
+itself) while a quiet scene gets a tight one. Raise `n_sigma` before suspecting
+the estimator if a scene has a genuine metre-scale step.
 
 **The ASCII file is byte-compatible with `xcorr`'s.** `to_text` writes
 `x_pixel x_offset y_pixel y_offset correlation` under `print_results.c`'s own
@@ -372,13 +430,15 @@ default, because `xcorr` writes none and an unprefixed one would be compared
 numerically by `awk`; `comment=` opts into `#`-prefixed provenance lines.
 
 Measured on the two real D_071 granules (12 days apart, 5 m posting, a 28 km
-crop): **1015 locations/s**, 97.4% of locations above correlation 20. Their
-integer offset is exactly 0 everywhere — the products are co-registered to the
-whole pixel — over a **uniform** sub-pixel −0.125 px in x and −0.0625 px in y,
-i.e. a real 0.63 m / 0.31 m geolocation difference between the two granules
-rather than anything moving. Correlating one granule against *itself* returns
-0.000 at every location, and a planted whole-pixel shift comes back as the
-planted value plus exactly that same offset.
+crop): 97.4% of locations above correlation 20. Their integer offset is exactly 0
+everywhere — the products are co-registered to the whole pixel — over a
+**uniform** sub-pixel −0.125 px in x and −0.0625 px in y, i.e. a real 0.63 m /
+0.31 m geolocation difference between the two granules rather than anything
+moving. Correlating one granule against *itself* returns 0.000 at every location,
+and a planted whole-pixel shift comes back as the planted value plus exactly that
+same offset. Throughput at the current defaults is **6900 locations/s** on a real
+A061 crop (8856 locations in 1.3 s), the narrower 96 px patch being 7× less
+transform than the 256 px one the GMTSAR defaults ask for.
 
 ### Exporting to GMT `.grd`
 

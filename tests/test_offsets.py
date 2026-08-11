@@ -17,6 +17,7 @@ import dask.array as da
 import matplotlib
 import numpy as np
 import pytest
+import xarray as xr
 from offset_reference import correlation_surface, peak_offset
 from scipy.ndimage import gaussian_filter
 
@@ -238,27 +239,51 @@ def test_recovers_a_planted_subpixel_shift():
     assert corr.min() > 90.0
 
 
-def test_the_default_subpixel_window_is_the_less_biased_one():
-    """GMTSAR's 8-sample refinement window is measurably biased; ours is 16.
+def test_the_wider_subpixel_window_trades_bias_for_scatter():
+    """Why the default refinement window is 8 and not 16, at *these* window sizes.
 
     The refinement FFT-interpolates the window, i.e. treats it as periodic, and at
-    8 samples the correlation peak has not decayed by its edges. Guards the
-    default against being "restored" to the reference's value.
+    8 samples the correlation peak has not decayed by its edges, so ringing drags
+    the interpolated maximum around. That is a bias, and a wider window does cut
+    it. At the old ``nx_corr=128, xsearch=64`` defaults it cut it for free, which
+    is why 16 was the default then; at a 64 px template it is not free, and the
+    scatter is what survives ``robust_offsets``' median removal while the bias does
+    not. Both halves are asserted, so neither can be "fixed" without the other
+    being noticed.
     """
     field = _texture(768, 768, seed=7)
-    window = 128 + 2 * 64
+    window = 64 + 2 * 16
     yo, xo = _lattice(768, 768, window, step=window)
 
-    narrow, wide = [], []
-    for frac in (0.25, 0.62, 0.75):
-        sec = _fft_shift(field, frac, frac)
-        narrow.append((_kernels.pixel_offsets(
-            field, sec, yo, xo, subpixel_window=8)[0] - frac).mean())
-        wide.append((_kernels.pixel_offsets(
-            field, sec, yo, xo, subpixel_window=16)[0] - frac).mean())
+    bias, scatter = {}, {}
+    for n2 in (8, 16):
+        biases, centred = [], []
+        for frac in (0.0625, 0.375, 0.5625, 0.6875, 0.875):
+            sec = _fft_shift(field, frac, frac)
+            err = (_kernels.pixel_offsets(
+                field, sec, yo, xo, subpixel_window=n2)[0] - frac).ravel()
+            biases.append(err.mean())
+            centred.append(err - np.median(err))    # what centring leaves behind
+        bias[n2] = max(np.abs(biases))
+        scatter[n2] = np.sqrt((np.concatenate(centred) ** 2).mean())
 
-    assert max(np.abs(narrow)) > 3 * max(np.abs(wide))
-    assert max(np.abs(wide)) < 0.05
+    assert bias[16] < bias[8]                       # the wider window is less biased
+    assert scatter[16] > 1.5 * scatter[8]           # and materially noisier for it
+    assert scatter[8] < 0.15
+
+
+def test_a_subpixel_window_wider_than_the_correlation_surface_raises():
+    """It would be clipped and zero-padded, biasing every off-centre peak.
+
+    Silent before: the window is cut from the ``2*ysearch x 2*xsearch`` surface,
+    so one wider than that can never be centred on a peak and the overhang is
+    filled with zeros. Reachable at the default ``xsearch=16``, hence the guard.
+    """
+    yo, xo = _lattice(320, 320, SMALL_WINDOW, step=64)
+    field = _texture(320, 320, seed=1)
+    with pytest.raises(ValueError, match="wider than the .* correlation surface"):
+        _kernels.pixel_offsets(
+            field, field, yo, xo, subpixel_window=64, **SMALL)
 
 
 def test_offset_sign_is_secondary_minus_reference():
@@ -626,6 +651,170 @@ def test_to_text_writes_an_optional_comment_header(gslc_factory, tmp_path):
     assert np.loadtxt(path).shape[1] == 5
 
 
+# -- robust offsets ----------------------------------------------------------
+
+
+def _with_planted(offsets, x_offset=None, correlation=None):
+    """A copy of an offsets stack with hand-written planes, for the robust tests."""
+    ds = offsets.ds.copy()
+    if x_offset is not None:
+        ds["x_offset"] = (("pair", "y", "x"), x_offset[None].astype(np.float32))
+    if correlation is not None:
+        ds["correlation"] = (("pair", "y", "x"), correlation[None].astype(np.float32))
+    return PixelOffsetStack(ds)
+
+
+def test_robust_offsets_removes_the_bulk_shift(gslc_factory):
+    """The median is the pair's geolocation offset, not ground motion.
+
+    The planted shift here is -3 px in x everywhere, which is exactly the case a
+    real co-registered pair shows: a constant that swamps any deformation.
+    """
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+
+    raw = offsets.ds["x_offset"]
+    robust = offsets.robust_offsets("x_offset")
+
+    assert float(np.nanmedian(raw.values)) == pytest.approx(-3, abs=0.2)
+    assert float(np.nanmedian(robust.values)) == pytest.approx(0.0, abs=1e-6)
+    # and the removed constant is reported rather than thrown away
+    assert robust.attrs["robust_median"][0] == pytest.approx(-3, abs=0.2)
+    assert robust.dims == raw.dims
+    assert robust.name == "x_offset_robust"
+
+
+def test_robust_offsets_rejects_search_edge_false_peaks(gslc_factory):
+    """The failure mode no correlation cut catches.
+
+    A window that fails to match still reports an argmax, which pins at the edge
+    of the search -- and the correlation it reports there can clear any threshold.
+    Planted as a handful of locations at the search edge *with* correlation 95.
+    """
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    shape = offsets.ds["x_offset"].isel(pair=0).shape
+    # Realistic scatter about the bulk shift, which is what sets the MAD; a
+    # perfectly uniform field is the *degenerate* case and has its own test.
+    x = -3.0 + np.random.default_rng(3).normal(0.0, 0.05, shape)
+    corr = np.full(shape, 95.0)
+    bad = [(0, 0), (1, 2), (2, 1)]
+    for r, c in bad:
+        x[r, c] = SMALL["xsearch"] - 0.5          # the search-edge value
+
+    planted = _with_planted(offsets, x_offset=x, correlation=corr)
+    # A correlation cut alone keeps every one of them.
+    kept_by_correlation = planted.robust_offsets(
+        "x_offset", min_correlation=20.0, n_sigma=np.inf
+    )
+    assert np.isfinite(kept_by_correlation.values).all()
+
+    robust = planted.robust_offsets("x_offset", min_correlation=20.0)
+    values = robust.isel(pair=0).values
+    assert not np.isfinite([values[r, c] for r, c in bad]).any()
+    # and nothing else was thrown away with them
+    assert np.isfinite(values).sum() == values.size - len(bad)
+
+
+def test_robust_offsets_applies_the_correlation_cut(gslc_factory):
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    shape = offsets.ds["x_offset"].isel(pair=0).shape
+    x = -3.0 + np.random.default_rng(4).normal(0.0, 0.05, shape)
+    corr = np.full(shape, 95.0)
+    corr[0, :] = 5.0
+    planted = _with_planted(offsets, x_offset=x, correlation=corr)
+
+    robust = planted.robust_offsets("x_offset", min_correlation=20.0)
+    assert not np.isfinite(robust.isel(pair=0).values[0, :]).any()
+    assert np.isfinite(robust.isel(pair=0).values[1:, :]).all()
+
+
+def test_robust_offsets_keeps_the_few_that_differ_in_a_uniform_field(gslc_factory):
+    """A zero MAD is real, not a fixture artefact, and must not blank the field.
+
+    The two D_071 granules are co-registered to the whole pixel and their measured
+    offset is uniform to an IQR of 0.000, so over half the locations hold exactly
+    the median and the MAD is 0. Reading that as "no scale" and keeping only the
+    median would throw away every location that carries a signal.
+    """
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    shape = offsets.ds["x_offset"].isel(pair=0).shape
+    x = np.full(shape, -0.125)                # the real pair's uniform offset
+    x[0, 0] = -0.130                          # a few that genuinely differ
+    x[1, 1] = -0.121
+    x[2, 2] = SMALL["xsearch"] - 0.5          # and one real false peak
+    planted = _with_planted(offsets, x_offset=x,
+                            correlation=np.full(shape, 95.0))
+
+    robust = planted.robust_offsets("x_offset")
+    values = robust.isel(pair=0).values
+    assert robust.attrs["robust_sigma"][0] > 0.0
+    assert np.isfinite(values[0, 0]) and np.isfinite(values[1, 1])
+    assert not np.isfinite(values[2, 2])
+
+
+def test_robust_offsets_computes_statistics_per_pair(gslc_factory):
+    """Each pair has its own bulk shift; one median for the stack would be wrong."""
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    one = offsets.ds.isel(pair=[0])
+    two = one.copy(deep=True)
+    two["x_offset"] = two["x_offset"] + 10.0        # a quite different pair
+    stacked = PixelOffsetStack(
+        xr.concat([one, two], dim="pair", data_vars="all").assign_coords(pair=[0, 1])
+    )
+
+    robust = stacked.robust_offsets("x_offset")
+    assert robust.attrs["robust_median"][1] - robust.attrs["robust_median"][0] == (
+        pytest.approx(10.0, abs=1e-4)
+    )
+    # Centred per pair, so both planes come out on the same scale.
+    np.testing.assert_allclose(
+        robust.isel(pair=0).values, robust.isel(pair=1).values, atol=1e-5
+    )
+
+
+def test_robust_offsets_survives_a_degenerate_scale(gslc_factory):
+    """A granule against itself gives an identical offset everywhere, so MAD is 0.
+
+    Rejecting at ``|x - median| < 0`` would then blank the entire plane. Real case:
+    correlating a real granule against itself returns 0.000 at every location.
+    """
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    flat = np.zeros(offsets.ds["x_offset"].isel(pair=0).shape)
+    planted = _with_planted(offsets, x_offset=flat,
+                            correlation=np.full(flat.shape, 99.0))
+
+    robust = planted.robust_offsets("x_offset")
+    assert robust.attrs["robust_sigma"][0] == 0.0
+    assert np.isfinite(robust.values).all()
+    assert float(np.nanmax(np.abs(robust.values))) == 0.0
+
+
+def test_robust_offsets_in_metres_and_without_centring(gslc_factory):
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    spacing = offsets.ds.attrs["x_spacing"]
+
+    pixels = offsets.robust_offsets("x_offset")
+    metres = offsets.robust_offsets("east_offset")
+    np.testing.assert_allclose(
+        metres.values, pixels.values * spacing, rtol=1e-5, atol=1e-6
+    )
+
+    uncentred = offsets.robust_offsets("x_offset", centre=False)
+    assert float(np.nanmedian(uncentred.values)) == pytest.approx(-3, abs=0.2)
+
+
+def test_robust_offsets_rejects_an_unknown_field(gslc_factory):
+    offsets = _offsets_in_memory(gslc_factory)
+    with pytest.raises(KeyError, match="unknown field"):
+        offsets.robust_offsets("up_offset")
+
+
+def test_robust_offsets_warns_when_nothing_clears_the_cut(gslc_factory):
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    with pytest.warns(RuntimeWarning, match="whole plane is blank"):
+        robust = offsets.robust_offsets("x_offset", min_correlation=101.0)
+    assert not np.isfinite(robust.values).any()
+
+
 # -- plotting ----------------------------------------------------------------
 
 
@@ -636,6 +825,21 @@ def test_plot_offsets_renders_two_panels(gslc_factory):
         fig, axes = offsets.plot_offsets(pair=0, min_correlation=10.0)
     assert len(axes) == 2
     assert axes[0].get_title() == "Map x offset"
+    matplotlib.pyplot.close(fig)
+
+
+def test_plot_offsets_robust_plots_the_centred_field(gslc_factory):
+    """The default view: bulk shift removed, false peaks gone, and it says so."""
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fig, axes = offsets.plot_offsets(pair=0, robust=True, vmax=0.5)
+    assert axes[0].get_title() == "Map x offset (median removed)"
+
+    image = axes[0].get_images()[0]
+    assert image.get_clim() == (-0.5, 0.5)
+    # -3 px of bulk shift is gone; what is plotted is inside the explicit scale.
+    assert float(np.nanmax(np.abs(image.get_array()))) < 0.5
     matplotlib.pyplot.close(fig)
 
 

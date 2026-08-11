@@ -32,13 +32,26 @@ from . import _kernels
 from ._base import RasterStackMixin, open_stage
 from .interferogram import make_pairs
 
-#: Default gap between correlation locations, in pixels. Half the default
-#: correlation window, so adjacent estimates share half their data -- the usual
-#: posting for an offset-tracking map.
-DEFAULT_STEP = 64
+#: Default gap between correlation locations, in pixels -- 80 m at NISAR's 5 m
+#: posting. This deliberately **oversamples**: the resolution of the measurement
+#: is the 64 px correlation template, so adjacent estimates share 83% of their
+#: data and are not independent. Sampling below the resolution is what makes a
+#: readable map of a displacement field and lets a discontinuity be localised to
+#: better than a template width; it does not add information. Raise it to
+#: ``nx_corr // 2`` for independent estimates at a quarter of the cost.
+DEFAULT_STEP = 16
 
 #: ``fitoffset.csh`` refuses to fit fewer than this many points.
 MIN_USEFUL_ROWS = 8
+
+#: Default correlation cut for :meth:`PixelOffsetStack.robust_offsets`, matching
+#: ``fitoffset.csh``'s own threshold on ``xcorr``'s correlation column.
+DEFAULT_MIN_CORRELATION = 20.0
+
+#: Default robust-sigma cut for :meth:`PixelOffsetStack.robust_offsets`. Wide
+#: enough to keep real deformation (which is what the field is measured for) and
+#: still catch the search-edge false peaks, which sit many sigma out.
+DEFAULT_N_SIGMA = 6.0
 
 
 class PixelOffsetStack(RasterStackMixin):
@@ -56,8 +69,8 @@ class PixelOffsetStack(RasterStackMixin):
     @classmethod
     def from_slc_stack(
         cls, stack, pairs="sequential", step=None, nx=None, ny=None,
-        nx_corr=128, ny_corr=128, xsearch=64, ysearch=64, x_shift=0, y_shift=0,
-        interp_factor=16, subpixel_window=16, subpixel=True, oversample=1,
+        nx_corr=64, ny_corr=64, xsearch=16, ysearch=16, x_shift=0, y_shift=0,
+        interp_factor=16, subpixel_window=8, subpixel=True, oversample=1,
         min_valid_fraction=0.5, locations_per_tile=16,
     ):
         """Cross-correlate pairs of acquisitions on a coarse lattice.
@@ -72,21 +85,30 @@ class PixelOffsetStack(RasterStackMixin):
         :meth:`~nisar_tools._base.RasterStackMixin.to_grd` and
         :meth:`persist` all work on it unchanged.
 
-        ``nx_corr``/``ny_corr`` size the correlation template and
-        ``xsearch``/``ysearch`` the search half-width, both in pixels; the patch
-        that gets transformed is ``ny_corr + 2*ysearch`` by ``nx_corr + 2*xsearch``.
-        The defaults are GMTSAR's, which at NISAR GSLC's ~10 m posting means a
-        1.3 km template searched over +/-640 m. ``x_shift``/``y_shift`` centre the
-        search on a known bulk displacement (GMTSAR's PRM ``rshift``/``ashift``);
-        they are 0 here, because a geocoded pair is already aligned.
+        ``nx_corr``/``ny_corr`` size the correlation template -- which is the
+        **resolution** of the result, as distinct from ``step``, which is only how
+        densely it is sampled -- and ``xsearch``/``ysearch`` the search half-width,
+        both in pixels. The patch that gets transformed is ``ny_corr + 2*ysearch``
+        by ``nx_corr + 2*xsearch``. The defaults are a 64 px template searched over
+        +/-16 px, i.e. 320 m and +/-80 m at NISAR's 5 m posting; they are **not**
+        GMTSAR's 128/64, which are sized for a radar-geometry pair that still needs
+        coregistering. See :func:`nisar_tools._kernels.pixel_offsets` for why a
+        narrower search is better here.
+
+        ``x_shift``/``y_shift`` centre the search on a known bulk displacement
+        (GMTSAR's PRM ``rshift``/``ashift``) and are added back into the answer.
+        They default to 0 because a geocoded pair is already aligned to the whole
+        pixel; set them from the median of a first pass when it is not.
 
         See :func:`nisar_tools._kernels.pixel_offsets` for the sub-pixel
         refinement (``interp_factor``, ``subpixel_window``, ``subpixel``), the
         input oversampling (``oversample``) and the invalid-sample rule
-        (``min_valid_fraction``). Note ``subpixel_window`` defaults to 16 rather
-        than GMTSAR's 8, which is measured there to cut a systematic sub-pixel
-        bias 3.8-fold at no cost in scatter. ``locations_per_tile`` is a dask
-        granularity dial only and does not change the result.
+        (``min_valid_fraction``). ``locations_per_tile`` is a dask granularity dial
+        only and does not change the result.
+
+        The raw fields this returns are not yet readable as ground motion: they
+        carry the pair's bulk geolocation offset and a few percent of false peaks
+        that the correlation does not flag. :meth:`robust_offsets` removes both.
         """
         if step is not None and (nx is not None or ny is not None):
             raise ValueError(
@@ -206,6 +228,126 @@ class PixelOffsetStack(RasterStackMixin):
         out = self.ds["y_offset"] * float(self.ds.attrs["y_spacing"])
         return out.rename("north_offset")
 
+    def robust_offsets(self, field="x_offset",
+                       min_correlation=DEFAULT_MIN_CORRELATION,
+                       n_sigma=DEFAULT_N_SIGMA, centre=True):
+        """One offset component, gated on correlation, MAD-clipped and centred.
+
+        This is how an offset field is read as ground motion. Three steps, each
+        removing something the raw field carries that is not displacement:
+
+        1. **Drop locations below** ``min_correlation``. The default of 20 is
+           ``fitoffset.csh``'s own threshold on the same number.
+        2. **Drop locations more than** ``n_sigma`` **robust standard deviations
+           from the median**, the scale being the MAD,
+           ``1.4826 * median(|x - median|)``. This is what removes the false
+           peaks, and nothing else does: a window that fails to match still
+           reports an argmax, which pins at the edge of the search and comes back
+           as +/-(search - 0.5) px *with a high correlation*. Measured on a real
+           A061 crop, 3-4% of locations, none of which a correlation cut finds.
+           The MAD is used rather than a standard deviation precisely because
+           those outliers would inflate the scale that is meant to catch them.
+           A MAD of zero says over half the kept locations hold *exactly* the
+           median, which real data does -- the two D_071 granules are
+           co-registered to the whole pixel and their offset is uniform to an IQR
+           of 0.000 -- so the scale is then taken from the locations that do
+           differ, rather than every one of them being called an outlier.
+        3. **Subtract the median** (``centre=False`` keeps it). That median is the
+           pair's bulk geolocation offset -- measured at -1.06 px, i.e. -5.3 m,
+           between two real D_071 granules, agreeing between two crops 20 km apart
+           to 0.06 px. It is several times the deformation signal in the same
+           scene and constant across it, so plotting the raw field shows the
+           offset between two products and hides the ground motion.
+
+        The statistics are computed **per pair**, since each pair has its own bulk
+        shift, and per component, since the two scatter differently (0.093 px in
+        ``y`` against 0.278 px in ``x`` on that same crop, the difference being the
+        signal). The removed median and the robust sigma are recorded in the
+        result's ``attrs`` as ``robust_median``/``robust_sigma``, one per pair --
+        the median is itself a measurement, of how far apart the two products are
+        geolocated.
+
+        ``field`` is any of ``x_offset``, ``y_offset`` (pixels) or ``east_offset``,
+        ``north_offset`` (metres). Returns a lazy-free :class:`xarray.DataArray`
+        with this stack's dims and coords, so it plots and exports like any other
+        field.
+        """
+        fields = {
+            "x_offset": lambda: self.ds["x_offset"],
+            "y_offset": lambda: self.ds["y_offset"],
+            "east_offset": lambda: self.east_offset,
+            "north_offset": lambda: self.north_offset,
+        }
+        if field not in fields:
+            raise KeyError(
+                f"unknown field {field!r}; choose from {sorted(fields)}"
+            )
+        if n_sigma <= 0:
+            raise ValueError(f"n_sigma must be > 0, got {n_sigma}")
+
+        values = np.asarray(fields[field]().values, dtype=float)
+        corr = np.asarray(self.ds["correlation"].values, dtype=float)
+        # A 2-D stack (one pair already selected) still has to be reduced per
+        # plane, so give it a leading axis and take it away again at the end.
+        flat = values.reshape((-1,) + values.shape[-2:])
+        flat_corr = corr.reshape(flat.shape)
+
+        out = np.full_like(flat, np.nan)
+        medians, sigmas = [], []
+        for k in range(flat.shape[0]):
+            plane, good = flat[k], flat_corr[k] >= float(min_correlation)
+            sample = plane[good & np.isfinite(plane)]
+            if sample.size == 0:
+                warnings.warn(
+                    f"pair {k}: no location has correlation >= "
+                    f"{min_correlation} and a finite {field}; the whole plane "
+                    "is blank",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                medians.append(np.nan)
+                sigmas.append(np.nan)
+                continue
+            median = float(np.median(sample))
+            deviation = np.abs(sample - median)
+            sigma = 1.4826 * float(np.median(deviation))
+            if sigma == 0.0:
+                # Over half the kept locations hold *exactly* the median. Real
+                # data does this: the two D_071 granules are co-registered to the
+                # whole pixel and their offset came out uniform to an IQR of
+                # 0.000. Taking the scale from the locations that do differ keeps
+                # those few instead of calling every one of them an outlier.
+                spread = deviation[deviation > 0]
+                sigma = 1.4826 * float(np.median(spread)) if spread.size else 0.0
+            medians.append(median)
+            sigmas.append(sigma)
+            # Only a field that is *entirely* one value still has no scale here --
+            # a granule correlated against itself, which returns 0.000 at every
+            # location. Keep exactly the median then; testing `< n_sigma * 0`
+            # would blank the plane instead.
+            keep = good & (
+                np.abs(plane - median) < float(n_sigma) * sigma
+                if sigma > 0 else plane == median
+            )
+            out[k] = np.where(keep, plane - median if centre else plane, np.nan)
+
+        template = fields[field]()
+        result = xr.DataArray(
+            out.reshape(values.shape).astype(np.float32),
+            dims=template.dims,
+            coords=template.coords,
+            name=f"{field}_robust",
+        )
+        result.attrs.update(
+            source_field=field,
+            min_correlation=float(min_correlation),
+            n_sigma=float(n_sigma),
+            centred=bool(centre),
+            robust_median=medians,
+            robust_sigma=sigmas,
+        )
+        return result
+
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):
         """Write the stack to the workspace and return the reopened lazy stack."""
@@ -308,25 +450,67 @@ class PixelOffsetStack(RasterStackMixin):
 
     # -- plotting ----------------------------------------------------------
     def plot_offsets(self, pair=0, units="pixels", min_correlation=0.0,
-                     quiver=False):
-        """Plot one pair's offset field. See :func:`nisar_tools.plot.plot_offsets`."""
+                     quiver=False, robust=False,
+                     n_sigma=DEFAULT_N_SIGMA, vmax=None):
+        """Plot one pair's offset field. See :func:`nisar_tools.plot.plot_offsets`.
+
+        ``robust=True`` plots :meth:`robust_offsets` of both components instead of
+        the raw fields -- correlation-gated, MAD-clipped and centred on their own
+        median -- which is almost always what you want to look at: the raw field is
+        dominated by the pair's bulk geolocation offset and speckled with
+        search-edge false peaks. It then takes ``min_correlation`` (defaulting to
+        :data:`DEFAULT_MIN_CORRELATION` rather than 0, since a robust statistic
+        needs a gated sample) and ``n_sigma``. ``vmax`` sets the symmetric colour
+        limit explicitly; with ``robust=True`` a value near the expected
+        displacement, e.g. ``vmax=0.5`` px, is usually more legible than the
+        automatic 98th-percentile scale.
+        """
         from .plot import plot_offsets
 
         if units == "metres":
-            x_field, y_field = self.east_offset, self.north_offset
+            names = ("east_offset", "north_offset")
         elif units == "pixels":
-            x_field, y_field = self.ds["x_offset"], self.ds["y_offset"]
+            names = ("x_offset", "y_offset")
         else:
             raise ValueError(f"units must be 'pixels' or 'metres', got {units!r}")
+
+        if robust:
+            if not min_correlation:
+                min_correlation = DEFAULT_MIN_CORRELATION
+            # Select the pair *before* reducing: robust_offsets computes, and on a
+            # lazy stack that would correlate every pair to plot one. The result is
+            # identical either way, the statistics being per-pair already.
+            one = PixelOffsetStack(self.ds.isel(pair=[pair]))
+            x_field, y_field = (
+                one.robust_offsets(
+                    name, min_correlation=min_correlation, n_sigma=n_sigma
+                )
+                for name in names
+            )
+            pair = 0
+            # robust_offsets has already applied the correlation cut, and passing
+            # it on would re-align a (pair, y, x) correlation against a selected
+            # 2-D plane.
+            correlation, cut = None, 0.0
+        else:
+            x_field, y_field = (
+                self.ds[name] if name in self.ds else getattr(self, name)
+                for name in names
+            )
+            correlation, cut = self.ds["correlation"], min_correlation
 
         return plot_offsets(
             x_field.isel(pair=pair),
             y_field.isel(pair=pair),
-            correlation=self.ds["correlation"].isel(pair=pair),
+            correlation=(
+                None if correlation is None else correlation.isel(pair=pair)
+            ),
             epsg_code=self.ds.attrs.get("epsg"),
             units=units,
-            min_correlation=min_correlation,
+            min_correlation=cut,
             quiver=quiver,
+            vmax=vmax,
+            centred=robust,
         )
 
     def __repr__(self):

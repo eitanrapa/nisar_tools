@@ -781,9 +781,9 @@ def _offset_demean(amp, valid):
     return np.where(valid, amp - mean[:, None, None], 0.0)
 
 
-def pixel_offsets(ref, sec, y_origins, x_origins, *, nx_corr=128, ny_corr=128,
-                  xsearch=64, ysearch=64, x_shift=0, y_shift=0,
-                  interp_factor=16, subpixel_window=16, subpixel=True,
+def pixel_offsets(ref, sec, y_origins, x_origins, *, nx_corr=64, ny_corr=64,
+                  xsearch=16, ysearch=16, x_shift=0, y_shift=0,
+                  interp_factor=16, subpixel_window=8, subpixel=True,
                   oversample=1, min_valid_fraction=0.5):
     """Sub-pixel offsets between two images by amplitude cross-correlation.
 
@@ -823,27 +823,49 @@ def pixel_offsets(ref, sec, y_origins, x_origins, *, nx_corr=128, ny_corr=128,
     offsets are NaN (with correlation 0) wherever fewer than ``min_valid_fraction``
     of a patch's samples are finite.
 
-    ``subpixel_window`` defaults to **16, not the reference's 8**, and this is the
-    one departure that changes an answer rather than a convention. The refinement
-    FFT-interpolates that window, which treats it as periodic; at 8 samples a
-    correlation peak has not decayed by the window's edges, and the resulting
-    ringing drags the interpolated maximum around. Measured on a band-limited
-    field, worst bias over fractional shifts 0 to 0.88, and the rms over all of
-    them:
+    **The window defaults are not the reference's.** ``xcorr`` uses
+    ``nx_corr = ny_corr = 128`` with ``xsearch = ysearch = 64``, sized for radar
+    geometry where the pair is genuinely unaligned and the search has to cover a
+    coregistration error. A geocoded pair is already aligned to the whole pixel, so
+    almost all of that search is spent on lags that cannot occur, and every one of
+    them is another chance to pick a false peak. The defaults here are a 64 px
+    template searched over +/-16 px -- 320 m and +/-80 m at NISAR's 5 m posting --
+    which on real data halved the false-peak rate (4.2% to 2.5%) without moving the
+    measured displacement gradient. Widen ``xsearch``/``ysearch`` only for a pair
+    that really is offset by more than a few pixels, and use ``x_shift``/``y_shift``
+    in preference: it recentres the search instead of enlarging it.
 
-    ======================  ======  ======  ======
-    ``subpixel_window``          8      16      32
-    ----------------------  ------  ------  ------
-    max abs bias (px)       0.1528  0.0397  0.1300
-    rms error (px)          0.0938  0.0944  0.2006
-    ======================  ======  ======  ======
+    ``subpixel_window`` follows the reference at **8**, and the reason is worth
+    recording because it went the other way at the old, wider defaults. The
+    refinement FFT-interpolates that window, i.e. treats it as periodic, and at 8
+    samples a correlation peak has not decayed by the window's edges, so ringing
+    drags the interpolated maximum around. That is a *bias*. Measured on a
+    band-limited field over fractional shifts 0 to 0.94, at the defaults above:
 
-    So 16 cuts the bias 3.8x for the same scatter and ~18% more time in this step;
-    32 is worse again, its window reaching into the peak's sidelobes. Raising
-    ``interp_factor`` does **not** help -- 16 and 64 bias identically -- which is
-    what shows this is the window and not the interpolation step size, and a
-    parabola fit to the same surfaces is unbiased, which is what shows the surface
-    itself is right. Pass ``subpixel_window=8`` to reproduce the reference.
+    ==========================  ======  ======
+    ``subpixel_window``              8      16
+    --------------------------  ------  ------
+    max abs bias (px)           0.1357  0.0791
+    scatter after centring (px) 0.0939  0.1934
+    ==========================  ======  ======
+
+    So the wider window does cut the bias, and at ``nx_corr=128, xsearch=64`` it did
+    so for free (rms 0.0945 vs 0.1019) -- which is why 16 was the default until the
+    windows shrank. At a 64 px template it is no longer free: it buys 0.066 px of
+    bias for 0.070 px of extra scatter. The scatter is what matters, because the
+    bias is uniform over a scene and
+    :meth:`~nisar_tools.offsets.PixelOffsetStack.robust_offsets` -- the way an
+    offset field is read as ground motion -- subtracts the field's own median and
+    so removes it exactly, while leaving the scatter untouched. Pass
+    ``subpixel_window=16`` when the absolute offset matters rather than its
+    variation, and keep it well under ``2*search``: the window is clipped to the
+    correlation surface and zero-padded beyond it, so one as wide as the surface
+    biases every peak that is not already centred.
+
+    Raising ``interp_factor`` does **not** substitute -- 16 and 64 bias identically
+    -- which is what shows this is the window and not the interpolation step size,
+    and a parabola fit to the same surfaces is unbiased, which is what shows the
+    surface itself is right.
 
     The window only matters where the correlation peak is *wide*. On real NISAR
     GSLC, which is close to critically sampled and so nearly white, 8, 16 and 32
@@ -866,6 +888,18 @@ def pixel_offsets(ref, sec, y_origins, x_origins, *, nx_corr=128, ny_corr=128,
                         ("subpixel_window", subpixel_window)):
         if int(value) < 2 or int(value) % 2:
             raise ValueError(f"{name} must be an even integer >= 2, got {value}")
+    # The refinement window is cut from the 2*ysearch x 2*xsearch correlation
+    # surface and zero-padded where it overhangs, so one wider than the surface
+    # cannot be centred on any peak and biases every location.
+    for name, search in (("xsearch", xsearch), ("ysearch", ysearch)):
+        if int(subpixel_window) > 2 * int(search):
+            raise ValueError(
+                f"subpixel_window={subpixel_window} is wider than the "
+                f"{2 * int(search)}-sample correlation surface set by "
+                f"{name}={search}; the refinement window must fit inside it "
+                f"(keep it well under 2*{name}, so an off-centre peak still "
+                f"gets a full window)"
+            )
     if int(interp_factor) < 1:
         raise ValueError(f"interp_factor must be >= 1, got {interp_factor}")
     if int(oversample) < 1:
@@ -1033,7 +1067,7 @@ def pixel_offsets_planes(ref, sec, y_origins, x_origins, **kwargs):
 
 
 def pixel_offsets_dask(ref, sec, y_origins, x_origins, *, locations_per_tile=16,
-                       nx_corr=128, ny_corr=128, xsearch=64, ysearch=64,
+                       nx_corr=64, ny_corr=64, xsearch=16, ysearch=16,
                        x_shift=0, y_shift=0, **kwargs):
     """:func:`pixel_offsets` over dask ``(pair, y, x)`` arrays, tile by tile.
 
@@ -1045,9 +1079,11 @@ def pixel_offsets_dask(ref, sec, y_origins, x_origins, *, locations_per_tile=16,
     way to express an output grid coarser than its input.
 
     Read amplification is ``((k*step + window) / (k*step))**2`` for
-    ``k = locations_per_tile``: about 1.5x at the defaults. Lowering it reads more
-    and makes more, smaller tasks; it changes nothing about the result, which is
-    why it does not belong in a stage's parameter hash.
+    ``k = locations_per_tile``: about 1.9x at the defaults, where the dense step 16
+    lattice makes a tile narrow relative to its 96 px window. Raising
+    ``locations_per_tile`` brings it down (1.4x at 32, 1.2x at 64) at the cost of
+    fewer, larger tasks; it changes nothing about the result, which is why it does
+    not belong in a stage's parameter hash.
 
     Returns the three dask arrays ``(x_offset, y_offset, correlation)``.
     """

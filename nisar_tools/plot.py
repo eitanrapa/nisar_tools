@@ -81,14 +81,20 @@ def plot_los_displacement(los, epsg_code=None):
 
 
 def plot_offsets(x_offset, y_offset, correlation=None, epsg_code=None,
-                 units="pixels", min_correlation=0.0, quiver=False):
+                 units="pixels", min_correlation=0.0, quiver=False,
+                 vmax=None, centred=False):
     """Plot a pixel-offset field as two panels, x beside y.
 
     Both panels share **one** symmetric diverging scale, taken from the 98th
-    percentile of the two together: the components are meant to be compared by
-    eye, which fails if each picks its own range. ``min_correlation`` blanks
-    locations below that correlation, and ``quiver=True`` overlays the offsets as
-    arrows on the second panel.
+    percentile of the two together unless ``vmax`` sets it: the components are
+    meant to be compared by eye, which fails if each picks its own range.
+    ``min_correlation`` blanks locations below that correlation, and
+    ``quiver=True`` overlays the offsets as arrows on the second panel.
+
+    ``centred`` only labels the panels -- pass it when the fields have already had
+    their median removed (see
+    :meth:`~nisar_tools.offsets.PixelOffsetStack.robust_offsets`), so the plot
+    says which quantity is on screen.
 
     Returns ``(fig, axes)``, with ``axes`` a length-2 array.
     """
@@ -99,13 +105,14 @@ def plot_offsets(x_offset, y_offset, correlation=None, epsg_code=None,
         x_field = x_field.where(corr >= min_correlation)
         y_field = y_field.where(corr >= min_correlation)
 
-    both = np.concatenate([x_field.values.ravel(), y_field.values.ravel()])
-    finite = both[np.isfinite(both)]
-    vmax = float(np.percentile(np.abs(finite), 98)) if finite.size else None
-    if not vmax:
-        vmax = None
+    if vmax is None:
+        both = np.concatenate([x_field.values.ravel(), y_field.values.ravel()])
+        finite = both[np.isfinite(both)]
+        vmax = float(np.percentile(np.abs(finite), 98)) if finite.size else None
+    vmax = float(vmax) if vmax else None
     label = "Offset (m)" if units == "metres" else "Offset (pixels)"
     names = (("East", "North") if units == "metres" else ("Map x", "Map y"))
+    suffix = " (median removed)" if centred else ""
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 7), dpi=150, sharey=True)
     for ax, field, name in zip(axes, (x_field, y_field), names):
@@ -116,7 +123,7 @@ def plot_offsets(x_offset, y_offset, correlation=None, epsg_code=None,
             vmax=vmax,
             cbar_kwargs={"label": label, "shrink": 0.8},
         )
-        ax.set_title(f"{name} offset", fontsize=14, pad=10)
+        ax.set_title(f"{name} offset{suffix}", fontsize=14, pad=10)
         ax.set_xlabel("Longitude", fontsize=12)
         ax.grid(color="gray", linestyle="--", alpha=0.5)
     axes[0].set_ylabel("Latitude", fontsize=12)
