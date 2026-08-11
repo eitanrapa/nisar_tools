@@ -323,6 +323,7 @@ field of a large earthquake.
 offsets = stack.pixel_offsets()                   # or step=, or nx=/ny= (xcorr's -nx/-ny)
 offsets = offsets.persist(ws, "offsets")
 offsets.to_text("offsets/")                       # freq_xcorr_pair0.dat
+offsets.to_text("offsets/", lonlat=True)          # + lon, lat columns
 offsets.to_grd("offsets/")                        # x_offset, y_offset, correlation
 
 # Almost always what you want to look at -- see "Reading the field" below.
@@ -436,6 +437,17 @@ format string, leading and trailing space included, so `fitoffset.csh` and any
 and index the **source** GSLC grid, not the coarse lattice. There is no header by
 default, because `xcorr` writes none and an unprefixed one would be compared
 numerically by `awk`; `comment=` opts into `#`-prefixed provenance lines.
+
+`to_text(..., lonlat=True)` appends two more columns, **`lon` then `lat`** in
+decimal degrees — GMT's x-then-y order, not the spoken "lat/lon" — giving each
+location's own ground position, which is the only thing in the file that means
+anything outside this granule's grid (`gmt psxy`, `blockmean`, or a join against
+another track). They are *appended*, so `$1`…`$5` keep their positions and every
+`awk` on top of them reads the same fields; the five-column prefix of a line is
+byte-for-byte what the plain file holds. Off by default so the plain file stays
+exactly `xcorr`'s. The transform is pointwise over the location lattice, not two
+1-D axis vectors: a projected grid is rotated against true north away from its
+central meridian, so latitude varies along a row and longitude down a column.
 
 Measured on the two real D_071 granules (12 days apart, 5 m posting, a 28 km
 crop): 97.4% of locations above correlation 20. Their integer offset is exactly 0

@@ -68,6 +68,27 @@ def native_bbox_to_lonlat(x_min, x_max, y_min, y_max, epsg_code):
     return transform_native_bbox(x_min, x_max, y_min, y_max, epsg_code, 4326)
 
 
+def native_to_lonlat(x, y, epsg_code):
+    """Transform native-CRS coordinates to lon/lat, point by point.
+
+    ``x`` and ``y`` are array-likes of matching shape (a meshgrid, say, or two
+    flat lists of the same length); the returned ``(lon, lat)`` arrays have that
+    shape. ``epsg_code`` is an EPSG code or a :class:`pyproj.CRS` (see
+    :func:`as_crs`).
+
+    Unlike :func:`native_bbox_to_lonlat` this is genuinely *pointwise*. A
+    projected grid's lon/lat both vary along both axes -- the meridians converge
+    across a UTM zone and the grid is rotated against true north away from the
+    central meridian -- so a corner-to-corner box cannot stand in for the
+    interior, and two 1-D axis vectors cannot either.
+    """
+    transformer = Transformer.from_crs(as_crs(epsg_code), "EPSG:4326", always_xy=True)
+    lon, lat = transformer.transform(
+        np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    )
+    return np.asarray(lon), np.asarray(lat)
+
+
 def transform_native_bbox(x_min, x_max, y_min, y_max, src_epsg, dst_epsg):
     """Transform a native-CRS bbox into another projected CRS.
 

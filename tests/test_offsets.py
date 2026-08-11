@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 import xarray as xr
 from offset_reference import correlation_surface, peak_offset
+from pyproj import Transformer
 from scipy.ndimage import gaussian_filter
 
 matplotlib.use("Agg")  # before pyplot is imported anywhere
@@ -617,6 +618,60 @@ def test_to_text_columns_are_the_ones_fitoffset_reads(gslc_factory, tmp_path):
     np.testing.assert_allclose(table[:, 1], -3, atol=0.2)    # x_offset
     np.testing.assert_allclose(table[:, 3], 2, atol=0.2)     # y_offset
     assert (table[:, 4] > 20).all()                          # the SNR column
+
+
+def test_to_text_appends_lon_lat_without_moving_the_xcorr_columns(
+    gslc_factory, tmp_path
+):
+    """lonlat=True adds columns 6 and 7; $1..$5 stay exactly where awk expects."""
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    plain = np.loadtxt(offsets.to_text(tmp_path / "plain")[0])
+    geographic = np.loadtxt(offsets.to_text(tmp_path / "geo", lonlat=True)[0])
+
+    assert plain.shape[1] == 5
+    assert geographic.shape[1] == 7
+    np.testing.assert_array_equal(geographic[:, :5], plain)
+
+
+def test_to_text_lon_lat_are_the_locations_own_ground_positions(
+    gslc_factory, tmp_path
+):
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    table = np.loadtxt(offsets.to_text(tmp_path / "geo", lonlat=True)[0])
+
+    # Ground truth straight from pyproj, on the (y, x) location grid. Rounded to
+    # the format's own six decimals, i.e. ~0.1 m.
+    yy, xx = np.meshgrid(
+        offsets.ds["y"].values, offsets.ds["x"].values, indexing="ij"
+    )
+    t = Transformer.from_crs(
+        f"EPSG:{offsets.ds.attrs['epsg']}", "EPSG:4326", always_xy=True
+    )
+    lon, lat = t.transform(xx, yy)
+    np.testing.assert_allclose(table[:, 5], lon.ravel(), atol=1e-6)
+    np.testing.assert_allclose(table[:, 6], lat.ravel(), atol=1e-6)
+
+    # Column order is GMT's, x then y: lon spans a UTM easting's worth of
+    # degrees west of Greenwich, lat a northing's worth north of the equator.
+    assert (table[:, 5] < 0).all() and (table[:, 6] > 0).all()
+
+
+def test_to_text_lon_lat_vary_along_both_axes(gslc_factory, tmp_path):
+    """The transform is pointwise, not two 1-D axis vectors.
+
+    A projected grid is rotated against true north away from its central
+    meridian, so latitude changes along a row and longitude along a column. Both
+    are tiny on a synthetic grid this small -- the point is that they are not
+    exactly zero, which is what a per-axis transform would give.
+    """
+    offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
+    table = np.loadtxt(offsets.to_text(tmp_path / "geo", lonlat=True)[0])
+    ny, nx = offsets.ds["x_offset"].isel(pair=0).shape
+    lon = table[:, 5].reshape(ny, nx)
+    lat = table[:, 6].reshape(ny, nx)
+
+    assert np.diff(lat, axis=1).any()    # latitude varies along a row
+    assert np.diff(lon, axis=0).any()    # longitude varies down a column
 
 
 def test_to_text_drops_nan_and_low_correlation(gslc_factory, tmp_path):

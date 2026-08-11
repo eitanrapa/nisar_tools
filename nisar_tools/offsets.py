@@ -28,7 +28,7 @@ import numpy as np
 import rioxarray  # noqa: F401
 import xarray as xr
 
-from . import _kernels
+from . import _kernels, geo
 from ._base import RasterStackMixin, open_stage
 from .interferogram import make_pairs
 
@@ -383,7 +383,7 @@ class PixelOffsetStack(RasterStackMixin):
         ]
 
     def to_text(self, outdir, indices=None, min_correlation=0.0,
-                stem="freq_xcorr", comment=None):
+                stem="freq_xcorr", comment=None, lonlat=False):
         """Write the offsets as GMTSAR ``xcorr`` ASCII, one file per pair.
 
         Each line is ``x_pixel x_offset y_pixel y_offset correlation`` under
@@ -391,6 +391,15 @@ class PixelOffsetStack(RasterStackMixin):
         files feed ``fitoffset.csh`` -- or any ``awk '{if ($5 > 20) ...}'`` on top
         of it -- unchanged. Pixel indices are 0-based, as the reference's C array
         indices are, and index the **source** GSLC grid, not this coarse one.
+
+        ``lonlat=True`` appends two more columns, ``lon`` and ``lat`` in decimal
+        degrees, giving the location's own ground position -- what a GMT ``psxy``
+        or ``blockmean`` wants, and the only thing in the file that means anything
+        outside this granule's grid. They are **appended**, in that order (GMT's
+        x-then-y, not the spoken "lat/lon"), so the five columns the reference
+        writes keep their positions and every ``awk`` on top of them still reads
+        the same fields. Off by default: the plain file is byte-for-byte what
+        ``xcorr`` produces, and that is worth keeping as the default.
 
         Files are named ``{stem}_pair{i}.dat``, mirroring
         :meth:`~nisar_tools._base.RasterStackMixin.to_grd`; ``indices`` selects
@@ -415,6 +424,22 @@ class PixelOffsetStack(RasterStackMixin):
         # ravel that pairs it with its offsets.
         yy, xx = np.meshgrid(y_pixel, x_pixel, indexing="ij")
 
+        # xcorr's print_results.c format string, exactly.
+        fmt = " %d %6.3f %d %6.3f %6.2f "
+        extra = ()
+        if lonlat:
+            # Transformed as a full (y, x) grid rather than per axis: lon and lat
+            # each vary along *both* map axes, so the two 1-D coordinate vectors
+            # do not separate. It is the coarse lattice, so this is a few thousand
+            # points, not the source grid's millions.
+            map_yy, map_xx = np.meshgrid(
+                np.asarray(self.ds["y"].values, dtype=float),
+                np.asarray(self.ds["x"].values, dtype=float),
+                indexing="ij",
+            )
+            extra = geo.native_to_lonlat(map_xx, map_yy, self.crs)
+            fmt += "%11.6f %10.6f "
+
         paths = []
         for i in range(self.ds.sizes["pair"]) if indices is None else indices:
             sel = self.ds.isel(pair=i)
@@ -428,6 +453,7 @@ class PixelOffsetStack(RasterStackMixin):
             )
             table = np.column_stack([
                 xx[keep], x_off[keep], yy[keep], y_off[keep], corr[keep],
+                *(column[keep] for column in extra),
             ])
             if len(table) < MIN_USEFUL_ROWS:
                 warnings.warn(
@@ -443,8 +469,7 @@ class PixelOffsetStack(RasterStackMixin):
                 if comment:
                     for line in str(comment).splitlines():
                         handle.write(f"# {line}\n")
-                # xcorr's print_results.c format string, exactly.
-                np.savetxt(handle, table, fmt=" %d %6.3f %d %6.3f %6.2f ")
+                np.savetxt(handle, table, fmt=fmt)
             paths.append(path)
         return paths
 
