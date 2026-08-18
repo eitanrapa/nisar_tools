@@ -8,8 +8,9 @@ solve keeps its own directory.
 
 The tag is read off ``summary.json`` rather than passed in -- ``run_lam1000_
 offset_1696el`` -- so it describes the run that actually happened rather than
-what the caller meant to type. The ramp *mode* is not recorded in the summary,
-so it is inferred from whether the ramp labels carry ``:dx``/``:dy``.
+what the caller meant to type. The ramp *mode* is not recorded in the summary, so
+it is inferred from the ramp labels -- see ``_ramp_mode``, which tests the highest
+degree first because a cubic run still carries ``:dx`` labels.
 
 A subdirectory rather than a flat rename, because ``fit_*.png`` would otherwise
 re-match files renamed on an earlier pass and quietly build up
@@ -33,12 +34,31 @@ STAGE_E_FILES = ("slip_model.slip.zip", "slip_model.txt", "summary.json",
 STAGE_E_FIGS = ("slip.png", "slip_strike.png", "fit_*.png")
 
 
+def _ramp_mode(ramp):
+    """Name the ramp mode from the coefficient labels ``summary.json`` records.
+
+    Highest degree first. A label's suffix does not identify its degree on its own
+    -- ``ramp_columns`` writes ``:dx``, ``:dxx``, ``:dxxx`` -- so testing for the
+    linear suffixes before the higher ones would match a cubic run's ``:dx`` and
+    file it under the wrong name.
+    """
+    keys = list(ramp)
+    for name, suffixes in (
+        ("cubic", (":dxxx", ":dxxy", ":dxyy", ":dyyy")),
+        ("quadratic", (":dxx", ":dxy", ":dyy")),
+        ("linear", (":dx", ":dy")),
+    ):
+        if any(k.endswith(suffixes) for k in keys):
+            return name
+    return "offset"
+
+
 def main():
     summary = OUT_DIR / "summary.json"
     if not summary.exists():
         raise SystemExit(f"No {summary} -- nothing from stage 3 to archive.")
     s = json.loads(summary.read_text())
-    ramp = "linear" if any(k.endswith((":dx", ":dy")) for k in s["ramp"]) else "offset"
+    ramp = _ramp_mode(s["ramp"])
     tag = f"lam{s['smoothing']:g}_{ramp}_{s['mesh']['n_elements']}el"
 
     # Never clobber an earlier archive: two runs can share a tag when only

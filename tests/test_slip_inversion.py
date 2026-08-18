@@ -10,7 +10,13 @@ import numpy as np
 import pytest
 from slip_synthetic import forward_los_stack, tapered_slip
 
-from nisar_tools.slip import FaultMesh, FaultTrace, Observations, SlipInversion
+from nisar_tools.slip import (
+    FaultMesh,
+    FaultTrace,
+    Observations,
+    SlipInversion,
+    ramp_content,
+)
 from nisar_tools.slip.inversion import _StackedOperator
 from nisar_tools.slip.regularize import (
     neighbor_smoothing,
@@ -140,7 +146,71 @@ def test_ramp_columns_are_per_track_and_scaled(recovery):
 
     assert ramp_columns(obs, "none")[0].shape == (obs.n, 0)
     with pytest.raises(ValueError, match="kind must be"):
-        ramp_columns(obs, "quadratic")
+        ramp_columns(obs, "quartic")
+
+
+@pytest.mark.parametrize("kind, per_track, terms", [
+    ("quadratic", 6, ["offset", "dx", "dy", "dxx", "dxy", "dyy"]),
+    ("cubic", 10, ["offset", "dx", "dy", "dxx", "dxy", "dyy",
+                   "dxxx", "dxxy", "dxyy", "dyyy"]),
+])
+def test_higher_degree_ramps_stay_per_track_and_nest(recovery, kind, per_track,
+                                                     terms):
+    """Total-degree columns, still confined to their track, still O(1)."""
+    _, _, obs, _ = recovery
+    matrix, labels = ramp_columns(obs, kind)
+    n_track = len(obs.tracks)
+    assert matrix.shape == (obs.n, per_track * n_track)
+    assert [l.split(":")[1] for l in labels[:per_track]] == terms
+
+    # No leakage across tracks. The products are zero off-track only because
+    # every monomial carries at least one factor of cx or cy -- `cx**0` is one
+    # *everywhere*, so a degree-0 term inside the loop would break this.
+    for i, name in enumerate(obs.tracks):
+        block = matrix[:, per_track * i:per_track * (i + 1)]
+        np.testing.assert_allclose(block[~obs.track_mask(name)], 0.0)
+    assert np.abs(matrix).max() <= 1.0
+    assert np.linalg.matrix_rank(matrix) == matrix.shape[1]
+
+    # Each degree strictly contains the one below: the lower columns are
+    # identical, so raising `kind` cannot change what an existing coefficient
+    # means or silently reorder a saved run's labels.
+    lower_kind = {"quadratic": "linear", "cubic": "quadratic"}[kind]
+    lower_per_track = {"linear": 3, "quadratic": 6}[lower_kind]
+    lower, lower_labels = ramp_columns(obs, lower_kind)
+    for i in range(n_track):
+        hi = slice(per_track * i, per_track * i + lower_per_track)
+        lo = slice(lower_per_track * i, lower_per_track * (i + 1))
+        np.testing.assert_allclose(matrix[:, hi], lower[:, lo])
+        assert labels[hi] == lower_labels[lo]
+
+
+def test_higher_ramp_absorbs_a_curvature_that_linear_cannot(recovery):
+    """The point of the option: a real quadratic nuisance has somewhere to go.
+
+    A deep copy, because ``recovery`` is module-scoped and ``Dataset.copy()`` is
+    shallow -- editing ``los`` in place would hand every later test a different
+    scene than the one its numbers were measured on.
+    """
+    mesh, _, obs, _ = recovery
+    curved = Observations(obs.ds.copy(deep=True))
+    x = np.asarray(curved.ds["x"].values, dtype=float)
+    cx = (x - x.mean()) / max(np.ptp(x), 1.0)
+    # Centred so the curvature is not mostly a disguised offset, which the
+    # offset column would absorb on its own and prove nothing.
+    curved.ds["los"].values[:] += 0.30 * (cx ** 2 - float((cx ** 2).mean()))
+
+    content = ramp_content(curved)
+    assert content["curvature_only"] > 5.0
+    assert (content["quadratic"]["variance_reduction"]
+            > content["linear"]["variance_reduction"])
+
+    quad = SlipInversion(mesh, curved, ramp="quadratic")
+    lin = SlipInversion(mesh, curved, ramp="linear")
+    assert quad.n_ramp == 2 * lin.n_ramp
+    m_quad = quad.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    m_lin = lin.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    assert m_quad.variance_reduction > m_lin.variance_reduction
 
 
 # -- the acceptance test -----------------------------------------------------

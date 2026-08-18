@@ -393,13 +393,14 @@ def scene_report(los_stack, trace, frame, mesh=None, pair=0, block=2000.0,
 
 
 def ramp_content(obs):
-    """How much of the data a per-track offset, then offset plus gradient, explains.
+    """How much of the data each ramp degree explains, offset through cubic.
 
-    The question this answers is whether ``ramp="linear"`` is absorbing signal
-    rather than nuisance. For a long, near east-west strike-slip fault it very
-    well might: the far-field coseismic pattern is an arctangent step across the
-    trace, which over a finite aperture looks a great deal like a gradient
-    perpendicular to strike, so the ramp columns and the slip genuinely compete.
+    The question this answers is whether ``ramp=`` is absorbing signal rather than
+    nuisance. For a long, near east-west strike-slip fault it very well might: the
+    far-field coseismic pattern is an arctangent step across the trace, which over
+    a finite aperture looks a great deal like a gradient perpendicular to strike --
+    and, at third order, a great deal like an odd cubic -- so the ramp columns and
+    the slip genuinely compete.
 
     Needs no Green's matrix -- it reuses
     :func:`~nisar_tools.slip.regularize.ramp_columns` directly, so it costs
@@ -409,6 +410,19 @@ def ramp_content(obs):
     gradient reads directly as **metres of line of sight across the scene**.
     Orbital ramps are centimetres at that scale; tens of centimetres is
     deformation being taken away from the slip model.
+
+    ``gradient_only``, ``curvature_only`` and ``cubic_only`` are the marginal
+    variance reduction of each step over the one before it, which is what says
+    whether paying for the extra columns buys anything.
+
+    ⚠️ **These numbers overstate the ramp, and by a lot.** Nothing here has a fault
+    model, so the polynomial is free to claim the coseismic pattern -- on the real
+    Venezuela set this reported an A061 curvature ten times larger, and opposite in
+    sign, to what the joint inversion settles on once the fault competes for the
+    same structure. So a large ``curvature_only`` or ``cubic_only`` is a prompt to
+    solve at two adjacent degrees and compare peak slip and moment, **not** evidence
+    that a ramp of that size is present. What it does argue for either way is
+    solving the ramp jointly rather than pre-removing a higher degree.
     """
     from .regularize import ramp_columns
 
@@ -418,7 +432,7 @@ def ramp_content(obs):
     denom = float(d @ d)
 
     out = {}
-    for kind in ("offset", "linear"):
+    for kind in ("offset", "linear", "quadratic", "cubic"):
         columns, labels = ramp_columns(obs, kind)
         coef, *_ = np.linalg.lstsq(columns * w[:, None], d * w, rcond=None)
         residual = d - columns @ coef
@@ -427,4 +441,8 @@ def ramp_content(obs):
             "coefficients": dict(zip(labels, coef.tolist())),
         }
     out["gradient_only"] = out["linear"]["variance_reduction"] - out["offset"]["variance_reduction"]
+    out["curvature_only"] = (out["quadratic"]["variance_reduction"]
+                             - out["linear"]["variance_reduction"])
+    out["cubic_only"] = (out["cubic"]["variance_reduction"]
+                         - out["quadratic"]["variance_reduction"])
     return out

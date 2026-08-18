@@ -288,6 +288,16 @@ def slip_bounds(n_elements, strike=(-10.0, 10.0), dip=(-10.0, 10.0), polarity=No
     return lo, hi
 
 
+#: Total polynomial degree of each ``ramp_columns`` mode. The column count per
+#: track is the usual ``(d + 1) * (d + 2) / 2``: 1, 3, 6, 10.
+RAMP_DEGREE = {"offset": 0, "linear": 1, "quadratic": 2, "cubic": 3}
+
+
+def _ramp_term_label(degree, i):
+    """Suffix for the ``x**(degree - i) * y**i`` term: ``dx``, ``dxy``, ``dxxy``."""
+    return "d" + "x" * (degree - i) + "y" * i
+
+
 def ramp_columns(obs, kind="linear"):
     """Extra unbounded columns absorbing a per-track offset or ramp.
 
@@ -297,18 +307,53 @@ def ramp_columns(obs, kind="linear"):
     entirely fictitious slip, because that is what produces a smooth far-field
     signal.
 
-    ``kind`` is ``"offset"`` (one column per track), ``"linear"`` (offset plus
-    ``x`` and ``y`` gradients: three columns) or ``"none"``. Columns are non-zero
-    only on their own track's rows. Returns ``(matrix, labels)``; the matrix has
-    ``obs.n`` rows.
+    ``kind`` is ``"none"`` or one of :data:`RAMP_DEGREE` -- ``"offset"`` (one
+    column per track), ``"linear"`` (plus the two gradients: three), ``"quadratic"``
+    (plus the three second-order terms: six) or ``"cubic"`` (plus the four
+    third-order terms: ten). Columns are non-zero only on their own track's rows.
+    Returns ``(matrix, labels)``; the matrix has ``obs.n`` rows.
+
+    Solving a ramp **jointly** is not the same as pre-removing one with
+    :meth:`~nisar_tools.unwrap.UnwrappedStack.deramp`, and it is the reason the
+    higher degrees exist here at all. A pre-removal fits the polynomial to the data
+    alone, so where a signal mask spans the raster it has to *extrapolate* into a
+    region no pixel constrains -- which is what makes degree >= 3 unusable there.
+    Here the ramp and the slip are estimated together against one design matrix, so
+    the fault model competes for the near-field structure and the ramp is
+    constrained everywhere at once.
+
+    ⚠️ **That competition is not free, and it is worst exactly at cubic.** The
+    far-field coseismic pattern of a long strike-slip fault is an arctangent step
+    across the trace, and over a finite aperture an arctangent is very well
+    approximated by an odd cubic -- so ``"cubic"`` is the degree whose columns most
+    resemble the signal they sit beside. Nothing here detects that; the columns are
+    unbounded while slip is not, so a ramp that has drifted into eating the
+    earthquake still reports an excellent variance reduction. Measure it: solve at
+    two adjacent degrees and compare peak slip and moment, which is what
+    :func:`~nisar_tools.slip.diagnostics.ramp_content` alone cannot settle, having
+    no fault model of its own.
+
+    Columns are raw total-degree monomials in the centred, span-scaled coordinates,
+    built in the same order :func:`~nisar_tools._kernels._poly_columns` uses. They
+    are not orthogonalised against each other, so an individual ``:dxx``
+    coefficient does not read as cleanly as ``:dx`` does; the column *space* is
+    what the fit sees, and it is unaffected. Note the higher-degree columns are
+    also numerically smaller -- the centred coordinates are bounded by about a
+    half, so a cubic column's norm is ~8x an offset column's -- which adds to a
+    joint system whose column norms already span three orders of magnitude.
 
     The reference implementation reserves space for this and never uses it -- its
     ``bounds_new`` takes an ``add_col`` argument that every caller passes as zero.
     """
     if kind == "none":
         return np.zeros((obs.n, 0)), []
-    if kind not in ("offset", "linear"):
-        raise ValueError("kind must be 'offset', 'linear' or 'none'")
+    if kind not in RAMP_DEGREE:
+        raise ValueError(
+            "kind must be 'none' or one of "
+            + ", ".join(repr(k) for k in RAMP_DEGREE)
+            + f", got {kind!r}"
+        )
+    degree = RAMP_DEGREE[kind]
 
     ds = obs.ds
     track = ds["track"].values
@@ -328,8 +373,13 @@ def ramp_columns(obs, kind="linear"):
 
         columns.append(sel.astype(float))
         labels.append(f"{name}:offset")
-        if kind == "linear":
-            columns += [cx, cy]
-            labels += [f"{name}:dx", f"{name}:dy"]
+        # Total-degree monomials, cx**(d-i) * cy**i. Both factors are zero off
+        # this track, so every product is -- but only because the loop starts at
+        # d=1: at d=0 both exponents are zero and `cx**0` is *one everywhere*,
+        # which would silently give every track a second, shared offset column.
+        for d in range(1, degree + 1):
+            for i in range(d + 1):
+                columns.append(cx ** (d - i) * cy ** i)
+                labels.append(f"{name}:{_ramp_term_label(d, i)}")
 
     return np.column_stack(columns), labels

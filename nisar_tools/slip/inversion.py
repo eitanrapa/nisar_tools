@@ -162,6 +162,16 @@ class SlipInversion:
                  velocity_model=None):
         """``engine`` and ``basis`` choose the physics and the parameterization.
 
+        ``ramp`` adds unbounded per-track nuisance columns -- ``"none"``,
+        ``"offset"``, ``"linear"`` or ``"quadratic"`` (see
+        :func:`~nisar_tools.slip.regularize.ramp_columns`). Solving the ramp here
+        is preferable to pre-removing it with
+        :meth:`~nisar_tools.unwrap.UnwrappedStack.deramp`: a pre-removal fits the
+        polynomial to the data alone and has to extrapolate under a masked signal
+        region, while these columns are constrained jointly with the slip. Run
+        :func:`~nisar_tools.slip.diagnostics.ramp_content` first to see what each
+        degree would absorb.
+
         ``velocity_model`` is **not** used to compute Green's functions -- for a
         layered medium that information is already inside the engine's EDGRN
         tables, and for a homogeneous half-space the displacements do not depend

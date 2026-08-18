@@ -221,3 +221,17 @@ def test_ramp_content_separates_an_offset_from_a_gradient(trace, frame):
     # Columns are span-normalised, so the coefficient reads as metres of LOS
     # across the scene -- which is what makes "centimetres = orbit" a usable rule.
     assert abs(gradient["linear"]["coefficients"]["t:dx"]) == pytest.approx(0.4, rel=0.1)
+    # A pure gradient is already fully explained at linear, so the higher-order
+    # columns must buy essentially nothing. This is the guard that says the
+    # marginal numbers report real structure rather than tracking column count --
+    # a least-squares fit can only improve as columns are added, so without it
+    # every "_only" key would look meaningful on any data at all.
+    assert gradient["curvature_only"] < 1.0
+    assert gradient["cubic_only"] < 1.0
+
+    cx = (x - x.mean()) / span
+    obs.ds["los"] = ("obs", 0.4 * (cx ** 2 - float((cx ** 2).mean())))
+    curvature = D.ramp_content(obs)
+    assert curvature["linear"]["variance_reduction"] < 60.0
+    assert curvature["quadratic"]["variance_reduction"] > 99.0
+    assert curvature["curvature_only"] > 40.0
