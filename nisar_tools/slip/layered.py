@@ -63,9 +63,10 @@ from .greens import _as_points, _require_finite
 
 #: Relative accuracy the adaptive quadrature aims for, per element.
 #:
-#: The single-point (centroid) error is about ``0.06 * L / r`` for an element of
-#: size ``L`` seen from distance ``r``, and an order-``k`` rule divides that by
-#: roughly ``k``. 3e-3 is comfortably below the noise floor of a real
+#: The relative error of an order-``k`` rule on an element of size ``L`` seen from
+#: distance ``r`` is about ``0.31 * (k * r / L) ** -2`` (see
+#: :data:`_QUADRATURE_CONSTANT` for the measurement, and note the exponent is 2,
+#: not 1). 3e-3 is comfortably below the noise floor of a real
 #: interferogram -- measured at 11.8 mm within-cell scatter on the Venezuela
 #: scenes, against slip of order a metre -- while costing under two points per
 #: source-receiver pair.
@@ -81,15 +82,16 @@ REFERENCE_QUADRATURE_POINTS = 91
 #: work than the fixed rule at any pair -- a tidy invariant that turned out to
 #: cost real accuracy where it matters most.
 #:
-#: The order is ``0.06 * L / (tolerance * r)``, so a cap refuses the request for
-#: ``r`` below about ``2 * L``. Since ``r`` is measured from the element centroid
-#: it is never less than that element's depth, which confines the refusal to
+#: The order is ``(L / r) * sqrt(C / tolerance)``, so a cap refuses the request
+#: for ``r`` below about ``2 * L`` at the default tolerance. Since ``r`` is
+#: measured from the element centroid it is never less than that element's own
+#: depth, which confines the refusal to
 #: **shallow elements seen by near-fault observations** -- exactly the pairs that
 #: carry the shallow-slip constraint. Measured against an order-30 rule, the
 #: error the old cap left is fine down to ``r/L`` ~ 1 (1e-4, well inside the
 #: tolerance) and then falls off a cliff: **7.2e-2 at r/L = 0.5**, where the
-#: observation is inside the element's own footprint and the smooth ``1/(k*r)``
-#: error model stops describing anything.
+#: observation is inside the element's own footprint and the smooth power law
+#: stops describing anything at all.
 #:
 #: Raising the cap is close to free because the adaptive rule only spends where
 #: the model asks, so the extra work lands on the ~1.5% of pairs that were
@@ -99,9 +101,32 @@ REFERENCE_QUADRATURE_POINTS = 91
 #: fixed rule's 81.
 MAX_QUADRATURE_POINTS = 900
 
-#: Empirical constant in the error model above, measured against exact
-#: triangular-dislocation solutions over ``r/L`` from 0.5 to 20.
-_QUADRATURE_CONSTANT = 0.06
+#: Constant in the error model ``err = C * (k * r / L) ** -2``, remeasured
+#: 2026-08-18 against a fixed order-40 rule over ``r/L`` 1.5-35 and ``k`` 1-9
+#: (356 element-observation pairs, error taken as the 2-norm of the ENU
+#: displacement vector so per-component zero crossings cannot inflate it).
+#:
+#: ⚠️ **The exponent is 2, not 1.** A triangle's first moment vanishes about its
+#: own centroid, so the centroid rule's leading error term is second order, and
+#: the measured exponent is **-2.14** -- consistent with the theory and not with
+#: the ``C * L / (k * r)`` law this used to carry. Fitting at the theoretical
+#: ``-2`` gives ``C = 0.312`` with the measured/model ratio centred at 1.01.
+#:
+#: What the old shape cost: solving a linear model against a quadratic truth
+#: makes the delivered error scale as ``tolerance ** 2``, so the knob did not
+#: mean what it said. Measured on the old rule, asking for 1e-2 delivered 5e-3
+#: but asking for 3e-3 delivered **1e-5** -- three times the cost for three
+#: hundred times the accuracy nobody requested. The value was nonetheless very
+#: nearly right *at the default*: 20.3 vs 20.0 points per unit ``L/r``, which is
+#: why this correction leaves 3e-3 runs essentially unchanged and only shows up
+#: when the tolerance is moved.
+_QUADRATURE_CONSTANT = 0.312
+
+#: Fit scatter is 1.89x at one sigma, so a model centred on the median leaves
+#: half of all pairs above the tolerance they asked for. This multiplies ``C``
+#: before the solve, which raises the order by ``sqrt`` of itself: 4x here takes
+#: the fraction of pairs exceeding their tolerance from **51.7% to 5.6%**.
+_QUADRATURE_SAFETY = 4.0
 
 
 class LayeredPointSource:
@@ -232,8 +257,13 @@ class LayeredPointSource:
     def _orders(self, centroid, size, x, y, z):
         """Quadrature order for each observation, from how far away it is.
 
-        Solving the measured error model ``0.06 * L / (k * r) = tolerance`` for
-        ``k``, then rounding up and clamping. The order is per *observation*, not
+        Solving the measured error model ``C * (k * r / L) ** -2 = tolerance``
+        for ``k``, then rounding up and clamping. **The exponent is 2**: a
+        triangle's first moment vanishes about its own centroid, so the leading
+        error term is second order, and the measured exponent is -2.14. The law
+        used to be written linear in ``k * r / L``, which made the delivered
+        error scale as ``tolerance ** 2`` -- the knob did not mean what it said.
+        See :data:`_QUADRATURE_CONSTANT`. The order is per *observation*, not
         one per triangle: the point of the exercise is that a triangle is near a
         handful of observations and far from thousands.
 
@@ -260,7 +290,10 @@ class LayeredPointSource:
         r = np.sqrt((x - centroid[0]) ** 2 + (y - centroid[1]) ** 2
                     + (z - centroid[2]) ** 2)
         r = np.maximum(r, size / 100.0)
-        wanted = np.ceil(_QUADRATURE_CONSTANT * size / (self.tolerance * r))
+        # err = C * (k*r/L)**-2 = tolerance  =>  k = (L/r) * sqrt(C / tolerance),
+        # with the safety factor folded in under the root.
+        gain = np.sqrt(_QUADRATURE_SAFETY * _QUADRATURE_CONSTANT / self.tolerance)
+        wanted = np.ceil(gain * size / r)
         return np.clip(wanted, 1, np.sqrt(self.max_points)).astype(int)
 
     def _sum_sources(self, points, weights, moment, x, y):
