@@ -22,6 +22,7 @@ import pytest
 from nisar_tools.slip import FaultMesh, FaultTrace, HalfSpaceTDE
 from nisar_tools.slip.edgrn import EdgrnTables, VelocityModel
 from nisar_tools.slip.layered import (
+    REFERENCE_QUADRATURE_POINTS,
     LayeredPointSource,
     _moment_components,
     _triangle_quadrature,
@@ -197,6 +198,10 @@ def test_forward_matches_the_matrix(uniform_tables, scene):
 def test_adaptive_quadrature_costs_far_less_than_the_fixed_rule(uniform_tables, scene):
     """The reference's 91 points everywhere, against one where one will do.
 
+    ``max_points`` is passed explicitly: the engine's own cap is higher than the
+    reference's rule, so ``tolerance=None`` alone no longer means "what SlipSolve
+    does" -- it means "a fixed order at whatever ceiling is configured".
+
     Counted in source-receiver evaluations, which is what the runtime is: the
     order is chosen per observation, so an element near a handful of samples and
     far from thousands pays only for the handful.
@@ -204,7 +209,8 @@ def test_adaptive_quadrature_costs_far_less_than_the_fixed_rule(uniform_tables, 
     _, _, mesh, ox, oy = scene
     oz = np.zeros(ox.size)
     adaptive = LayeredPointSource(uniform_tables, tolerance=3e-3)
-    fixed = LayeredPointSource(uniform_tables, tolerance=None)
+    fixed = LayeredPointSource(uniform_tables, tolerance=None,
+                               max_points=REFERENCE_QUADRATURE_POINTS)
 
     def cost(engine):
         total = 0
@@ -217,10 +223,16 @@ def test_adaptive_quadrature_costs_far_less_than_the_fixed_rule(uniform_tables, 
 
 
 def test_adaptive_and_fixed_quadrature_agree(uniform_tables, scene):
-    """The saving must not cost accuracy at the tolerance asked for."""
+    """The saving must not cost accuracy at the tolerance asked for.
+
+    Against the *reference's* rule specifically, so this keeps meaning "we agree
+    with what we replaced" rather than drifting to "we agree with our own cap".
+    """
     _, _, mesh, ox, oy = scene
     adaptive = LayeredPointSource(uniform_tables, tolerance=3e-3).displacement(mesh, ox, oy)
-    fixed = LayeredPointSource(uniform_tables, tolerance=None).displacement(mesh, ox, oy)
+    fixed = LayeredPointSource(
+        uniform_tables, tolerance=None, max_points=REFERENCE_QUADRATURE_POINTS
+    ).displacement(mesh, ox, oy)
     assert np.abs(adaptive - fixed).max() / np.abs(fixed).max() < 1e-2
 
 

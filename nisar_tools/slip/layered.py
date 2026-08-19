@@ -17,14 +17,35 @@ Two departures from the reference, both deliberate:
   ~190 000-point adaptive grid -- 4.5 GB across its three component matrices --
   and interpolates from there onto its few thousand observations. Going straight
   to the observations is less work and has no interpolation error at all.
-* **Choose the quadrature order per element and observation.** The reference uses
+* **Choose the quadrature order per triangle and observation.** The reference uses
   a fixed 91 points per triangle everywhere. A point source is a good
   approximation to a patch once you are a few patch-widths away, and almost every
-  observation is far from almost every element, so a fixed order spends nearly
+  observation is far from almost every triangle, so a fixed order spends nearly
   all of its effort where one point would have done. Measured on the real problem
   (1148 elements, 8000 observations, r/L median 38): 89x fewer source-receiver
-  evaluations at 1e-2 accuracy, 52x at 3e-3, 10x at 1e-3. Set
-  ``tolerance=None`` to force the reference's fixed order.
+  evaluations at 1e-2 accuracy, 52x at 3e-3, 10x at 1e-3. ``tolerance=None``
+  forces a fixed order at the cap; to reproduce the reference exactly, pair it
+  with ``max_points=REFERENCE_QUADRATURE_POINTS``, since the cap is no longer
+  that value.
+
+  **The triangle is the unit of quadrature, not the unit of a column, and the two
+  differ under a nodal basis.** A nodal column is not one triangle: it is the
+  superposition of every triangle incident on that node, each carrying slip that
+  varies linearly from 1 at the node to 0 at the other two vertices. ``_columns``
+  builds exactly that, weighting each quadrature point by the tent function
+  (hence ~3x the work of an element assembly -- every triangle is visited once
+  per vertex). Choosing an order does not change *what* is integrated; it sets
+  only how finely each term of that sum is sampled, and each term is judged on
+  its own triangle's size and its own distance to the observation.
+
+  Two limits worth knowing. The distance is the **3-D source-receiver separation**,
+  not the element's depth -- a shallow element far away laterally needs no
+  refinement, which a depth criterion would miss. And the order is capped at
+  ``max_points``, so the tolerance is *not* met closer than about ``2 * L``; see
+  :data:`MAX_QUADRATURE_POINTS` for how far that actually bites, which is much
+  less far than the model claims. Measured against a fixed order-30 rule on a
+  nodal basis (240 elements, 400 observations, 6.5 km elements), the default
+  tolerance departs by **1.2e-5 relative**.
 
 The moment tensor of an element is built from the element's **own** orthonormal
 basis rather than from a strike/dip/rake triple. ``edcdisc.m`` goes through
@@ -50,10 +71,33 @@ from .greens import _as_points, _require_finite
 #: source-receiver pair.
 DEFAULT_TOLERANCE = 3e-3
 
-#: Quadrature order cap. 91 points is the reference's fixed choice
-#: (``interpolate_triangle2`` with ``n = 15``), kept as the ceiling so the
-#: adaptive rule can never do more work than the thing it replaces.
-MAX_QUADRATURE_POINTS = 91
+#: The reference's fixed rule: ``interpolate_triangle2`` with ``n = 15``. Not the
+#: ceiling here any more, but the value to pass as ``max_points`` (with
+#: ``tolerance=None``) to reproduce what this replaces.
+REFERENCE_QUADRATURE_POINTS = 91
+
+#: Quadrature order cap, i.e. order 30. This used to be
+#: :data:`REFERENCE_QUADRATURE_POINTS`, so the adaptive rule could never do more
+#: work than the fixed rule at any pair -- a tidy invariant that turned out to
+#: cost real accuracy where it matters most.
+#:
+#: The order is ``0.06 * L / (tolerance * r)``, so a cap refuses the request for
+#: ``r`` below about ``2 * L``. Since ``r`` is measured from the element centroid
+#: it is never less than that element's depth, which confines the refusal to
+#: **shallow elements seen by near-fault observations** -- exactly the pairs that
+#: carry the shallow-slip constraint. Measured against an order-30 rule, the
+#: error the old cap left is fine down to ``r/L`` ~ 1 (1e-4, well inside the
+#: tolerance) and then falls off a cliff: **7.2e-2 at r/L = 0.5**, where the
+#: observation is inside the element's own footprint and the smooth ``1/(k*r)``
+#: error model stops describing anything.
+#:
+#: Raising the cap is close to free because the adaptive rule only spends where
+#: the model asks, so the extra work lands on the ~1.5% of pairs that were
+#: saturated. Measured (240 elements, 6.5 km, transect weighted to the near
+#: field): error at ``r/L`` = 0.5 improves **9.4x** (7.2e-2 -> 7.6e-3) for
+#: **1.27x** the points per pair (13.2 -> 16.7) -- still 5x cheaper than the
+#: fixed rule's 81.
+MAX_QUADRATURE_POINTS = 900
 
 #: Empirical constant in the error model above, measured against exact
 #: triangular-dislocation solutions over ``r/L`` from 0.5 to 20.
@@ -189,9 +233,27 @@ class LayeredPointSource:
         """Quadrature order for each observation, from how far away it is.
 
         Solving the measured error model ``0.06 * L / (k * r) = tolerance`` for
-        ``k``, then rounding up and clamping. Note the order is per *observation*,
-        not per element: the point of the exercise is that one element is near a
+        ``k``, then rounding up and clamping. The order is per *observation*, not
+        one per triangle: the point of the exercise is that a triangle is near a
         handful of observations and far from thousands.
+
+        ``r`` is the full 3-D separation from this triangle's centroid, so it is
+        the actual source-receiver distance rather than the element's depth.
+
+        Two things the clamp does. ``r`` is floored at ``size / 100`` so an
+        observation sitting on the centroid cannot ask for an infinite order; and
+        the order is capped at ``sqrt(max_points)``, so inside roughly ``2 * L``
+        the requested order is refused and the tolerance goes unmet -- silently,
+        which is why :data:`MAX_QUADRATURE_POINTS` carries the measured size of
+        the error rather than leaving it to the model, whose smooth ``1/(k*r)``
+        law stops describing anything once the observation is inside the
+        element's own footprint.
+
+        The error constant was calibrated against constant-slip triangular
+        dislocations. It carries over to the tented integrand a nodal basis
+        produces -- measured at 1.2e-5 relative against the fixed rule -- but it
+        was an extrapolation until that was checked, so re-measure before
+        trusting it on a basis with a different variation across the triangle.
         """
         if self.tolerance is None:
             return np.full(x.size, int(np.sqrt(self.max_points)))
