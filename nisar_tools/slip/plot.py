@@ -375,3 +375,166 @@ def plot_coverage(report, ax=None, name=None):
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
     return ax.figure, ax
+
+def plot_quadrature_order(engine, mesh, obs, ax=None, cmap="viridis",
+                          stat="total", title=None):
+    """Where the adaptive quadrature actually spends its points.
+
+    Shades each triangle by how many point sources it is cut into, reduced over
+    the observations with ``stat``:
+
+    ``"total"``
+        Sum over observations -- the *work* that triangle costs, which is what
+        the runtime is made of.
+    ``"mean"`` / ``"max"``
+        Per-observation order, for reading the rule rather than the bill.
+
+    The order is ``(L/r) * sqrt(C / tolerance)``, and looking at it is worth more
+    than reasoning about it. On the real Venezuela mesh the cost is heaviest at
+    **depth**, not at the surface -- the opposite of what "``r`` is at least the
+    element's own depth" suggests on its own. The reason is ``bias_w``: a graded
+    mesh runs 0.99 km levels at the top to 4.96 km at the base, so ``L`` varies
+    **5x** with depth and beats the ``r`` variation outright. Deep elements are
+    bigger, so they need more points despite being further away.
+
+    Two consequences worth having in mind. Depth grading is a quadrature-cost
+    knob as much as a resolution one, and the expensive half of a graded mesh is
+    the half that resolves slip worst. The along-strike variation, by contrast,
+    does track observation proximity, since the mesh is uniform along strike.
+
+    A plot that comes out uniform means the tolerance is tight enough that
+    everything saturated at the cap.
+
+    ``engine`` must be a :class:`~nisar_tools.slip.layered.LayeredPointSource`;
+    the half-space engine evaluates a closed form and has no quadrature at all.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
+
+    if not hasattr(engine, "_orders"):
+        raise TypeError(
+            f"{type(engine).__name__} has no quadrature -- only the layered "
+            "point-source engine cuts elements into point sources; the "
+            "half-space engine evaluates a closed form per element"
+        )
+    reduce = {"total": np.sum, "mean": np.mean, "max": np.max}
+    if stat not in reduce:
+        raise ValueError(f"stat must be one of {sorted(reduce)}")
+
+    ds = obs.ds if hasattr(obs, "ds") else obs
+    x = np.asarray(ds["x"].values, dtype=float)
+    y = np.asarray(ds["y"].values, dtype=float)
+    z = np.zeros_like(x)
+
+    centroids = np.asarray(mesh.centroids, dtype=float)
+    sizes = np.sqrt(2.0 * np.asarray(mesh.areas, dtype=float))
+    value = np.empty(mesh.n_elements)
+    for k in range(mesh.n_elements):
+        points = engine._orders(centroids[k], sizes[k], x, y, z) ** 2
+        value[k] = reduce[stat](points)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(12, 3.2))
+    coll = PolyCollection(mesh.param_vertices / 1e3, array=value, cmap=cmap,
+                          edgecolors="none")
+    ax.add_collection(coll)
+    ax.set_xlim(mesh.params[:, 0].min() / 1e3, mesh.params[:, 0].max() / 1e3)
+    ax.set_ylim(mesh.params[:, 1].min() / 1e3, 0.0)
+    ax.set_xlabel("Distance along strike (km)")
+    ax.set_ylabel("Depth (km)")
+    ax.set_aspect("equal")
+    if title is None:
+        cap = int(np.sqrt(engine.max_points)) ** 2
+        title = (f"quadrature points per triangle ({stat}) -- tolerance "
+                 f"{engine.tolerance!r}, cap {cap}")
+    ax.set_title(title)
+    label = {"total": "points summed over observations",
+             "mean": "points per observation",
+             "max": "points at the nearest observation"}[stat]
+    plt.colorbar(coll, ax=ax, label=label, pad=0.02)
+    return ax.figure, ax
+
+
+def _nodal_component(model, component):
+    """Per-*node* slip, for a model whose parameters actually live on nodes."""
+    basis = getattr(model, "basis", None)
+    if getattr(basis, "name", None) != "node":
+        raise ValueError(
+            "this view draws the nodal parameters themselves, so it needs a "
+            f"model solved with basis='node' (this one is "
+            f"{getattr(basis, 'name', 'unknown')!r}). Use plot_slip for an "
+            "element-constant model."
+        )
+    strike = np.asarray(model.strike_slip, dtype=float)
+    dip = np.asarray(model.dip_slip, dtype=float)
+    values = {"magnitude": np.hypot(strike, dip), "strike": strike, "dip": dip}
+    if component not in values:
+        raise ValueError(f"component must be one of {sorted(values)}")
+    return values[component]
+
+
+def plot_slip_edges(model, component="magnitude", ax=None, cmap="magma_r",
+                    vmin=None, vmax=None, segments=12, linewidth=2.0,
+                    title=None):
+    """Nodal slip drawn along the mesh edges, varying linearly between nodes.
+
+    :func:`plot_slip` shades each triangle by the mean of its three nodes, which
+    is what makes a nodal and an element model comparable by eye -- but it also
+    throws away the thing that distinguishes them. A nodal basis represents slip
+    as a continuous field, linear across every element, and this draws that
+    directly: each edge is subdivided into ``segments`` pieces coloured by the
+    interpolated value, so the gradient between two nodes is visible rather than
+    averaged away.
+
+    Reading it: a smooth model shows colour changing gradually along every edge.
+    Adjacent edges disagreeing sharply at a shared node is the nodal signature of
+    an under-smoothed solve -- the same thing ``roughness`` scores, but localised
+    so you can see *where*.
+
+    Needs ``basis="node"``; an element-constant model has no nodal values to
+    interpolate and raises rather than inventing some.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    mesh = model.mesh
+    value = _nodal_component(model, component)
+    params = np.asarray(mesh.params, dtype=float)[:, :2] / 1e3
+    if value.size != params.shape[0]:
+        raise ValueError(
+            f"{value.size} nodal values against {params.shape[0]} nodes -- the "
+            "model and its mesh disagree"
+        )
+
+    triangles = np.asarray(mesh.triangles)
+    edges = {(min(a, b), max(a, b))
+             for tri in triangles
+             for a, b in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0]))}
+    edges = np.array(sorted(edges), dtype=int)
+
+    # Subdivide every edge once, vectorised: node ends -> `segments` pieces, each
+    # coloured by the value at its own midpoint.
+    t = np.linspace(0.0, 1.0, int(segments) + 1)
+    start, end = params[edges[:, 0]], params[edges[:, 1]]
+    points = start[:, None, :] + (end - start)[:, None, :] * t[None, :, None]
+    pieces = np.stack([points[:, :-1, :], points[:, 1:, :]], axis=2)
+    pieces = pieces.reshape(-1, 2, 2)
+
+    v0, v1 = value[edges[:, 0]], value[edges[:, 1]]
+    mid = 0.5 * (t[:-1] + t[1:])
+    shade = (v0[:, None] + (v1 - v0)[:, None] * mid[None, :]).ravel()
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(12, 3.2))
+    coll = LineCollection(pieces, array=shade, cmap=cmap, linewidths=linewidth)
+    _scale_slip(coll, shade, component, vmin, vmax)
+    ax.add_collection(coll)
+
+    ax.set_xlim(params[:, 0].min(), params[:, 0].max())
+    ax.set_ylim(params[:, 1].min(), 0.0)
+    ax.set_xlabel("Distance along strike (km)")
+    ax.set_ylabel("Depth (km)")
+    ax.set_aspect("equal")
+    ax.set_title(_slip_title(model, component) if title is None else title)
+    plt.colorbar(coll, ax=ax, label="Slip (m)", pad=0.02)
+    return ax.figure, ax

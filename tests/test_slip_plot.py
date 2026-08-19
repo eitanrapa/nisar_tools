@@ -203,3 +203,54 @@ def test_param_vertices_matches_the_triangles(solved):
     _, mesh, _, _, _ = solved
     assert mesh.param_vertices.shape == (mesh.n_elements, 3, 2)
     np.testing.assert_array_equal(mesh.param_vertices, mesh.params[mesh.triangles])
+
+
+# -- nodal slip along the edges, and where the quadrature spends -------------
+
+@pytest.fixture(scope="module")
+def solved_nodal(solved):
+    """The same scene solved on the nodal basis, which is what has node values."""
+    trace, mesh, obs, _, _ = solved
+    inversion = SlipInversion(mesh, obs, basis="node")
+    return inversion.solve(smoothing=0.5, polarity=(-1, 0, 0))
+
+
+def test_slip_edges_draws_a_segment_per_subdivision(solved_nodal):
+    """Every edge is subdivided, and the shading interpolates between its nodes.
+
+    The segment count is the test that the subdivision happened at all: a
+    per-edge mean would give one segment per edge and lose exactly the linear
+    variation this view exists to show.
+    """
+    from matplotlib.collections import LineCollection
+
+    model = solved_nodal
+    fig, ax = slip_plot.plot_slip_edges(model, component="strike", segments=4)
+    coll = [c for c in ax.collections if isinstance(c, LineCollection)][0]
+    tri = np.asarray(model.mesh.triangles)
+    n_edges = len({(min(a, b), max(a, b))
+                   for e in tri
+                   for a, b in ((e[0], e[1]), (e[1], e[2]), (e[2], e[0]))})
+    assert len(coll.get_segments()) == 4 * n_edges
+
+    value = np.asarray(model.strike_slip)
+    shading = coll.get_array()
+    assert shading.min() >= value.min() - 1e-9
+    assert shading.max() <= value.max() + 1e-9
+    matplotlib.pyplot.close(fig)
+
+
+def test_slip_edges_refuses_an_element_basis(solved):
+    """There are no nodal values to interpolate, so it must not invent some."""
+    *_, model = solved
+    with pytest.raises(ValueError, match="basis='node'"):
+        slip_plot.plot_slip_edges(model)
+
+
+def test_quadrature_order_refuses_an_engine_without_one(solved):
+    """The half-space engine is a closed form -- it cuts nothing into points."""
+    from nisar_tools.slip import HalfSpaceTDE
+
+    trace, mesh, obs, _, _ = solved
+    with pytest.raises(TypeError, match="no quadrature"):
+        slip_plot.plot_quadrature_order(HalfSpaceTDE(), mesh, obs)
