@@ -383,7 +383,7 @@ class PixelOffsetStack(RasterStackMixin):
         ]
 
     def to_text(self, outdir, indices=None, min_correlation=0.0,
-                stem="freq_xcorr", comment=None, lonlat=False):
+                stem="freq_xcorr", comment=None, lonlat=True):
         """Write the offsets as GMTSAR ``xcorr`` ASCII, one file per pair.
 
         Each line is ``x_pixel x_offset y_pixel y_offset correlation`` under
@@ -392,14 +392,15 @@ class PixelOffsetStack(RasterStackMixin):
         of it -- unchanged. Pixel indices are 0-based, as the reference's C array
         indices are, and index the **source** GSLC grid, not this coarse one.
 
-        ``lonlat=True`` appends two more columns, ``lon`` and ``lat`` in decimal
-        degrees, giving the location's own ground position -- what a GMT ``psxy``
-        or ``blockmean`` wants, and the only thing in the file that means anything
-        outside this granule's grid. They are **appended**, in that order (GMT's
-        x-then-y, not the spoken "lat/lon"), so the five columns the reference
-        writes keep their positions and every ``awk`` on top of them still reads
-        the same fields. Off by default: the plain file is byte-for-byte what
-        ``xcorr`` produces, and that is worth keeping as the default.
+        Two further columns, ``lon`` and ``lat`` in decimal degrees, follow by
+        default: the location's own ground position -- what a GMT ``psxy`` or
+        ``blockmean`` wants, and the only thing in the file that means anything
+        outside this granule's own grid. They are **appended**, in that order
+        (GMT's x-then-y, not the spoken "lat/lon"), so the five columns the
+        reference writes keep their positions and every ``awk`` on top of them
+        still reads the same fields -- which is what lets them be the default
+        without breaking a ``fitoffset.csh`` pipeline. ``lonlat=False`` writes
+        the five-column file alone, byte-for-byte what ``xcorr`` produces.
 
         Files are named ``{stem}_pair{i}.dat``, mirroring
         :meth:`~nisar_tools._base.RasterStackMixin.to_grd`; ``indices`` selects

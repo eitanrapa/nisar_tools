@@ -587,8 +587,9 @@ def test_offsets_export_to_grd(gslc_factory, tmp_path):
 
 
 def test_to_text_reproduces_the_xcorr_format(gslc_factory, tmp_path):
+    """`lonlat=False` is byte-for-byte print_results.c, appended columns aside."""
     offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
-    paths = offsets.to_text(tmp_path / "txt")
+    paths = offsets.to_text(tmp_path / "txt", lonlat=False)
     assert [p.name for p in paths] == ["freq_xcorr_pair0.dat"]
 
     lines = paths[0].read_text().splitlines()
@@ -608,7 +609,7 @@ def test_to_text_columns_are_the_ones_fitoffset_reads(gslc_factory, tmp_path):
     path = offsets.to_text(tmp_path / "txt")[0]
 
     table = np.loadtxt(path)
-    assert table.shape[1] == 5
+    assert table.shape[1] == 7          # the default: five columns, then lon/lat
     np.testing.assert_array_equal(
         np.unique(table[:, 0]), offsets.ds["x_pixel"].values
     )
@@ -623,10 +624,10 @@ def test_to_text_columns_are_the_ones_fitoffset_reads(gslc_factory, tmp_path):
 def test_to_text_appends_lon_lat_without_moving_the_xcorr_columns(
     gslc_factory, tmp_path
 ):
-    """lonlat=True adds columns 6 and 7; $1..$5 stay exactly where awk expects."""
+    """lon/lat are columns 6 and 7 by default; $1..$5 stay where awk expects."""
     offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
-    plain = np.loadtxt(offsets.to_text(tmp_path / "plain")[0])
-    geographic = np.loadtxt(offsets.to_text(tmp_path / "geo", lonlat=True)[0])
+    plain = np.loadtxt(offsets.to_text(tmp_path / "plain", lonlat=False)[0])
+    geographic = np.loadtxt(offsets.to_text(tmp_path / "geo")[0])
 
     assert plain.shape[1] == 5
     assert geographic.shape[1] == 7
@@ -637,7 +638,7 @@ def test_to_text_lon_lat_are_the_locations_own_ground_positions(
     gslc_factory, tmp_path
 ):
     offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
-    table = np.loadtxt(offsets.to_text(tmp_path / "geo", lonlat=True)[0])
+    table = np.loadtxt(offsets.to_text(tmp_path / "geo")[0])
 
     # Ground truth straight from pyproj, on the (y, x) location grid. Rounded to
     # the format's own six decimals, i.e. ~0.1 m.
@@ -665,7 +666,7 @@ def test_to_text_lon_lat_vary_along_both_axes(gslc_factory, tmp_path):
     exactly zero, which is what a per-axis transform would give.
     """
     offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
-    table = np.loadtxt(offsets.to_text(tmp_path / "geo", lonlat=True)[0])
+    table = np.loadtxt(offsets.to_text(tmp_path / "geo")[0])
     ny, nx = offsets.ds["x_offset"].isel(pair=0).shape
     lon = table[:, 5].reshape(ny, nx)
     lat = table[:, 6].reshape(ny, nx)
@@ -702,8 +703,8 @@ def test_to_text_writes_an_optional_comment_header(gslc_factory, tmp_path):
     path = offsets.to_text(tmp_path / "txt", comment="from nisar_tools")[0]
     lines = path.read_text().splitlines()
     assert lines[0] == "# from nisar_tools"
-    # Everything after the header still parses as the plain five columns.
-    assert np.loadtxt(path).shape[1] == 5
+    # Everything after the header still parses as the data columns.
+    assert np.loadtxt(path).shape[1] == 7
 
 
 # -- robust offsets ----------------------------------------------------------
