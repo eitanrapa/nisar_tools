@@ -38,9 +38,9 @@ from ._base import (
     SPATIAL_CHUNK,
     RasterStackMixin,
     compute_chunks,
+    masked_edges,
     open_stage,
     plane_kernel as _plane_kernel,
-    row_plane_kernel as _plane_kernel_rows,
 )
 
 # -- NASA GUNW HDF5 layout (verified from real granules) ----------------------
@@ -437,6 +437,19 @@ class UnwrappedStack(RasterStackMixin):
         lives. See :func:`~nisar_tools._kernels.along_track_edge_mask` for the
         geometry this assumes.
 
+        **The sides can also be named one at a time**, against the grid rather
+        than the orbit (which of them is *near* range depends on the pass and the
+        look direction): ``"left"``, ``"right"``, ``"top"``, ``"bottom"``, or a
+        sequence of them -- so ``edges="left"`` trims one range boundary and
+        leaves the other, and ``edges=["left", "right", "bottom"]`` adds the
+        azimuth end. Each is found by scanning for the first/last valid sample of
+        every line, so naming a side still spares the coastlines and lakes that
+        ``edges="all"`` would eat. Pass a ``{side: pixels}`` mapping when the
+        sides want different depths, e.g. ``edges={"left": 32, "right": 8}``;
+        ``edge_pixels`` is then unused. Prefer one call over chaining several:
+        the sides are all measured against the same footprint, and
+        ``attrs["edges_masked"]`` records only the last call.
+
         ``use_builtin_mask`` (GUNW only) first nulls the pixels the product's own
         ``subswath_mask`` flags as invalid samples -- an *exact* edge/gap mask
         rather than a blunt erosion. The 3-digit flag's two low digits are the
@@ -461,27 +474,8 @@ class UnwrappedStack(RasterStackMixin):
             valid = (m != _MASK_FILL) & (ss_ref > 0) & (ss_sec > 0)
             unw = unw.where(valid)
 
-        if edges == "along_track":
-            # Support is the whole row (which sample is the row's first?), so
-            # there is no halo that would do -- x is gathered and the split runs
-            # along y, where rows are independent.
-            masked = _plane_kernel_rows(
-                _kernels.mask_edges, unw,
-                edge_pixels=int(edge_pixels), edges="along_track",
-            )
-        elif edges == "all":
-            # Erosion by ``edge_pixels`` cross iterations reaches exactly that
-            # far, so a matching halo decomposes it spatially and the result is
-            # identical to the whole-plane fit -- unlike the old
-            # chunk({"y": -1, "x": -1}), which capped concurrency at the pair count.
-            masked = _plane_kernel(
-                _kernels.mask_edges, unw, depth=max(1, int(edge_pixels)),
-                edge_pixels=int(edge_pixels), edges="all",
-            )
-        else:
-            raise ValueError(
-                f"edges must be 'along_track' or 'all', got {edges!r}"
-            )
+        masked, provenance = masked_edges(unw, edge_pixels, edges)
+
         if min_coherence is not None:
             if "coherence" not in self.ds:
                 raise ValueError(
@@ -496,8 +490,9 @@ class UnwrappedStack(RasterStackMixin):
         ds["unw"] = masked
         ds.attrs.update(self.ds.attrs)
         ds.attrs["edges_masked"] = {
-            "edge_pixels": int(edge_pixels), "min_coherence": min_coherence,
-            "use_builtin_mask": bool(use_builtin_mask), "edges": edges,
+            **provenance,
+            "min_coherence": min_coherence,
+            "use_builtin_mask": bool(use_builtin_mask),
         }
         return UnwrappedStack(ds)
 

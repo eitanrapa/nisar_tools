@@ -16,9 +16,9 @@ from . import _kernels
 from ._base import (
     RasterStackMixin,
     compute_chunks,
+    masked_edges,
     open_stage,
     plane_kernel,
-    row_plane_kernel,
     wrapped_phase,
 )
 
@@ -202,7 +202,11 @@ class InterferogramStack(RasterStackMixin):
         than eroding the footprint -- so a coastline, a lake blanked by
         :meth:`mask_water` and the frame's azimuth ends are all spared.
         ``edges="all"`` erodes the whole finite footprint instead. See
-        :func:`~nisar_tools._kernels.along_track_edge_mask`.
+        :func:`~nisar_tools._kernels.along_track_edge_mask`. The sides can also
+        be named one at a time -- ``"left"``, ``"right"``, ``"top"``,
+        ``"bottom"``, a sequence of them, or a ``{side: pixels}`` mapping for
+        different depths; see :meth:`UnwrappedStack.mask_edges
+        <nisar_tools.unwrap.UnwrappedStack.mask_edges>`.
 
         ⚠️ **Prefer :meth:`GSLCStack.mask_edges
         <nisar_tools.stack.GSLCStack.mask_edges>` where the SLCs are still to
@@ -221,26 +225,9 @@ class InterferogramStack(RasterStackMixin):
         igram = self.ds["igram"]
         coherence = self.ds["coherence"]
 
-        if edges == "along_track":
-            # Support is the whole row (which sample is the row's first?), so
-            # there is no halo that would do -- x is gathered and the split runs
-            # along y, where rows are independent.
-            masked = row_plane_kernel(
-                _kernels.mask_edges, igram, target_blocks=target_blocks,
-                edge_pixels=int(edge_pixels), edges="along_track",
-            )
-        elif edges == "all":
-            # Erosion by ``edge_pixels`` cross iterations reaches exactly that
-            # far, so a matching halo is exact, not exact-to-a-halo.
-            masked = plane_kernel(
-                _kernels.mask_edges, igram, depth=max(1, int(edge_pixels)),
-                target_blocks=target_blocks,
-                edge_pixels=int(edge_pixels), edges="all",
-            )
-        else:
-            raise ValueError(
-                f"edges must be 'along_track' or 'all', got {edges!r}"
-            )
+        masked, provenance = masked_edges(
+            igram, edge_pixels, edges, target_blocks=target_blocks
+        )
 
         if min_coherence is not None:
             masked = masked.where(coherence >= min_coherence)
@@ -249,10 +236,7 @@ class InterferogramStack(RasterStackMixin):
         ds["igram"] = masked
         ds["coherence"] = coherence.where(masked.notnull())
         ds.attrs.update(self.ds.attrs)
-        ds.attrs["edges_masked"] = {
-            "edge_pixels": int(edge_pixels), "min_coherence": min_coherence,
-            "edges": edges,
-        }
+        ds.attrs["edges_masked"] = {**provenance, "min_coherence": min_coherence}
         return InterferogramStack(ds)
 
     def remove_unconnected_regions(self, min_size=None, connectivity=1,

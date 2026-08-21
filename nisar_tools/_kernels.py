@@ -30,6 +30,7 @@ through :func:`halo_planes`; :func:`pixel_offsets_dask` decomposes it instead.
 
 import math
 import warnings
+from collections.abc import Mapping
 
 import numpy as np
 from scipy.ndimage import (
@@ -1271,6 +1272,103 @@ def deramp(field, degree=1, method="poly", scale=None, exclude=None):
     return (field - surface).astype(np.asarray(field).dtype)
 
 
+#: The four sides of a raster, named against the **grid**, not the orbit: a side
+#: is simply where a line of data begins or ends. On a north-up geocoded grid
+#: flown by a near-polar orbit, ``left``/``right`` are the near- and far-range
+#: swath boundaries and ``top``/``bottom`` the azimuth ends -- but *which* of
+#: left/right is near range depends on the pass and the look direction, so the
+#: names stay grid-relative, where they cannot be misread.
+EDGE_SIDES = ("left", "right", "top", "bottom")
+
+#: The two sides ``edges="along_track"`` selects.
+ALONG_TRACK_SIDES = ("left", "right")
+
+
+def edge_depths(edge_pixels, edges="along_track"):
+    """Resolve an ``edges`` selection to ``{side: depth}``, dropping zero depths.
+
+    ``edges`` is one side name, a sequence of them, ``"along_track"`` (= ``left``
+    and ``right``, the two range boundaries), or a mapping of side to its own
+    depth. Everything but a mapping takes its depth from ``edge_pixels``; a
+    mapping carries its own, and ``edge_pixels`` is then not consulted at all.
+
+    ``"all"`` is not a side selection -- it is the isotropic erosion, a different
+    operation -- so it is rejected here and callers dispatch on it first.
+    """
+    if isinstance(edges, str) and edges == "all":
+        raise ValueError(
+            "edges='all' is an erosion of the whole footprint, not a side "
+            "selection; dispatch on it before calling edge_depths"
+        )
+    if isinstance(edges, Mapping):
+        depths = {str(side): int(depth) for side, depth in edges.items()}
+    else:
+        if isinstance(edges, str):
+            sides = ALONG_TRACK_SIDES if edges == "along_track" else (edges,)
+        else:
+            sides = tuple(str(side) for side in edges)
+        depths = {side: int(edge_pixels or 0) for side in sides}
+    unknown = sorted(set(depths) - set(EDGE_SIDES))
+    if unknown:
+        raise ValueError(
+            f"unknown edge side(s) {unknown}: edges must be 'all', "
+            f"'along_track', or one or more of {list(EDGE_SIDES)} -- as a name, "
+            f"a sequence of names, or a {{side: pixels}} mapping"
+        )
+    return {side: depth for side, depth in depths.items() if depth > 0}
+
+
+def _scan_edge_band(valid, axis, lo_depth, hi_depth):
+    """Band within ``lo_depth`` of the first, or ``hi_depth`` of the last, valid
+    sample of every line along ``axis`` (1 scans rows, 0 scans columns)."""
+    v = valid if axis == 1 else valid.T
+    band = np.zeros_like(v)
+    any_valid = v.any(axis=1)
+    # argmax on a boolean line gives its first True; the same on the reversed
+    # line gives its last. Lines with no data at all are excluded below, so the
+    # degenerate argmax=0 never reaches the comparison.
+    first = v.argmax(axis=1)
+    last = v.shape[1] - 1 - v[:, ::-1].argmax(axis=1)
+    index = np.arange(v.shape[1])
+    hit = np.zeros_like(v)
+    if lo_depth > 0:
+        hit |= index[None, :] < (first + lo_depth)[:, None]
+    if hi_depth > 0:
+        hit |= index[None, :] > (last - hi_depth)[:, None]
+    band[any_valid] = (hit & v)[any_valid]
+    return band if axis == 1 else band.T
+
+
+def side_edge_mask(valid, depths):
+    """Pixels within ``depths[side]`` of the data's own edge on each named side.
+
+    A side is found by **scanning**, not by eroding: for ``left``/``right`` each
+    raster row's first and last valid samples are the two boundaries, and for
+    ``top``/``bottom`` each column's. That is what keeps the trim off everything
+    else that merely borders a NaN -- a coastline, a lake blanked by
+    :meth:`~nisar_tools.unwrap.UnwrappedStack.mask_water`, and the sides that
+    were not asked for.
+
+    Every side is measured against the **same** input footprint, so trimming two
+    sides in one call is not the same as two chained calls: the second call would
+    scan what the first one left behind, and on a sheared swath a row's ends move
+    once its neighbours are trimmed.
+
+    Returns the boolean mask of pixels to *drop*. Rows are independent of one
+    another and so are columns, so a left/right selection decomposes freely along
+    ``y`` (needing whole rows) and a top/bottom one along ``x``.
+    """
+    valid = np.asarray(valid, dtype=bool)
+    drop = np.zeros_like(valid)
+    for axis, (lo_side, hi_side) in ((1, ("left", "right")),
+                                     (0, ("top", "bottom"))):
+        lo_depth = int(depths.get(lo_side, 0))
+        hi_depth = int(depths.get(hi_side, 0))
+        if lo_depth > 0 or hi_depth > 0:
+            drop |= _scan_edge_band(valid, axis, lo_depth, hi_depth)
+    return drop
+
+
 def along_track_edge_mask(valid, edge_pixels):
     """Pixels within ``edge_pixels`` of a row's first/last valid sample.
 
@@ -1281,32 +1379,16 @@ def along_track_edge_mask(valid, edge_pixels):
     frame), so across-track is grid *east* and each raster row crosses the swath
     once: its first and last valid samples are the two range boundaries.
 
-    Scanning rows rather than eroding the footprint is what keeps the trim off
-    everything else that happens to border a NaN -- a coastline, a lake from
-    :meth:`~nisar_tools.unwrap.UnwrappedStack.mask_water`, the azimuth ends of
-    the frame -- none of which are range edges. The depth is measured in columns,
-    so it is the perpendicular depth divided by cos(track tilt): 0.7% deep at 7
-    degrees, which is far below one pixel of the erosion itself.
+    The depth is measured in columns, so it is the perpendicular depth divided by
+    cos(track tilt): 0.7% deep at 7 degrees, far below one pixel of the erosion
+    itself.
 
-    Returns the boolean mask of pixels to *drop*. Rows are independent, so this
-    decomposes freely along ``y`` but needs whole rows along ``x``.
+    This is :func:`side_edge_mask` over ``left`` and ``right`` at one depth --
+    the two sides that answer to this geometry. Name the sides individually to
+    trim only one of them, or to reach the azimuth ends.
     """
-    valid = np.asarray(valid, dtype=bool)
-    n = int(edge_pixels)
-    drop = np.zeros_like(valid)
-    if n <= 0:
-        return drop
-    any_valid = valid.any(axis=1)
-    # argmax on a boolean row gives the first True; the same on the reversed row
-    # gives the last. Rows with no data are excluded, so the degenerate argmax=0
-    # never reaches the slicing below.
-    first = valid.argmax(axis=1)
-    last = valid.shape[1] - 1 - valid[:, ::-1].argmax(axis=1)
-    cols = np.arange(valid.shape[1])
-    lo = (cols[None, :] < (first + n)[:, None])
-    hi = (cols[None, :] > (last - n)[:, None])
-    drop[any_valid] = ((lo | hi) & valid)[any_valid]
-    return drop
+    edge_pixels = int(edge_pixels)
+    return side_edge_mask(valid, {"left": edge_pixels, "right": edge_pixels})
 
 
 def mask_edges(field, edge_pixels, edges="along_track"):
@@ -1316,6 +1398,12 @@ def mask_edges(field, edge_pixels, edges="along_track"):
     the edges that run along-track, and the only ones with a decorrelated fringe.
     See :func:`along_track_edge_mask`; it needs whole raster rows.
 
+    ``edges`` also takes the sides one at a time: a name from :data:`EDGE_SIDES`,
+    a sequence of them, or a ``{side: pixels}`` mapping when they want different
+    depths (``edge_pixels`` is then unused). ``top``/``bottom`` scan columns
+    rather than rows, so they need whole raster *columns*. See
+    :func:`side_edge_mask`.
+
     ``edges="all"`` erodes the whole finite footprint by ``edge_pixels`` cross
     iterations (:func:`scipy.ndimage.binary_erosion`, also trimming the raster
     edge via ``border_value=0``). That reaches inward from *every* valid/NaN
@@ -1323,20 +1411,18 @@ def mask_edges(field, edge_pixels, edges="along_track"):
     the azimuth ends of the frame; on the D126 frame that was 47.5% of everything
     it removed. Kept for the cases where the footprint really is all swath edge.
 
-    A no-op when ``edge_pixels`` is 0.
+    A no-op when the requested depths are all 0.
     """
     field = np.asarray(field)
     valid = np.isfinite(field)
-    if edge_pixels and edge_pixels > 0:
-        if edges == "along_track":
-            valid = valid & ~along_track_edge_mask(valid, edge_pixels)
-        elif edges == "all":
+    if isinstance(edges, str) and edges == "all":
+        if edge_pixels and int(edge_pixels) > 0:
             valid = binary_erosion(valid, iterations=int(edge_pixels),
                                    border_value=0)
-        else:
-            raise ValueError(
-                f"edges must be 'along_track' or 'all', got {edges!r}"
-            )
+    else:
+        depths = edge_depths(edge_pixels, edges)
+        if depths:
+            valid = valid & ~side_edge_mask(valid, depths)
     return np.where(valid, field, np.asarray(np.nan, dtype=field.dtype))
 
 
@@ -1472,22 +1558,26 @@ def halo_planes(func, arr, depth, **kwargs):
     )
 
 
-def row_planes(func, arr, **kwargs):
-    """Apply a 2D-plane ``func`` that needs whole raster *rows*, chunk by chunk.
+def row_planes(func, arr, whole="x", **kwargs):
+    """Apply a 2D-plane ``func`` that needs whole raster *lines*, chunk by chunk.
 
-    A halo cannot serve a kernel whose support is the entire row -- a chunk in
+    A halo cannot serve a kernel whose support is the entire line -- a chunk in
     the middle of the raster has no way to know whether it holds the row's first
-    valid sample. So ``x`` is gathered into one chunk and the decomposition runs
-    along ``y`` only, where the rows are independent. No overlap is needed at
-    all, which makes it exact rather than exact-to-a-halo.
+    valid sample. So one axis is gathered into a single chunk and the
+    decomposition runs along the other, where the lines are independent. No
+    overlap is needed at all, which makes it exact rather than exact-to-a-halo.
 
-    Used by ``mask_edges(edges="along_track")``. Numpy input falls through to the
+    ``whole="x"`` gathers x and splits along y, which is what a *row* scan needs
+    (``mask_edges`` on the left/right sides). ``whole="y"`` is the transpose, for
+    a *column* scan (the top/bottom sides). Numpy input falls through to the
     plain whole-plane batch loop.
     """
+    if whole not in ("x", "y"):
+        raise ValueError(f"whole must be 'x' or 'y', got {whole!r}")
     if not _is_dask(arr):
         return _batch_planes(func, arr, **kwargs)
     ndim = arr.ndim
-    arr = arr.rechunk({ndim - 1: -1})
+    arr = arr.rechunk({(ndim - 1 if whole == "x" else ndim - 2): -1})
     return arr.map_blocks(
         lambda block: _batch_planes(func, block, **kwargs),
         dtype=arr.dtype, meta=arr._meta,

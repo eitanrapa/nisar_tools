@@ -2,6 +2,7 @@
 
 import math
 import os
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -86,29 +87,105 @@ def plane_kernel(func, field, depth, target_blocks=None, **kwargs):
     )
 
 
-def row_plane_kernel(func, field, target_blocks=None, **kwargs):
-    """Run a row-wise 2-D plane kernel over a ``(stack, y, x)`` DataArray.
+def row_plane_kernel(func, field, target_blocks=None, whole="x", **kwargs):
+    """Run a line-wise 2-D plane kernel over a ``(stack, y, x)`` DataArray.
 
     Wraps :func:`_kernels.row_planes` for a kernel whose support is a whole
-    raster row, so it cannot be given a halo. ``x`` is gathered into one chunk
-    and the work is split along ``y`` instead; that is exact, not
-    exact-to-a-halo. Dims, coords and attrs are preserved.
+    raster line, so it cannot be given a halo. ``whole="x"`` gathers ``x`` into
+    one chunk and splits the work along ``y`` -- the layout a *row* scan needs;
+    ``whole="y"`` is the transpose, for a *column* scan. Either way it is exact,
+    not exact-to-a-halo. Dims, coords and attrs are preserved.
 
     Like :func:`plane_kernel`, the leading dimension comes from ``field.dims[0]``.
     """
     if _kernels._is_dask(field.data):
-        # Only y is free to split, so ask compute_chunks for the row band and
-        # ignore its x suggestion. halo=1: there is no overlap to amortise.
-        working = compute_chunks(
-            field.sizes["y"], field.sizes["x"], halo=1, target_blocks=target_blocks
-        )
-        if working is not None:
-            field = field.chunk({field.dims[0]: 1, "y": working[0], "x": -1})
-    data = _kernels.row_planes(func, field.data, **kwargs)
+        # Only the split axis is free, so ask compute_chunks for that band and
+        # ignore its other suggestion. halo=1: there is no overlap to amortise.
+        ny, nx = field.sizes["y"], field.sizes["x"]
+        if whole == "x":
+            working = compute_chunks(ny, nx, halo=1, target_blocks=target_blocks)
+            chunks = None if working is None else {"y": working[0], "x": -1}
+        else:
+            working = compute_chunks(nx, ny, halo=1, target_blocks=target_blocks)
+            chunks = None if working is None else {"y": -1, "x": working[0]}
+        if chunks is not None:
+            field = field.chunk({field.dims[0]: 1, **chunks})
+    data = _kernels.row_planes(func, field.data, whole=whole, **kwargs)
     return xr.DataArray(
         data, dims=field.dims, coords=field.coords, attrs=field.attrs,
         name=field.name,
     )
+
+
+def masked_edges(field, edge_pixels, edges, target_blocks=None):
+    """Run :func:`_kernels.mask_edges` over a ``(stack, y, x)`` field.
+
+    Shared by all three stages' ``mask_edges`` -- the dispatch below is the same
+    wherever the trim is applied, and only the field it runs on differs. Returns
+    ``(masked_field, provenance)``; the second is the ``edge_pixels``/``edges``
+    half of the ``edges_masked`` attribute, which each caller merges its own
+    extras (``min_coherence`` and friends) into.
+
+    The decomposition follows what the requested sides allow:
+
+    * ``edges="all"`` erodes by ``edge_pixels`` cross iterations, which reach
+      exactly that far, so a matching halo is *exact* and the work still spreads
+      across chunks.
+    * ``left``/``right`` are found by scanning each row, so ``x`` is gathered and
+      the split runs along ``y``, where rows are independent -- exact, not
+      exact-to-a-halo. ``top``/``bottom`` scan columns, the transpose.
+    * Both families at once has no single-axis gather that serves it, and every
+      side has to be measured against the *same* footprint rather than what the
+      other one left behind, so it falls back to one whole plane per task.
+    """
+    if isinstance(edges, str) and edges == "all":
+        masked = plane_kernel(
+            _kernels.mask_edges, field, depth=max(1, int(edge_pixels)),
+            target_blocks=target_blocks,
+            edge_pixels=int(edge_pixels), edges="all",
+        )
+        return masked, {"edge_pixels": int(edge_pixels), "edges": "all"}
+
+    depths = _kernels.edge_depths(edge_pixels, edges)   # validates the selection
+    rows = {"left", "right"} & set(depths)
+    columns = {"top", "bottom"} & set(depths)
+    if rows and columns:
+        masked = plane_kernel(
+            _kernels.mask_edges, field,
+            depth=max(field.sizes["y"], field.sizes["x"]),
+            target_blocks=target_blocks,
+            edge_pixels=edge_pixels, edges=edges,
+        )
+    else:
+        masked = row_plane_kernel(
+            _kernels.mask_edges, field, target_blocks=target_blocks,
+            whole="y" if columns else "x",
+            edge_pixels=edge_pixels, edges=edges,
+        )
+    return masked, _edges_provenance(edge_pixels, edges)
+
+
+def _edges_provenance(edge_pixels, edges):
+    """The ``edges_masked`` record of a side selection, in a form whose JSON is
+    stable -- :func:`~nisar_tools.workspace.hash_params` hashes it, so a sequence
+    is sorted and a mapping keyed in order.
+
+    ``"along_track"`` and ``"all"`` are recorded verbatim, exactly as they were
+    before individual sides existed, so a store written then keeps its hash. A
+    mapping carries its own depths, which is why ``edge_pixels`` is recorded as
+    ``None`` there rather than as the argument that went unused.
+    """
+    if isinstance(edges, str):
+        return {"edge_pixels": int(edge_pixels), "edges": edges}
+    if isinstance(edges, Mapping):
+        return {
+            "edge_pixels": None,
+            "edges": {str(side): int(depth) for side, depth in sorted(edges.items())},
+        }
+    return {
+        "edge_pixels": int(edge_pixels),
+        "edges": sorted(str(side) for side in edges),
+    }
 
 
 def open_stage(path):

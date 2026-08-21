@@ -14,6 +14,7 @@ from nisar_tools import UnwrappedStack, Workspace
 from nisar_tools._kernels import (
     deramp,
     deramp_poly_dask,
+    edge_depths,
     fit_surface,
     halo_planes,
     mask_edges,
@@ -22,6 +23,7 @@ from nisar_tools._kernels import (
     remove_outliers,
     remove_outliers_depth,
     remove_outliers_planes,
+    row_planes,
     smooth_surface,
 )
 
@@ -222,6 +224,131 @@ def test_mask_edges_along_track_handles_empty_and_ragged_rows():
     assert np.array_equal(np.where(np.isfinite(out[3]))[0], np.arange(2, 8))
 
 
+def _sheared_swath(ny=12, nx=20, run=12, step=-1):
+    """A swath whose valid run walks across the grid as the row index grows.
+
+    ``step=-1`` walks it *left*, which is what makes a row scan and a column scan
+    interact: trimming the left edge moves where each column's data starts.
+    """
+    field = np.full((ny, nx), np.nan, np.float32)
+    for i in range(ny):
+        start = (i if step > 0 else ny - 1 - i) // 2
+        field[i, start:start + run] = 1.0
+    return field
+
+
+def _finite_columns(row):
+    return np.where(np.isfinite(row))[0]
+
+
+def test_mask_edges_takes_the_sides_one_at_a_time():
+    """The point of naming a side: trim the near-range boundary and leave the
+    far one, or reach an azimuth end that ``along_track`` never touches."""
+    field = _sheared_swath()
+    ref = _finite_columns(field[4])
+
+    left = mask_edges(field, 2, "left")
+    assert _finite_columns(left[4])[0] == ref[0] + 2
+    assert _finite_columns(left[4])[-1] == ref[-1]        # far side untouched
+
+    right = mask_edges(field, 2, "right")
+    assert _finite_columns(right[4])[0] == ref[0]
+    assert _finite_columns(right[4])[-1] == ref[-1] - 2
+
+    # top/bottom scan *columns*, so they cost each column its own first/last
+    # valid rows rather than the whole raster's.
+    top = mask_edges(field, 2, "top")
+    column = 10
+    rows = np.where(np.isfinite(field[:, column]))[0]
+    assert np.array_equal(
+        np.where(np.isfinite(top[:, column]))[0], rows[2:]
+    )
+    bottom = mask_edges(field, 2, "bottom")
+    assert np.array_equal(
+        np.where(np.isfinite(bottom[:, column]))[0], rows[:-2]
+    )
+
+
+def test_mask_edges_along_track_is_exactly_the_left_and_right_pair():
+    field = _sheared_swath()
+    ref = np.isnan(mask_edges(field, 3, "along_track"))
+    for edges in (["left", "right"], ("right", "left"), {"left": 3, "right": 3}):
+        np.testing.assert_array_equal(np.isnan(mask_edges(field, 3, edges)), ref)
+
+
+def test_mask_edges_mapping_gives_each_side_its_own_depth():
+    field = _sheared_swath()
+    ref = _finite_columns(field[4])
+    out = mask_edges(field, None, {"left": 4, "right": 1})
+    got = _finite_columns(out[4])
+    assert got[0] == ref[0] + 4 and got[-1] == ref[-1] - 1
+
+
+def test_mask_edges_measures_every_side_against_the_same_footprint():
+    """One call is not two chained calls: chaining lets the second scan what the
+    first left behind, so on a sheared swath the column scan starts too deep."""
+    field = _sheared_swath(step=-1)
+    one = np.isfinite(mask_edges(field, 2, ["left", "top"]))
+    chained = np.isfinite(mask_edges(mask_edges(field, 2, "left"), 2, "top"))
+    assert one.sum() > chained.sum()
+    assert not (one & ~chained).all()      # chaining only ever removes more
+
+
+def test_edge_depths_resolves_and_rejects():
+    assert edge_depths(3, "along_track") == {"left": 3, "right": 3}
+    assert edge_depths(3, "top") == {"top": 3}
+    assert edge_depths(3, ["left", "bottom"]) == {"left": 3, "bottom": 3}
+    assert edge_depths(9, {"left": 4, "right": 0}) == {"left": 4}   # 0 is dropped
+    assert edge_depths(0, "along_track") == {}
+    for bad in ("sideways", ["left", "nope"], {"middle": 3}):
+        with pytest.raises(ValueError, match="along_track"):
+            edge_depths(3, bad)
+    with pytest.raises(ValueError, match="erosion"):
+        edge_depths(3, "all")
+
+
+@pytest.mark.parametrize("edges,whole", [
+    ("left", "x"), ("right", "x"), (["left", "right"], "x"),
+    ("top", "y"), ("bottom", "y"), (["top", "bottom"], "y"),
+])
+@pytest.mark.parametrize("chunks", [(1, 16, 20), (1, 13, 11), (1, 64, 80)])
+def test_mask_edges_line_scan_is_exact_for_either_axis(edges, whole, chunks):
+    """A left/right scan needs whole rows and a top/bottom one whole columns, so
+    each gathers its own axis -- exact, not exact-to-a-halo."""
+    da = pytest.importorskip("dask.array")
+    field = _ragged_field()
+    ref = mask_edges_planes(field, edge_pixels=3, edges=edges)
+    got = row_planes(
+        mask_edges, da.from_array(field, chunks=chunks), whole=whole,
+        edge_pixels=3, edges=edges,
+    ).compute()
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(ref))
+    np.testing.assert_array_equal(got[np.isfinite(ref)], ref[np.isfinite(ref)])
+
+
+@pytest.mark.parametrize("edges", [
+    "along_track", "all", "left", "top", ["left", "bottom"], {"left": 4, "top": 2},
+])
+@pytest.mark.parametrize("chunks", [(1, 16, 20), (1, 13, 11)])
+def test_masked_edges_dispatch_matches_whole_plane(edges, chunks):
+    """Every route through the dispatch -- halo, row scan, column scan, and the
+    whole-plane fallback a two-family selection takes -- gives one answer."""
+    da = pytest.importorskip("dask.array")
+    from nisar_tools._base import masked_edges
+
+    field = _ragged_field()
+    edge_pixels = None if isinstance(edges, dict) else 3
+    ref = mask_edges_planes(field, edge_pixels=edge_pixels or 0, edges=edges)
+    lazy = xr.DataArray(
+        da.from_array(field, chunks=chunks), dims=("pair", "y", "x")
+    )
+    got, provenance = masked_edges(lazy, edge_pixels, edges, target_blocks=8)
+    got = got.compute().values
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(ref))
+    np.testing.assert_array_equal(got[np.isfinite(ref)], ref[np.isfinite(ref)])
+    assert set(provenance) == {"edge_pixels", "edges"}
+
+
 def test_remove_outliers_kernel_nulls_spike():
     yy, xx = np.mgrid[0:40, 0:40].astype(np.float32)
     field = 0.01 * xx  # gentle ramp
@@ -284,6 +411,61 @@ def test_mask_edges_trims_footprint(gunw_factory):
     row = after.shape[0] // 2  # centre row loses 3 px on each side
     assert before[row].sum() - after[row].sum() == 6
     assert out.ds.attrs["edges_masked"]["edge_pixels"] == 3
+
+
+def test_mask_edges_trims_one_named_side(gunw_factory):
+    """The ask this exists for: trim one range boundary and keep the other."""
+    u = UnwrappedStack.from_gunw_file(gunw_factory(ny=40, nx=40, nan_border=2))
+    before = np.isfinite(u.ds["unw"].isel(pair=0).values)
+    row = before.shape[0] // 2
+    ref = np.where(before[row])[0]
+
+    left = np.isfinite(
+        u.mask_edges(edge_pixels=3, edges="left").ds["unw"].isel(pair=0).values
+    )
+    got = np.where(left[row])[0]
+    assert got[0] == ref[0] + 3 and got[-1] == ref[-1]
+
+    # ...and a column-scanned side, which "along_track" never reaches.
+    bottom = np.isfinite(
+        u.mask_edges(edge_pixels=3, edges="bottom").ds["unw"].isel(pair=0).values
+    )
+    column = before.shape[1] // 2
+    rows = np.where(before[:, column])[0]
+    assert np.array_equal(np.where(bottom[:, column])[0], rows[:-3])
+
+
+def test_mask_edges_records_the_sides_it_trimmed(gunw_factory):
+    """Provenance feeds the persist hash, so it has to name the sides -- and
+    still record the two original modes exactly as it did before they existed."""
+    u = UnwrappedStack.from_gunw_file(gunw_factory(ny=40, nx=40, nan_border=2))
+
+    for edges in ("along_track", "all", "left"):
+        recorded = u.mask_edges(edge_pixels=3, edges=edges).ds.attrs["edges_masked"]
+        assert recorded["edges"] == edges and recorded["edge_pixels"] == 3
+
+    # A sequence is sorted, so two spellings of one selection hash alike.
+    assert (u.mask_edges(edge_pixels=3, edges=["top", "left"])
+            .ds.attrs["edges_masked"]["edges"] == ["left", "top"])
+
+    # A mapping carries its own depths, so edge_pixels went unused -- say so
+    # rather than record the default that was ignored.
+    recorded = u.mask_edges(edges={"left": 4, "right": 1}).ds.attrs["edges_masked"]
+    assert recorded == {"edge_pixels": None, "edges": {"left": 4, "right": 1},
+                        "min_coherence": None, "use_builtin_mask": False}
+
+
+def test_mask_edges_sides_change_the_persist_hash(gunw_factory, tmp_path):
+    ws = Workspace(tmp_path / "ws")
+    u = UnwrappedStack.from_gunw_file(gunw_factory(ny=40, nx=40, nan_border=2))
+    hashes = {}
+    for name, edges in (("both", "along_track"), ("one", "left"),
+                        ("uneven", {"left": 3, "right": 8})):
+        stack = (u.mask_edges(edge_pixels=3, edges=edges) if not isinstance(edges, dict)
+                 else u.mask_edges(edges=edges))
+        stack.persist(ws, f"unw_{name}")
+        hashes[name] = ws.stored_params_hash(f"unw_{name}")
+    assert len(set(hashes.values())) == 3
 
 
 def test_mask_edges_min_coherence_needs_coherence(gunw_factory):

@@ -244,6 +244,29 @@ what it removed was coastline, lakes or the azimuth end** — and the coastal st
 is exactly where the near-fault signal was. A GUNW additionally carries an exact
 edge mask; `mask_edges(use_builtin_mask=True)` decodes it.
 
+**The sides can be named one at a time.** `edges` also takes `"left"`, `"right"`,
+`"top"`, `"bottom"`, a sequence of them, or a `{side: pixels}` mapping when they
+want different depths (`edge_pixels` is then unused):
+
+```python
+unw.mask_edges(edge_pixels=32, edges="left")             # one range boundary
+unw.mask_edges(edge_pixels=32, edges=["left", "bottom"]) # + an azimuth end
+unw.mask_edges(edges={"left": 32, "right": 8})           # uneven depths
+```
+
+The names are **grid-relative, not orbit-relative** — which of left/right is
+*near* range depends on the pass and the look direction, so naming them after the
+grid is the one reading that cannot be got backwards. Each side is still found by
+scanning for the first and last valid sample of every line, so naming one spares
+the coastlines and lakes `edges="all"` would eat; `top`/`bottom` scan columns
+instead of rows, which is the only way to reach an azimuth end without the
+isotropic erosion. ⚠️ **Prefer one call over chaining several**: every side is
+measured against the same footprint, whereas a second call scans what the first
+left behind (on a sheared swath that costs real data), and `attrs["edges_masked"]`
+records only the last call — so two chained calls hash as one. The same applies to
+`GSLCStack.mask_edges` and `InterferogramStack.mask_edges`, which take the same
+`edges`.
+
 **`deramp(mask=...)` keeps a deformation region out of the *fit* but still
 subtracts the ramp there**, so real signal doesn't bias the trend and is still
 kept. Pass a boolean `(y, x)` grid or a `(lon_min, lon_max, lat_min, lat_max)`

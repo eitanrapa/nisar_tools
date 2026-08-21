@@ -13,9 +13,8 @@ from . import _kernels, geo
 from ._base import (
     SPATIAL_CHUNK,
     RasterStackMixin,
+    masked_edges,
     open_stage,
-    plane_kernel,
-    row_plane_kernel,
     wrapped_phase,
 )
 from .interferogram import InterferogramStack, make_pairs
@@ -232,7 +231,11 @@ class GSLCStack(RasterStackMixin):
         :meth:`mask_water` and the frame's azimuth ends are all spared.
         ``edges="all"`` instead erodes the whole finite footprint. See
         :func:`~nisar_tools._kernels.along_track_edge_mask` for the geometry the
-        default assumes.
+        default assumes. The sides can also be named one at a time --
+        ``"left"``, ``"right"``, ``"top"``, ``"bottom"``, a sequence of them, or
+        a ``{side: pixels}`` mapping for different depths; see
+        :meth:`UnwrappedStack.mask_edges
+        <nisar_tools.unwrap.UnwrappedStack.mask_edges>`.
 
         Complex data is masked to ``nan+0j``, which is the same "no data" the
         unwritten out-of-swath chunks of a GSLC already decode to, so nothing
@@ -240,34 +243,14 @@ class GSLCStack(RasterStackMixin):
         """
         slc = self.ds["slc"]
 
-        if edges == "along_track":
-            # Support is the whole row (which sample is the row's first?), so
-            # there is no halo that would do -- x is gathered and the split runs
-            # along y, where rows are independent.
-            masked = row_plane_kernel(
-                _kernels.mask_edges, slc, target_blocks=target_blocks,
-                edge_pixels=int(edge_pixels), edges="along_track",
-            )
-        elif edges == "all":
-            # Erosion by ``edge_pixels`` cross iterations reaches exactly that
-            # far, so a matching halo decomposes it spatially and the result is
-            # identical to the whole-plane fit.
-            masked = plane_kernel(
-                _kernels.mask_edges, slc, depth=max(1, int(edge_pixels)),
-                target_blocks=target_blocks,
-                edge_pixels=int(edge_pixels), edges="all",
-            )
-        else:
-            raise ValueError(
-                f"edges must be 'along_track' or 'all', got {edges!r}"
-            )
+        masked, provenance = masked_edges(
+            slc, edge_pixels, edges, target_blocks=target_blocks
+        )
 
         ds = self.ds.copy()
         ds["slc"] = masked
         ds.attrs.update(self.ds.attrs)
-        ds.attrs["edges_masked"] = {
-            "edge_pixels": int(edge_pixels), "edges": edges,
-        }
+        ds.attrs["edges_masked"] = dict(provenance)
         return GSLCStack(ds)
 
     def form_interferograms(
