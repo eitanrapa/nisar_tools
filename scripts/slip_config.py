@@ -417,6 +417,18 @@ ADAPT = dict(
 #: on atmosphere, the second spends them where the model is unconstrained.
 SAMPLING_FIELD = os.environ.get("NISAR_SAMPLING_FIELD", "model")
 
+#: Ramp degrees ``run_ramp_check.py`` compares, lowest first -- the first is the
+#: reference every moment ratio is measured against. ``NISAR_RAMP_KINDS`` takes a
+#: comma-separated list; drop ``cubic`` to halve the runtime once you know it is
+#: not the one in question.
+RAMP_KINDS = tuple((os.environ.get("NISAR_RAMP_KINDS")
+                    or "offset,linear,quadratic,cubic").replace(",", " ").split())
+
+#: Fractional moment loss above which a ramp degree is called out, *when it also
+#: fits better*. 0.2 is calibrated against the six-scene sweep, where offset to
+#: quadratic moved peak slip 4% and Mw 7.49 to 7.55 -- a moment rise, not a fall.
+RAMP_TOLERANCE = float(os.environ.get("NISAR_RAMP_TOLERANCE", 0.20))
+
 
 # -- shared helpers ----------------------------------------------------------
 def workspace(create=True):

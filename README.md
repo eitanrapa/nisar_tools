@@ -650,6 +650,17 @@ interferogram has an arbitrary constant.
 affordable because `SlipInversion.with_ramp` shares the Green's matrix — one
 *solve* per degree, not one assembly.
 
+From the runners, after stage 1 has written the observations:
+
+```bash
+KMP_DUPLICATE_LIB_OK=TRUE NISAR_RAMP_KINDS=offset,linear,quadratic,cubic \
+nohup python -u scripts/run_ramp_check.py > workdir/ramp_check.log 2>&1 &
+```
+
+writing `ramp_leakage.json`, `ramp_sweep.csv` and `figures/ramp_check.png`, and
+printing a verdict. Outputs gain a `_bootstrap` suffix when the observations came
+from the coarse round-0 sampling, as the L-curve's do.
+
 - ⚠️ **Variance reduction cannot answer this, which is the whole problem.** Extra
   free columns can only fit better, so a ramp absorbing coseismic signal looks like
   a **better fit with a smaller earthquake**. `ramp_sweep` flags exactly that
