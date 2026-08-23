@@ -141,6 +141,11 @@ class NodeBasis:
         """
         from .layered import _triangle_quadrature
 
+        if len(self._incident[index]) == 0:
+            raise ValueError(
+                f"node {index} belongs to no element, so it has no tent function "
+                "and no Green's function reads it; the layout left it orphaned"
+            )
         points, weights, owners = [], [], []
         for element in self._incident[index]:
             vertices = self.mesh.vertices[element]
@@ -164,21 +169,16 @@ class NodeBasis:
         return areas
 
     def boundary(self, sides):
-        """Nodes on the flagged edges, in parameter space."""
-        s, z = self.mesh.params[:, 0], self.mesh.params[:, 1]
+        """Nodes on the flagged edges, in parameter space.
+
+        Delegated to the mesh rather than repeating the test: an edge that
+        silently collapses to a single node removes the zero-slip constraint
+        without raising anything, so there must be exactly one answer to "which
+        nodes are on this side".
+        """
         mask = np.zeros(self.n_basis, dtype=bool)
         for side in sides:
-            if side == "bottom":
-                mask |= z == z.min()
-            elif side == "top":
-                mask |= z == z.max()
-            elif side == "left":
-                mask |= s == s.min()
-            elif side == "right":
-                mask |= s == s.max()
-            else:
-                raise ValueError(
-                    f"Unknown boundary {side!r}; expected bottom, top, left or right")
+            mask |= self.mesh.boundary_nodes(side)
         return mask
 
 
@@ -217,6 +217,16 @@ def _barycentric_weight(vertices, triangle, node, points):
     v0, v1 = b - a, c - a
     d00, d01, d11 = v0 @ v0, v0 @ v1, v1 @ v1
     denominator = d00 * d11 - d01 * d01
+    if denominator <= 0.0:
+        # Gram determinant of the two edge vectors, so it vanishes exactly when
+        # the triangle is degenerate. Delaunay over an irregular node set can
+        # produce one where the lattice split never could, and dividing by it
+        # would return silent nonsense rather than raising.
+        raise ValueError(
+            f"element with vertices {vertices.tolist()} is degenerate, so its "
+            "barycentric coordinates are undefined; the node layout has three "
+            "collinear or coincident parameter points"
+        )
     v2 = points - a
     d20, d21 = v2 @ v0, v2 @ v1
     u = (d11 * d20 - d01 * d21) / denominator

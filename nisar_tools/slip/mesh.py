@@ -28,7 +28,30 @@ import hashlib
 import numpy as np
 import xarray as xr
 
+from .layout import (  # noqa: F401  (_lattice_triangles is re-exported)
+    MAX_COUNT_RATIO,
+    MeshLayout,
+    _lattice_triangles,
+    boundary_node_mask,
+    graded_layout,
+    require_boundaries,
+)
 from .trace import VERTICAL_TOL_DEG, FaultSegment, dip_offset  # noqa: F401
+
+# There is deliberately NO near-vertical element guard here, and that is a
+# measured decision rather than an oversight. An irregular triangulation puts
+# most of a vertical mesh's elements a hair off 90 degrees -- 107 of 146 within
+# 1e-2 degrees, median 1.8e-12 -- because `arccos(|n_z|)` cannot return exactly
+# 90 when the normal's vertical component is at machine epsilon. That looks like
+# the catastrophic band this package's notes record beside vertical, and it is
+# not: measured against `cutde`, an independent implementation of the same
+# triangular dislocation, that mesh's whole LOS design matrix agrees to
+# **2.4e-14**, the same as a uniform mesh with no such elements at all. A single
+# triangle agrees to 1e-14 at every tilt from 0 to 5 degrees, 1e-14 degrees
+# included. The recorded band is a rectangle-as-two-TDEs disagreement with the
+# *Okada* oracle, which is why the note says cutde tracks `_tde` far more
+# closely than either tracks Okada inside it. A warning here would fire on two
+# thirds of every irregular vertical mesh and teach the reader to ignore it.
 
 
 class FaultMesh:
@@ -135,7 +158,8 @@ class FaultMesh:
                surface=None, bottom_trace=None, bottom_depth=None,
                max_depth=20e3, edge_length=3e3, top_depth=0.0,
                down_dip_levels=None, bias_w=1.0, bias_l=1.0, smoothness=None,
-               depth_control=None, **fit_kwargs):
+               depth_control=None, layout=None, depths=None, nodes_per_level=None,
+               along_spacing=None, balance=MAX_COUNT_RATIO, **fit_kwargs):
         """A fault that dips, built from one dip per deep segment.
 
         The reference implementation's normal workflow: a surface trace, a set of
@@ -173,25 +197,45 @@ class FaultMesh:
         real trace at ``down_dip_levels=8``: ``bias_w=1.15`` runs 1.8 km levels at
         the surface to 4.2 km at 20 km depth, and ``1.3`` runs 1.1 km to 5.5 km.
 
+        Three knobs place the nodes freely, in increasing generality; all three
+        keep the geometry arguments above untouched, because how a node is
+        carried onto the fitted surface does not depend on where it sits.
+
+        * ``depths=`` -- the depth levels outright, any spacing, in place of the
+          ``down_dip_levels``/``bias_w`` geometric progression.
+        * ``nodes_per_level=`` (a scalar, one value per level, or a callable of
+          depth) or ``along_spacing=`` (the same thing in metres) -- **a
+          different number of nodes at each depth level**. Rows of unequal count
+          have no quads to split, so those meshes are triangulated by Delaunay
+          in ``(s, z)`` and wound by
+          :func:`~nisar_tools.slip.layout.orient_triangles`; a uniform count
+          still takes the classic lattice split, bit for bit.
+        * ``layout=`` -- a :class:`~nisar_tools.slip.layout.MeshLayout` you built
+          yourself, including a fully unstructured one from
+          :func:`~nisar_tools.slip.layout.lloyd_layout`. The depth extent then
+          comes from the layout rather than from ``max_depth``.
+
+        ``balance`` caps how fast the node count may change between adjacent
+        levels (2:1 by default). It is a shape guard, not a preference: a fine
+        row against a coarse one is what makes Delaunay reach across for a long
+        thin triangle.
+
         ``bias_l`` is accepted only as ``1``. It is the reference's along-strike
-        counterpart, and coarsening *along strike* with depth would leave rows with
-        different node counts -- a lattice that no longer has quads to split, so
-        the triangulation would have to come from Delaunay, whose arbitrary
-        diagonals are what :func:`_lattice_triangles` exists to avoid (see this
-        module's own docstring). The reference's demo configuration sets
-        ``biasL = 1`` too, so this is not a gap in practice.
+        counterpart -- a single geometric ratio applied along strike -- which is
+        not what the knobs above give you, and it has no meaning once the levels
+        may hold different node counts anyway.
         """
         frame = frame or trace.local_frame()
-        if max_depth <= top_depth:
+        if layout is None and max_depth <= top_depth:
             raise ValueError("max_depth must be deeper than top_depth")
         if bias_l != 1.0:
             raise ValueError(
-                f"bias_l={bias_l} is not supported: coarsening along strike with "
-                "depth gives rows of unequal node count, which cannot be split into "
-                "quads and so would need Delaunay -- whose arbitrary diagonals are "
-                "the winding hazard this mesh is built to avoid. Use bias_w to grade "
-                "resolution with depth, which is what resolution actually needs, and "
-                "note the reference's own demo configuration sets biasL = 1."
+                f"bias_l={bias_l} is not supported. It is the reference's single "
+                "geometric ratio applied along strike; to vary resolution along "
+                "strike or per depth level, use nodes_per_level= / along_spacing= "
+                "(which take a sequence or a callable of depth), depths= for the "
+                "levels themselves, or layout= for an arbitrary node set. The "
+                "reference's own demo configuration sets biasL = 1."
             )
         if bottom_depth is not None and bottom_trace is None:
             raise ValueError(
@@ -210,9 +254,11 @@ class FaultMesh:
         tx, ty = resampled.to_local(frame)
         s = _arc_length(tx, ty)
 
-        if down_dip_levels is None:
-            down_dip_levels = max(1, int(round((max_depth - top_depth) / edge_length))) + 1
-        depths = _depth_levels(top_depth, max_depth, int(down_dip_levels), bias_w)
+        layout, depths = _resolve_layout(
+            layout, depths, nodes_per_level, along_spacing, s,
+            top_depth, max_depth, down_dip_levels, bias_w, edge_length, balance)
+        top_depth = float(-layout.params[:, 1].max())
+        max_depth = float(-layout.params[:, 1].min())
 
         # Everything curvilinear is measured against the *resampled* trace, not
         # the digitised one: `s` came from its vertices, so it is the polyline
@@ -227,24 +273,16 @@ class FaultMesh:
         # `cross_nodes` is indexed by ascending z (deepest row first); the mesh
         # wants shallowest first, so the depth axis is reversed once, here.
         cross = _snap_vertical_columns(surface.cross_nodes[::-1], depths)
-        ns, nz = s.size, depths.size
-        nodes = np.empty((ns * nz, 3))
-        params = np.empty((ns * nz, 2))
-        for j, depth in enumerate(depths):
-            sl = slice(j * ns, (j + 1) * ns)
-            if np.all(cross[j] == 0.0):
-                # Exactly on the trace: take the resampled vertices verbatim,
-                # so a vertical fault is bit-identical to `vertical()` instead of
-                # agreeing with it only to interpolation round-off.
-                nodes[sl, 0], nodes[sl, 1] = tx, ty
-            else:
-                nodes[sl, 0], nodes[sl, 1] = resampled.from_curvilinear(s, cross[j], frame)
-            nodes[sl, 2] = -depth
-            params[sl, 0] = s
-            params[sl, 1] = -depth
+        nodes = _place_layout(layout, resampled, frame, s, depths, cross, tx, ty)
+        params = layout.params
 
         centres = centre_params = None
-        if surface.cross_centres is not None:
+        # The fitted cell centres are the *fit lattice's*, so they are the mesh's
+        # own cells only while the mesh is that lattice. Nothing in the package
+        # reads them, so an irregular layout simply leaves them out rather than
+        # shipping a grid that does not describe it.
+        if (surface.cross_centres is not None
+                and layout.uniform_counts == (s.size, depths.size)):
             cx, cy, cz, cs = surface.centre_points(resampled, frame)
             centres = np.column_stack([cx, cy, cz])
             centre_params = np.column_stack([cs, cz])
@@ -256,19 +294,31 @@ class FaultMesh:
             "edge_length": float(edge_length),
             "trace_length": float(s[-1]),
             "trace_name": trace.name,
-            "n_along": int(ns),
-            "n_down": int(nz),
             "bias_w": float(bias_w),
         }
+        attrs.update(_layout_attrs(layout))
         attrs.update({k: v for k, v in surface.attrs.items() if k != "kind"})
         if uniform_dip is not None:
             attrs["dip_deg"] = float(uniform_dip)
 
-        mesh = cls(nodes, triangles=_lattice_triangles(ns, nz), params=params,
+        mesh = cls(nodes, triangles=layout.triangles, params=params,
                    frame=frame, attrs=attrs, centres=centres,
                    centre_params=centre_params)
         mesh._check_winding(trace)
+        require_boundaries(params)
         return mesh
+
+    @classmethod
+    def from_layout(cls, layout, trace, frame=None, **kwargs):
+        """Build a mesh on a node layout chosen elsewhere.
+
+        The seam an optimizer works through: :mod:`nisar_tools.slip.layout`
+        decides where the nodes go in ``(s, z)`` and this carries them onto the
+        very surface :meth:`curved` fits, so geometry and discretisation can be
+        varied independently. Every geometry keyword of :meth:`curved` applies;
+        the depth extent comes from the layout.
+        """
+        return cls.curved(trace, frame, layout=layout, **kwargs)
 
     # -- derived geometry --------------------------------------------------
     @property
@@ -394,20 +444,16 @@ class FaultMesh:
         degenerate for an east-west fault and would anchor an interior node at
         any restraining bend that reaches further north than an endpoint.
         """
-        s, z = self.params[:, 0], self.params[:, 1]
-        if side == "bottom":
-            on = z == z.min()
-        elif side == "top":
-            on = z == z.max()
-        elif side == "left":
-            on = s == s.min()
-        elif side == "right":
-            on = s == s.max()
-        else:
-            raise ValueError(
-                f"Unknown boundary {side!r}; expected bottom, top, left or right"
-            )
-        return on[self.triangles].any(axis=1)
+        return self.boundary_nodes(side)[self.triangles].any(axis=1)
+
+    def boundary_nodes(self, side):
+        """Nodes on one edge of the fault, as a boolean mask over ``nodes``.
+
+        The single implementation of "which nodes are on an edge"; the element
+        mask above, ``NodeBasis.boundary`` and ``SlipModel.surface_displacement``
+        all read it, so an irregular mesh cannot have three answers.
+        """
+        return boundary_node_mask(self.params, side)
 
     # -- identity / persistence -------------------------------------------
     def digest(self):
@@ -577,6 +623,137 @@ def _snap_vertical_columns(cross, depths):
     return cross
 
 
+def _resolve_layout(layout, depths, nodes_per_level, along_spacing, stations,
+                    top_depth, max_depth, down_dip_levels, bias_w, edge_length,
+                    balance):
+    """The ``(s, z)`` node layout, and the depth levels to fit the surface on.
+
+    The two are the same list for a row-structured layout -- which is what keeps
+    a node's parameter depth equal to its Cartesian ``z``, the invariant
+    ``from_dataset`` and every boundary test rest on. A freeform cloud has no
+    rows to fit, so the surface gets its own even lattice over the same depth
+    range and the nodes are interpolated off it.
+    """
+    if layout is not None:
+        clash = [name for name, value in (("depths", depths),
+                                          ("nodes_per_level", nodes_per_level),
+                                          ("along_spacing", along_spacing))
+                 if value is not None]
+        if clash:
+            raise ValueError(
+                f"layout= already places every node, so {clash} would be a "
+                "second and contradicting answer"
+            )
+        if layout.levels is not None:
+            return layout, np.asarray(layout.levels, dtype=float)
+        depth = -layout.params[:, 1]
+        n = (int(down_dip_levels) if down_dip_levels
+             else max(2, int(round((depth.max() - depth.min()) / edge_length)) + 1))
+        return layout, _depth_levels(depth.min(), depth.max(), n, 1.0)
+
+    if depths is None:
+        if down_dip_levels is None:
+            down_dip_levels = max(1, int(round((max_depth - top_depth) / edge_length))) + 1
+        depths = _depth_levels(top_depth, max_depth, int(down_dip_levels), bias_w)
+    else:
+        depths = np.asarray(depths, dtype=float).ravel()
+        if bias_w != 1.0:
+            raise ValueError(
+                "depths= lists the levels outright, so bias_w -- which exists only "
+                "to generate a geometric progression of them -- would be ignored. "
+                "Drop one of the two."
+            )
+        if down_dip_levels is not None:
+            raise ValueError(
+                "depths= already fixes the level count; drop down_dip_levels="
+            )
+
+    if nodes_per_level is None and along_spacing is None:
+        # The classic lattice: one node per resampled trace vertex, every level.
+        nodes_per_level = stations.size
+
+    return graded_layout(stations[-1], depths, counts=nodes_per_level,
+                         along_spacing=along_spacing, stations=stations,
+                         balance=balance), depths
+
+
+def _layout_attrs(layout):
+    """Provenance for a layout, keeping the lattice's own keys where they apply.
+
+    ``n_along`` means nothing once levels differ, so an irregular layout records
+    ``nodes_per_level`` instead; ``layout`` is folded in only when it is not the
+    classic uniform one, so an existing mesh's attrs are unchanged.
+    """
+    kind = layout.attrs.get("layout", "freeform")
+    out = {} if kind == "uniform" else {"layout": kind}
+    if layout.counts is None:
+        out["n_nodes"] = int(layout.n_nodes)
+        return out
+    out["n_down"] = int(layout.counts.size)
+    uniform = layout.uniform_counts
+    if uniform is not None:
+        out["n_along"] = int(uniform[0])
+    else:
+        out["nodes_per_level"] = [int(v) for v in layout.counts]
+    return out
+
+
+def _sample_cross(cross, s_fit, depths, params):
+    """Cross-strike offset at arbitrary ``(s, z)``, bilinear on the fit lattice.
+
+    Exact on the lattice's own knots: ``searchsorted`` puts a node sitting on a
+    knot at weight exactly 1, so a row-structured layout would get the same
+    numbers as the per-level path in :func:`_place_layout`.
+    """
+    s = params[:, 0]
+    depth = -params[:, 1]
+
+    i = np.clip(np.searchsorted(s_fit, s) - 1, 0, s_fit.size - 2)
+    ws = (s - s_fit[i]) / (s_fit[i + 1] - s_fit[i])
+    j = np.clip(np.searchsorted(depths, depth) - 1, 0, depths.size - 2)
+    wz = (depth - depths[j]) / (depths[j + 1] - depths[j])
+
+    lower = cross[j, i] * (1.0 - ws) + cross[j, i + 1] * ws
+    upper = cross[j + 1, i] * (1.0 - ws) + cross[j + 1, i + 1] * ws
+    return lower * (1.0 - wz) + upper * wz
+
+
+def _place_layout(layout, resampled, frame, s_fit, depths, cross, tx, ty):
+    """Carry an ``(s, z)`` layout into 3-D through the fitted cross-strike field.
+
+    A node's ``z`` is copied across untouched -- the surface moves nodes in map
+    view only -- which is what keeps ``params[:, 1] == nodes[:, 2]`` exact, and
+    with it every boundary test and ``from_dataset``'s reconstruction.
+    """
+    params = layout.params
+    nodes = np.empty((layout.n_nodes, 3))
+    nodes[:, 2] = params[:, 1]
+
+    if layout.counts is not None:
+        for j, sl in enumerate(layout.level_slices()):
+            s_j = params[sl, 0]
+            if np.all(cross[j] == 0.0):
+                # Exactly on the trace. `np.interp` returns its knots bit for
+                # bit, so a uniform layout writes the same coordinates
+                # `vertical()` does rather than agreeing to round-off.
+                nodes[sl, 0] = np.interp(s_j, s_fit, tx)
+                nodes[sl, 1] = np.interp(s_j, s_fit, ty)
+            else:
+                nodes[sl, 0], nodes[sl, 1] = resampled.from_curvilinear(
+                    s_j, np.interp(s_j, s_fit, cross[j]), frame)
+        return nodes
+
+    offset = _sample_cross(cross, s_fit, depths, params)
+    flat = offset == 0.0
+    if flat.any():
+        nodes[flat, 0] = np.interp(params[flat, 0], s_fit, tx)
+        nodes[flat, 1] = np.interp(params[flat, 0], s_fit, ty)
+    if not flat.all():
+        nodes[~flat, 0], nodes[~flat, 1] = resampled.from_curvilinear(
+            params[~flat, 0], offset[~flat], frame)
+    return nodes
+
+
 def _resolve_surface(trace, frame, s, depths, surface, segments, dips, uniform_dip,
                      bottom_trace, bottom_depth, smoothness, depth_control, fit_kwargs):
     """Turn whichever geometry description the caller gave into a FaultSurface."""
@@ -635,27 +812,6 @@ def _resolve_surface(trace, frame, s, depths, surface, segments, dips, uniform_d
         **fit_kwargs,
     )
     return built, "curved"
-
-
-def _lattice_triangles(ns, nz):
-    """Split an ``ns x nz`` node lattice into triangles with one fixed winding.
-
-    Node ``(i, j)`` -- ``i`` along strike, ``j`` down dip -- is index
-    ``j * ns + i``. Each quad becomes ``(a, b, c)`` and ``(a, c, d)`` with
-    ``a = (i, j)``, ``b = (i + 1, j)``, ``c = (i + 1, j + 1)``, ``d = (i, j + 1)``.
-    For a fault extruded downward along an increasing-``s`` trace, both halves'
-    normals come out on the trace's left-hand side.
-    """
-    tris = []
-    for j in range(nz - 1):
-        for i in range(ns - 1):
-            a = j * ns + i
-            b = j * ns + i + 1
-            c = (j + 1) * ns + i + 1
-            d = (j + 1) * ns + i
-            tris.append((a, b, c))
-            tris.append((a, c, d))
-    return np.array(tris, dtype=int)
 
 
 def _arc_length(x, y):

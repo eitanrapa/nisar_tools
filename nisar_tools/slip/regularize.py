@@ -24,7 +24,8 @@ import numpy as np
 import scipy.sparse as sp
 
 
-def neighbor_smoothing(neighbors, ss_ratio=1.0, ds_ratio=1.0):
+def neighbor_smoothing(neighbors, ss_ratio=1.0, ds_ratio=1.0, weighting="uniform",
+                       mesh=None):
     """Rows penalising the slip difference across each shared element edge.
 
     ``neighbors`` is the ``(m, 3)`` adjacency from
@@ -42,9 +43,26 @@ def neighbor_smoothing(neighbors, ss_ratio=1.0, ds_ratio=1.0):
     harmless algebraically but doubles the row count and rescales the effective
     smoothing weight by ``sqrt(2)``. Worth knowing when comparing a weight
     against a run of the MATLAB code.
+
+    ``weighting="uniform"`` -- the default, and what every run before graded
+    meshes existed used -- gives each edge a bare ``[+ratio, -ratio]``, which
+    penalises a *difference* rather than a *gradient*. That is fine while the
+    elements are all much the same size and wrong once they are not: on a mesh
+    whose areas span two orders of magnitude it smooths the coarse deep patches
+    as hard as the fine shallow ones, in metres of slip rather than metres of
+    slip per kilometre. ``weighting="length"`` divides each row by the distance
+    between the two centroids, which is a first-difference approximation to the
+    gradient, and needs ``mesh=``. The node basis's
+    :func:`laplace_beltrami` is already shape- and area-weighted and needs
+    none of this.
     """
     neighbors = np.asarray(neighbors)
     n_elements = neighbors.shape[0]
+    if weighting not in ("uniform", "length"):
+        raise ValueError(
+            f"Unknown weighting {weighting!r}; expected 'uniform' or 'length'")
+    if weighting == "length" and mesh is None:
+        raise ValueError("weighting='length' needs mesh= to measure centroid spacing")
 
     edges = set()
     for i in range(n_elements):
@@ -55,14 +73,25 @@ def neighbor_smoothing(neighbors, ss_ratio=1.0, ds_ratio=1.0):
     if not edges:
         return sp.csr_matrix((0, 2 * n_elements))
 
+    scale = np.ones(len(edges))
+    if weighting == "length":
+        centroids = mesh.centroids
+        pairs = np.asarray(edges)
+        gap = np.linalg.norm(centroids[pairs[:, 0]] - centroids[pairs[:, 1]], axis=1)
+        # Normalised by the median so one lambda still means roughly what it did
+        # under uniform weighting; only the *relative* treatment of a coarse and
+        # a fine edge changes.
+        scale = np.median(gap) / np.maximum(gap, 1e-9)
+
     rows, cols, vals = [], [], []
     for r, (i, j) in enumerate(edges):
         for block, ratio in ((0, ss_ratio), (1, ds_ratio)):
             row = r + block * len(edges)
             offset = block * n_elements
+            weight = ratio * scale[r]
             rows += [row, row]
             cols += [i + offset, j + offset]
-            vals += [ratio, -ratio]
+            vals += [weight, -weight]
 
     return sp.csr_matrix(
         (vals, (rows, cols)), shape=(2 * len(edges), 2 * n_elements)

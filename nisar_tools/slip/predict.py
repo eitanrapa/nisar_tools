@@ -38,6 +38,7 @@ size, so nothing is lost.
 
 import numpy as np
 
+from .layout import MAX_COUNT_RATIO
 from .sampling import Observations, _to_frame, stack_epsg
 
 #: Coarse grid on which the elastic forward model is evaluated, in metres.
@@ -115,7 +116,8 @@ def predicted_los(model, los_stack, frame=None, spacing=DEFAULT_SPACING,
 def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=None,
                      inversion_kwargs=None, solve_kwargs=None, max_rounds=5,
                      tol=DEFAULT_TOL, spacing=DEFAULT_SPACING, refine_within=None,
-                     rms_fraction=0.02, normalize="sqrt_count", verbose=True):
+                     rms_fraction=0.02, normalize="sqrt_count", mesh_adapt=None,
+                     sampling_field="model", verbose=True):
     """Run the Wang & Fialko loop: sample, invert, re-sample from the model.
 
     ``scenes`` is a ``{name: LOSStack}`` mapping -- put them on one lattice first
@@ -131,11 +133,54 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
     Every later round predicts each scene's LOS from the current model, re-samples
     on that, and re-solves.
 
-    Stops when no slip parameter moves by more than ``tol`` between rounds, or at
+    Stops when the slip field moves by no more than ``tol`` between rounds, or at
     ``max_rounds``. Returns ``(observations, model, history)``; ``history`` is a
     list of per-round dicts carrying ``n``, ``variance_reduction`` and
     ``max_change``, so that the "stops changing" criterion can be checked rather
     than assumed.
+
+    **Two-way optimization.** ``mesh_adapt`` turns the loop from
+    sample-invert-sample into sample-**remesh**-invert: each round re-sizes the
+    elements from the model resolution the current data supports
+    (:func:`~nisar_tools.slip.resolution.target_element_size`) and rebuilds the
+    mesh on the new layout. It is a dict, and it must carry ``geometry`` --
+    keyword arguments for :meth:`~nisar_tools.slip.mesh.FaultMesh.from_layout`
+    naming what the fault *is* (``bottom_trace=``, ``uniform_dip=``, ...), since a
+    layout says only where the nodes go. Everything else in the dict is passed to
+    ``target_element_size``, plus ``rounds`` to stop adapting after N rounds and
+    ``smoothing`` to evaluate resolution at a weight other than ``solve_kwargs``'.
+
+    ``sampling_field`` chooses what the quadtree splits on: ``"model"`` (the
+    default, Wang & Fialko's predicted displacement), ``"resolution"`` (Lohman &
+    Simons -- where a sample would most improve model resolution), or ``"both"``,
+    the sum of the two standardised fields. The two answer different questions:
+    the first avoids spending samples on atmosphere, the second spends them where
+    the model is unconstrained. It **moves** samples rather than adding them --
+    measured on the two-scene fixture, ``"model"`` put 1974 samples with 33.5%
+    inside 20 km of the trace and ``"resolution"`` put 890 with **74.4%**.
+
+    ⚠️ ``"both"`` is not "at least as many samples as either", and cannot be:
+    ``rms_min`` is a fraction of the field's *own global* scatter, so a field that
+    is large but smooth raises the split threshold everywhere without raising any
+    cell's local scatter.
+
+    ⚠️ **A changing mesh invalidates the obvious convergence test.** ``max_change``
+    was ``max |element_slip - previous|``, and two rounds on different meshes give
+    different-length vectors. It is measured on a fixed ``(s, z)`` probe lattice
+    instead whenever the mesh moves, which is mesh- and basis-independent; with
+    the mesh held fixed the element-space number is kept verbatim, so existing runs
+    print exactly what they printed before.
+
+    ⚠️ **That probe number has an irreducible floor, which is why ``mesh_adapt``
+    stops before the last round.** Resampling a piecewise-constant field onto a
+    fixed lattice differs by roughly the element-boundary contrast however little
+    the model moved: measured, two models fitting the *same* data on 240 and 232
+    elements agree to a **2 mm median** and still differ by **0.97 m** at the worst
+    probe point. So ``tol`` cannot be met while the mesh is moving, and
+    ``mesh_adapt["rounds"]`` defaults to ``max_rounds - 1`` so the run finishes on a
+    fixed mesh and converges on the exact criterion. Set it to ``max_rounds`` to
+    keep adapting throughout, and expect the loop to run out of rounds rather than
+    converge.
     """
     from .inversion import SlipInversion
 
@@ -148,6 +193,13 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
 
     inversion_kwargs = dict(inversion_kwargs or {})
     solve_kwargs = dict(solve_kwargs or {})
+    if sampling_field not in ("model", "resolution", "both"):
+        raise ValueError(
+            f"Unknown sampling_field {sampling_field!r}; expected 'model', "
+            "'resolution' or 'both'"
+        )
+    adapt = _adapt_spec(mesh_adapt, max_rounds)
+    probe = _probe_lattice(mesh) if (adapt or sampling_field != "model") else None
     if refine_within is None:
         refine_within = REFINE_MULTIPLE * max(
             float(kw.get("exclude_within", 0.0)) for kw in sample_kwargs.values()
@@ -170,35 +222,174 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
         parts.append(sample(name, stack, **extra))
 
     obs = Observations.concat(parts, normalize=normalize)
-    model = SlipInversion(mesh, obs, **inversion_kwargs).solve(**solve_kwargs)
-    history = [{"round": 0, "n": obs.n, "field": "data",
-                "variance_reduction": model.variance_reduction,
-                "max_change": float("nan"), "converged": model.converged}]
+    inversion = SlipInversion(mesh, obs, **inversion_kwargs)
+    model = inversion.solve(**solve_kwargs)
+    history = [_entry(0, obs, model, mesh, "data", float("nan"))]
     if verbose:
         _report(history[-1])
 
     for round_index in range(1, int(max_rounds) + 1):
         _warn_if_degenerate(model, round_index)
         previous = model.element_slip.copy()
-        parts = []
+        previous_probe = None if probe is None else _probe_slip(mesh, model, probe)
+
+        fields = {}
         for name, stack in scenes.items():
-            field = predicted_los(model, stack, frame, spacing=spacing)
-            parts.append(sample(name, stack, field=field,
-                                rms_min=model_rms_min(field, rms_fraction)))
+            fields[name] = _split_field(model, inversion, stack, frame, spacing,
+                                        sampling_field, adapt, solve_kwargs)
+        parts = [sample(name, stack, field=fields[name],
+                        rms_min=model_rms_min(fields[name], rms_fraction))
+                 for name, stack in scenes.items()]
+
+        if adapt is not None and round_index <= adapt["rounds"]:
+            mesh = _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs)
 
         obs = Observations.concat(parts, normalize=normalize)
-        model = SlipInversion(mesh, obs, **inversion_kwargs).solve(**solve_kwargs)
+        inversion = SlipInversion(mesh, obs, **inversion_kwargs)
+        model = inversion.solve(**solve_kwargs)
 
-        change = float(np.abs(model.element_slip - previous).max())
-        history.append({"round": round_index, "n": obs.n, "field": "model",
-                        "variance_reduction": model.variance_reduction,
-                        "max_change": change, "converged": model.converged})
+        if previous_probe is not None and model.element_slip.size != previous.size:
+            change = float(np.abs(
+                _probe_slip(mesh, model, probe) - previous_probe).max())
+        else:
+            change = float(np.abs(model.element_slip - previous).max())
+        history.append(_entry(round_index, obs, model, mesh,
+                              sampling_field if sampling_field != "model" else "model",
+                              change))
         if verbose:
             _report(history[-1])
         if change <= tol:
             break
 
     return obs, model, history
+
+
+def _entry(round_index, obs, model, mesh, field, change):
+    """One row of the loop's history, including what the mesh was that round."""
+    return {"round": round_index, "n": obs.n, "field": field,
+            "variance_reduction": model.variance_reduction,
+            "max_change": change, "converged": model.converged,
+            "n_elements": int(mesh.n_elements), "n_nodes": int(mesh.n_nodes)}
+
+
+def _adapt_spec(mesh_adapt, max_rounds):
+    """Validate the mesh-adaptation request, or ``None`` when there is none."""
+    if mesh_adapt is None:
+        return None
+    spec = dict(mesh_adapt)
+    if "geometry" not in spec:
+        raise ValueError(
+            "mesh_adapt needs a 'geometry' entry: a layout says where the nodes "
+            "go, not what the fault is, so rebuilding the mesh needs the same "
+            "keywords FaultMesh.curved took (bottom_trace=, uniform_dip=, "
+            "segments=/dips=, edge_length=, ...)"
+        )
+    # Adapt for all but the last round by default, so the loop ends on a fixed
+    # mesh where `max |element_slip - previous|` is exact. Re-meshing perturbs a
+    # piecewise-constant slip field by ~0.1-1 m at element boundaries whatever
+    # the model does -- measured, two models fitting the *same* data on 240 and
+    # 232 elements agree to a 2 mm median and still differ by 0.97 m at the
+    # worst probe point -- so a centimetre tolerance is unreachable while the
+    # mesh is still moving, and a loop that adapts every round can only ever
+    # stop on `max_rounds`.
+    spec.setdefault("rounds", max(1, int(max_rounds) - 1))
+    spec.setdefault("smoothing", None)
+    return spec
+
+
+def _resolution_of(inversion, adapt, solve_kwargs):
+    """Model resolution at the weight the run actually solves at."""
+    from .resolution import resolution_diagonal
+
+    smoothing = adapt.get("smoothing") if adapt else None
+    if smoothing is None:
+        smoothing = solve_kwargs.get("smoothing", 0.3)
+    keys = ("ss_ratio", "ds_ratio", "boundary_ratio", "sides", "smooth_weighting")
+    passed = {k: solve_kwargs[k] for k in keys if k in solve_kwargs}
+    return resolution_diagonal(inversion, smoothing, **passed)
+
+
+def _split_field(model, inversion, stack, frame, spacing, sampling_field, adapt,
+                 solve_kwargs):
+    """What the quadtree splits on this round."""
+    from .resolution import resolution_gain
+
+    if sampling_field == "model":
+        return predicted_los(model, stack, frame, spacing=spacing)
+
+    resolution = _resolution_of(inversion, adapt, solve_kwargs)
+    # No `spacing=`: the gain has its own, much coarser default. It is a smooth
+    # field used only to rank locations, and it costs a full design matrix at
+    # every probe point where the predicted field costs one forward model.
+    gain = resolution_gain(model, stack, resolution, frame=frame)
+    if sampling_field == "resolution":
+        return gain
+    # Standardise both before combining: one is metres of LOS and the other a sum
+    # of squared Green's functions, so their raw magnitudes are unrelated.
+    #
+    # Added, not maximised. A pointwise max reads like "split where either field
+    # would", and it is not: the quadtree splits on a cell's *scatter*, and the
+    # max of two fields can be flatter than both where one of them clips the
+    # other's variation. Measured on the two-scene fixture, `fmax` gave 1432
+    # samples against 1974 for the predicted field alone. A sum's within-cell
+    # variance is var(a) + var(b) + 2cov(a, b), so it loses only to a strong
+    # anticorrelation.
+    predicted = predicted_los(model, stack, frame, spacing=spacing)
+    finite = np.isfinite(predicted)
+    scale = predicted[finite].std() if finite.any() else 0.0
+    if scale == 0:
+        return gain
+    return (predicted - predicted[finite].mean()) / scale + gain
+
+
+def _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs):
+    """Re-size the elements from model resolution and rebuild on the new layout."""
+    from .mesh import FaultMesh
+    from .resolution import adapt_layout, element_resolution, target_element_size
+
+    resolution = _resolution_of(inversion, adapt, solve_kwargs)
+    sizes = target_element_size(
+        mesh, element_resolution(inversion, resolution),
+        **{k: v for k, v in adapt.items()
+           if k in ("target", "gain", "max_ratio", "size_min", "size_max")}
+    )
+    layout = adapt_layout(mesh, sizes, budget=adapt.get("budget", "conserve"),
+                          balance=adapt.get("balance", MAX_COUNT_RATIO))
+    return FaultMesh.from_layout(layout, trace, frame, **adapt["geometry"])
+
+
+def _probe_lattice(mesh, n_along=200, n_down=40):
+    """A fixed ``(s, z)`` grid to compare two slip fields on.
+
+    The loop's convergence test used to difference ``element_slip`` directly,
+    which only works while the mesh is the same one. Sampling both fields on a
+    lattice that belongs to neither makes the number mean the same thing across
+    a re-mesh -- and it stays in metres of slip, so ``tol`` does not change
+    meaning either.
+    """
+    params = mesh.params
+    s = np.linspace(params[:, 0].min(), params[:, 0].max(), int(n_along))
+    z = np.linspace(params[:, 1].min(), params[:, 1].max(), int(n_down))
+    ss, zz = np.meshgrid(s, z)
+    return np.column_stack([ss.ravel(), zz.ravel()])
+
+
+def _probe_slip(mesh, model, probe):
+    """``model``'s slip at fixed ``(s, z)`` points, ``(n_probe, 2)``.
+
+    Both components, because ``element_slip`` carries both -- which keeps this
+    the same quantity the fixed-mesh path differences, so ``tol`` means "no
+    component moved more than this" in either mode rather than two different
+    things.
+
+    Nearest centroid rather than a barycentric lookup: the slip is piecewise
+    constant per element anyway, so this *is* the field, not an approximation of
+    it.
+    """
+    from scipy.spatial import cKDTree
+
+    index = cKDTree(mesh.element_params).query(probe)[1]
+    return model.element_slip[index]
 
 
 def model_rms_min(field, fraction=0.02):
@@ -269,6 +460,10 @@ def _report(entry):
     change = entry["max_change"]
     change = "     -- " if not np.isfinite(change) else f"{change:7.4f} m"
     flag = "" if entry["converged"] else "   (solver did not converge)"
-    print(f"  round {entry['round']}  {entry['field']:>5}  "
-          f"n={entry['n']:6d}  VR={entry['variance_reduction']:6.2f}%  "
+    # The mesh is in the line because it can now move between rounds, and a
+    # sample count read beside a silently changed element count means nothing.
+    mesh = (f"  mesh={entry['n_elements']}el/{entry['n_nodes']}n"
+            if "n_elements" in entry else "")
+    print(f"  round {entry['round']}  {entry['field']:>10}  "
+          f"n={entry['n']:6d}{mesh}  VR={entry['variance_reduction']:6.2f}%  "
           f"max change {change}{flag}", flush=True)

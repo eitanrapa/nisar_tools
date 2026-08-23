@@ -47,6 +47,7 @@ import re
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 matplotlib.use("Agg")            # headless: before pyplot is imported anywhere
 
 import matplotlib.pyplot as plt  # noqa: E402
@@ -84,6 +85,21 @@ def _path(value):
     """The same, for a single optional file path."""
     paths = _paths(value)
     return None if paths is None else paths[0]
+
+
+def _floats(value):
+    """A comma- or space-separated list of numbers, or ``None``."""
+    if value is None or not str(value).strip():
+        return None
+    return [float(v) for v in str(value).replace(",", " ").split()]
+
+
+def _ints(value):
+    """A list of integers, or a single one, or ``None``."""
+    parsed = _floats(value)
+    if parsed is None:
+        return None
+    return int(parsed[0]) if len(parsed) == 1 else [int(v) for v in parsed]
 
 
 def _int_or_none(value):
@@ -361,10 +377,67 @@ LCURVE_WEIGHTS = [10000.0, 5000.0, 2000.0, 1000.0, 500.0, 200.0,
 LOOP = dict(max_rounds=int(os.environ.get("NISAR_MAX_ROUNDS", 4)),
             spacing=2000.0, tol=0.01)
 
+#: Where the nodes go, over and above the ``CURVE`` grading. ``depths`` lists the
+#: levels outright (metres, positive down, shallowest first) in place of
+#: ``bias_w``/``down_dip_levels``; ``nodes_per_level`` gives **a different node
+#: count at each depth level**, and ``along_spacing`` says the same in metres.
+#: All three default to ``None``, which is the classic uniform lattice, so a run
+#: configured before this existed is bit-identical.
+#:
+#: ``NISAR_DEPTHS=0,1000,2500,6000`` and ``NISAR_NODES_PER_LEVEL=54,44,34,24``
+#: (or a single number for all levels) override without editing the file.
+LAYOUT = dict(
+    depths=_floats(os.environ.get("NISAR_DEPTHS", None)),
+    nodes_per_level=_ints(os.environ.get("NISAR_NODES_PER_LEVEL", None)),
+    along_spacing=_float_or_none(os.environ.get("NISAR_ALONG_SPACING", None)),
+)
+
+#: Two-way optimization: let the *data* choose the mesh while the *model* chooses
+#: the sampling. ``rounds=0`` (the default) leaves the mesh alone, which is what
+#: every run before this did. Above zero, each sampling round re-sizes the
+#: elements from the model resolution the current data supports and rebuilds.
+#:
+#: ⚠️ ``budget`` is what makes it converge rather than drift. Resolution is
+#: near-zero over most of a fault, so a size field that merely equalises it grows
+#: the mean element every round -- measured, 330 elements to 44 over three rounds
+#: with variance reduction falling to 0.74%. ``"conserve"`` holds the count and
+#: lets the resolution decide only *where* the parameters go.
+ADAPT = dict(
+    rounds=int(os.environ.get("NISAR_ADAPT_ROUNDS", 0)),
+    budget=os.environ.get("NISAR_ADAPT_BUDGET", "conserve"),
+    gain=float(os.environ.get("NISAR_ADAPT_GAIN", 0.5)),
+    max_ratio=float(os.environ.get("NISAR_ADAPT_MAX_RATIO", 3.0)),
+)
+
+#: What the quadtree splits on. ``"model"`` is Wang & Fialko's predicted
+#: displacement (the default, and what every run before this used);
+#: ``"resolution"`` is Lohman & Simons -- where a sample would most improve model
+#: resolution; ``"both"`` takes the pointwise maximum of the two standardised
+#: fields. The two answer different questions: the first avoids spending samples
+#: on atmosphere, the second spends them where the model is unconstrained.
+SAMPLING_FIELD = os.environ.get("NISAR_SAMPLING_FIELD", "model")
+
 
 # -- shared helpers ----------------------------------------------------------
 def workspace(create=True):
     return Workspace(WORK_DIR, create=create)
+
+
+#: Where stage 1 leaves the mesh it finished on. Only written when the mesh was
+#: adapted, and only read back then -- see :func:`geometry`.
+MESH_FILE = OUT_DIR / "fault_mesh.zarr"
+
+
+def save_mesh(mesh, path=MESH_FILE):
+    """Persist the mesh stage 1 ended on, so stages 2 and 3 invert on it."""
+    import shutil
+
+    path = Path(path)
+    if path.exists():
+        shutil.rmtree(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mesh.to_dataset().to_zarr(path, mode="w", consolidated=False)
+    return path
 
 
 def geometry():
@@ -376,17 +449,30 @@ def geometry():
     """
     trace = FaultTrace.from_file(FAULT)
     frame = trace.local_frame()
+
+    # With adaptation on, stage 1 ends on a mesh the config cannot rebuild -- the
+    # resolution that shaped it depended on the data. Rebuilding from `MESH` here
+    # would have stages 2 and 3 invert observations that were sampled for a
+    # different discretisation, and nothing downstream compares the two.
+    if int(ADAPT.get("rounds", 0)) > 0 and MESH_FILE.exists():
+        import xarray as xr
+
+        mesh = FaultMesh.from_dataset(xr.open_zarr(MESH_FILE, consolidated=False))
+        print(f"using the adapted mesh from {MESH_FILE} "
+              f"({mesh.n_elements} elements, {mesh.n_nodes} nodes) -- delete it to "
+              "rebuild from MESH/CURVE/LAYOUT", flush=True)
+        return trace, frame, mesh
+
     return trace, frame, fault_mesh(trace, frame)
 
 
-def fault_mesh(trace, frame):
-    """The mesh described by ``MESH`` / ``DIPS`` / ``SEGMENT_FILES`` / ``CURVE``.
+def geometry_kwargs(trace, frame):
+    """The keywords that say what the fault *is*, apart from where its nodes go.
 
-    Vertical stays on :meth:`FaultMesh.vertical` rather than the equivalent
-    ``curved(uniform_dip=90)`` so that a run configured as it was before this
-    option existed goes down exactly the same code path -- but only while
-    ``CURVE`` asks for nothing, since ``vertical()`` accepts none of its
-    keywords and would drop them without a word.
+    Split out because the adaptive loop rebuilds the mesh on a new layout every
+    round and has to use the same geometry each time. One source for it is the
+    point: a loop that re-meshed at a different dip than stage 1 built would be a
+    silent change of model, and nothing downstream compares the two.
     """
     if BOTTOM_TRACE is not None:
         if DIPS is not None:
@@ -398,18 +484,13 @@ def fault_mesh(trace, frame):
                 "dip would be a second, contradicting answer. Unset NISAR_DIP to "
                 "use the bottom trace, or NISAR_BOTTOM to use the dips."
             )
-        return FaultMesh.curved(trace, frame,
-                                bottom_trace=FaultTrace.from_file(BOTTOM_TRACE),
-                                bottom_depth=BOTTOM_DEPTH, **MESH, **CURVE)
+        return dict(bottom_trace=FaultTrace.from_file(BOTTOM_TRACE),
+                    bottom_depth=BOTTOM_DEPTH, edge_length=MESH["edge_length"])
 
     if DIPS is None:
-        if all(CURVE.get(k) == v for k, v in _CURVE_NOOP.items()) \
-                and not set(CURVE) - set(_CURVE_NOOP):
-            return FaultMesh.vertical(trace, frame, **MESH)
-        return FaultMesh.curved(trace, frame, uniform_dip=90.0, **MESH, **CURVE)
-
+        return dict(uniform_dip=90.0, edge_length=MESH["edge_length"])
     if len(DIPS) == 1:
-        return FaultMesh.curved(trace, frame, uniform_dip=DIPS[0], **MESH, **CURVE)
+        return dict(uniform_dip=DIPS[0], edge_length=MESH["edge_length"])
 
     segments = (FaultSegment.from_files(SEGMENT_FILES) if SEGMENT_FILES
                 else FaultSegment.from_trace(trace, frame, len(DIPS)))
@@ -421,8 +502,44 @@ def fault_mesh(trace, frame):
             "DIPS and SEGMENT_FILES must have the same length (or leave "
             "SEGMENT_FILES=None to chop the trace into len(DIPS) equal chords)"
         )
-    return FaultMesh.curved(trace, frame, segments=segments, dips=DIPS,
-                            **MESH, **CURVE)
+    return dict(segments=segments, dips=DIPS, edge_length=MESH["edge_length"])
+
+
+def fault_mesh(trace, frame):
+    """The mesh described by ``MESH`` / ``DIPS`` / ``SEGMENT_FILES`` / ``CURVE`` /
+    ``LAYOUT``.
+
+    Vertical stays on :meth:`FaultMesh.vertical` rather than the equivalent
+    ``curved(uniform_dip=90)`` so that a run configured as it was before these
+    options existed goes down exactly the same code path -- but only while
+    ``CURVE`` and ``LAYOUT`` ask for nothing, since ``vertical()`` accepts none
+    of their keywords and would drop them without a word.
+    """
+    layout = {k: v for k, v in LAYOUT.items() if v is not None}
+    plain_curve = (all(CURVE.get(k) == v for k, v in _CURVE_NOOP.items())
+                   and not set(CURVE) - set(_CURVE_NOOP))
+    if DIPS is None and BOTTOM_TRACE is None and not layout and plain_curve:
+        return FaultMesh.vertical(trace, frame, **MESH)
+
+    curve = dict(CURVE)
+    if "depths" in layout:
+        # `depths` lists the levels outright, so the geometric progression that
+        # would otherwise generate them is not merely redundant -- `curved`
+        # refuses the pair rather than silently ignoring one.
+        curve.pop("bias_w", None)
+        curve.pop("down_dip_levels", None)
+
+    return FaultMesh.curved(trace, frame, max_depth=MESH["max_depth"],
+                            **geometry_kwargs(trace, frame), **curve, **layout)
+
+
+def adapt_kwargs(trace, frame):
+    """``mesh_adapt=`` for :func:`iterate_sampling`, or ``None`` when off."""
+    if int(ADAPT.get("rounds", 0)) <= 0:
+        return None
+    spec = {k: v for k, v in ADAPT.items() if v is not None}
+    spec["geometry"] = geometry_kwargs(trace, frame)
+    return spec
 
 
 def mesh_summary(mesh):
@@ -436,8 +553,19 @@ def mesh_summary(mesh):
     out = {"kind": mesh.attrs.get("kind", "vertical"),
            "n_elements": int(mesh.n_elements),
            "n_nodes": int(mesh.n_nodes),
-           "n_down": int(mesh.attrs.get("n_down", 0))}
-    out.update({k: float(v) for k, v in MESH.items()})
+           "n_down": int(mesh.attrs.get("n_down", 0)),
+           "layout": mesh.attrs.get("layout", "uniform")}
+    if "nodes_per_level" in mesh.attrs:
+        out["nodes_per_level"] = [int(v) for v in mesh.attrs["nodes_per_level"]]
+    # Read off the *mesh*, with the config only as a fallback: an adaptive run
+    # rebuilds the mesh every round, and reporting `MESH["edge_length"]` would
+    # then describe the setting rather than what ran.
+    for key, default in (("max_depth", MESH["max_depth"]),
+                         ("edge_length", MESH["edge_length"])):
+        out[key] = float(mesh.attrs.get(key, default))
+    out["element_size_m"] = [float(np.sqrt(2.0 * mesh.areas.min())),
+                             float(np.sqrt(2.0 * np.median(mesh.areas))),
+                             float(np.sqrt(2.0 * mesh.areas.max()))]
     for key in ("dip_deg", "bias_w", "smoothness", "min_curvature_radius",
                 "bottom_depth"):
         if key in mesh.attrs:

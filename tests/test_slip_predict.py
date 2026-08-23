@@ -262,6 +262,113 @@ def test_iterate_sampling_converges_and_records_why(setup):
     assert np.corrcoef(truth[:mesh.n_elements], model.strike_slip)[0, 1] > 0.95
 
 
+def test_the_history_records_the_mesh_because_it_can_now_move(setup):
+    """A sample count read beside a silently changed element count means nothing."""
+    trace, frame, mesh, _, scenes = setup
+    _, _, history = iterate_sampling(
+        scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+        max_rounds=1, spacing=4000.0, solve_kwargs={"smoothing": 0.3}, verbose=False,
+    )
+    assert all(h["n_elements"] == mesh.n_elements for h in history)
+    assert all(h["n_nodes"] == mesh.n_nodes for h in history)
+
+
+def test_the_two_way_loop_remeshes_and_still_recovers_the_slip(setup):
+    """Sample from the model, size the mesh from the data, and re-solve.
+
+    The claim is not that adapting beats a fixed mesh -- on a fixture whose
+    uniform mesh is already well matched to its data it need not. It is that the
+    loop *converges*: the mesh stays the size it was asked to be, the recovery
+    holds, and the run does not drift into a degenerate model while reporting
+    success, which is exactly what it did before ``budget`` existed.
+    """
+    trace, frame, mesh, truth, scenes = setup
+    _, model, history = iterate_sampling(
+        scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+        max_rounds=3, spacing=4000.0, solve_kwargs={"smoothing": 0.3}, verbose=False,
+        mesh_adapt={"geometry": {"uniform_dip": 90.0, "edge_length": 6e3}},
+    )
+    counts = [h["n_elements"] for h in history]
+    assert counts[0] == mesh.n_elements
+    assert counts[-1] != counts[0], "the mesh was supposed to be rebuilt"
+    for count in counts[1:]:
+        assert 0.6 * mesh.n_elements <= count <= 1.7 * mesh.n_elements, counts
+
+    assert model.variance_reduction > 80.0
+    assert np.abs(model.element_slip).max() > 0.5, "not a degenerate model"
+    assert model.mesh.n_elements == counts[-1]
+
+
+def test_a_remesh_switches_the_convergence_test_to_the_probe_lattice(setup):
+    """``max |element_slip - previous|`` cannot survive a change of mesh.
+
+    Two rounds on different meshes give different-length vectors, so the number
+    is measured on a fixed ``(s, z)`` lattice belonging to neither. With the mesh
+    held fixed the element-space number is kept verbatim, so an existing run
+    prints exactly what it printed before -- that equivalence is what is checked.
+    """
+    trace, frame, mesh, _, scenes = setup
+    kwargs = dict(max_rounds=1, spacing=4000.0, solve_kwargs={"smoothing": 0.3},
+                  verbose=False)
+    _, model, plain = iterate_sampling(
+        scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes}, **kwargs)
+    # `sampling_field` alone builds the probe lattice without moving the mesh.
+    _, probed, both = iterate_sampling(
+        scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+        sampling_field="model", **kwargs)
+
+    assert plain[-1]["max_change"] == pytest.approx(both[-1]["max_change"])
+    np.testing.assert_allclose(model.element_slip, probed.element_slip)
+
+
+def test_sampling_on_resolution_concentrates_samples_near_the_fault(setup):
+    """Lohman & Simons' field, through the sampler that already accepts one.
+
+    What the knob does is move samples, not add them, and the measurement says so
+    on this fixture: ``"model"`` 1974 samples with 33.5% inside 20 km of the
+    trace, ``"resolution"`` 890 with **74.4%**, ``"both"`` 1663 with 39.8%. The
+    resolution field is largest where surface data sees the deep, unresolved
+    elements best, which is close in.
+
+    ⚠️ Deliberately **not** asserted: that ``"both"`` samples more than either.
+    ``rms_min`` is a fraction of the field's own global scatter, so adding a
+    field that is large but smooth raises the split threshold everywhere without
+    raising a cell's local scatter -- the count can go either way, and it does.
+    """
+    trace, frame, mesh, _, scenes = setup
+    near, counts = {}, {}
+    for field in ("model", "resolution", "both"):
+        obs, _, _ = iterate_sampling(
+            scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+            max_rounds=1, spacing=4000.0, solve_kwargs={"smoothing": 0.3},
+            sampling_field=field, verbose=False)
+        distance = trace.distance(obs.ds["x"].values, obs.ds["y"].values, frame)
+        near[field] = float((distance < 20e3).mean())
+        counts[field] = obs.n
+        assert obs.n > 0
+
+    assert near["resolution"] > 2.0 * near["model"], near
+    assert near["model"] < near["both"] < near["resolution"], near
+    assert len(set(counts.values())) == 3, counts
+
+
+def test_an_unknown_sampling_field_is_refused_by_name(setup):
+    trace, frame, mesh, _, scenes = setup
+    with pytest.raises(ValueError, match="sampling_field"):
+        iterate_sampling(scenes, mesh, trace, frame,
+                         {n: dict(_SAMPLING) for n in scenes},
+                         sampling_field="curvature", verbose=False)
+
+
+def test_mesh_adapt_without_a_geometry_is_refused_by_name(setup):
+    """A layout says where the nodes go, not what the fault is."""
+    trace, frame, mesh, _, scenes = setup
+    with pytest.raises(ValueError, match="geometry"):
+        iterate_sampling(scenes, mesh, trace, frame,
+                         {n: dict(_SAMPLING) for n in scenes},
+                         mesh_adapt={"gain": 0.5}, verbose=False)
+
+
 def test_model_sampling_does_not_chase_a_patch_of_noise(setup, coarse):
     """The acceptance test, and it is the paper's own claim -- no more.
 
