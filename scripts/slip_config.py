@@ -156,7 +156,13 @@ SCENES = {
     "D054": {"stage": "los_D054_full_mask"},
     "D134": {"grd": f"{_ALOS}/D134", "units": "cm", "sign": +1,
              "direction": "descending", "look_direction": "right"},
-    "D135": {"grd": f"{_ALOS}/D135", "units": "cm", "sign": +1,
+    # ⚠️ D135 was built with the wrong sign, so it loads with -1 where every other
+    # scene is +1. Confirmed rather than assumed: at -1 it correlates **+0.960**
+    # with D134 over 302k shared pixels, and at +1 it would be -0.960, which two
+    # ALOS descending tracks of one event cannot be. `scene_report`'s geometry
+    # check tests `los_east`'s sign against pass and look direction and passes
+    # either way, so it does NOT catch this -- only a cross-track correlation does.
+    "D135": {"grd": f"{_ALOS}/D135", "units": "cm", "sign": -1,
              "direction": "descending", "look_direction": "right"},
 }
 
