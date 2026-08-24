@@ -245,17 +245,23 @@ def test_write_edgrn_input_round_trips_the_grid(tmp_path):
     assert (tmp_path / "edgrnfcts").is_dir()
 
 
-def test_run_edgrn_says_what_to_do_when_there_is_no_binary(tmp_path):
+def test_run_edgrn_says_what_to_do_when_there_is_no_binary(tmp_path, monkeypatch):
+    """The message names all three ways to supply EDGRN, so it is actionable.
+
+    Both resolution routes are stubbed out rather than left to the machine. The
+    test used to pass ``executable="/nonexistent"`` when a binary happened to be
+    installed, which does not reach this path at all -- ``run_edgrn`` takes the
+    caller's word for it and hands the path to ``subprocess``, so what came back
+    was a bare ``FileNotFoundError``. That made the test quietly dependent on
+    ``pygrnwang`` being *absent*, and it failed the moment the optional extra was
+    installed.
+    """
+    from nisar_tools.slip import edgrn as edgrn_module
     from nisar_tools.slip.edgrn import run_edgrn
+
+    monkeypatch.setattr(edgrn_module.shutil, "which", lambda *_: None)
+    monkeypatch.setattr(edgrn_module, "_pygrnwang_edgrn", lambda: None)
 
     model = VelocityModel.uniform()
     with pytest.raises(RuntimeError, match="pygrnwang|executable"):
-        run_edgrn(model, tmp_path, executable=None if not _has_edgrn() else "/nonexistent")
-
-
-def _has_edgrn():
-    import shutil
-
-    from nisar_tools.slip.edgrn import _pygrnwang_edgrn
-
-    return shutil.which("edgrn") or _pygrnwang_edgrn()
+        run_edgrn(model, tmp_path)
