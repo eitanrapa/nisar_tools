@@ -21,14 +21,18 @@ Writes, as each is produced, so an interrupted run keeps what it finished:
     model_sampling/figures/       coverage per scene, the mesh, the samples
 """
 
+import json
+
+import numpy as np
 import pandas as pd
 
 from nisar_tools.slip import ARCSEC_10, iterate_sampling, resample_all
 from nisar_tools.slip.plot import plot_mesh, plot_samples
+from nisar_tools.slip.resolution import element_resolution, resolution_diagonal
 from slip_config import (
-    BOUNDS, LOOP, LOS_STAGE, OBS_STAGE, OUT_DIR, SCENES, SMOOTHING,
-    banner, geometry, inversion_kwargs, load_scene, mesh_summary,
-    sampling_parameters, save_figure, workspace,
+    BOUNDS, LOOP, LOS_STAGE, OBS_STAGE, OUT_DIR, SAMPLING_FIELD, SCENES, SMOOTHING,
+    adapt_kwargs, banner, geometry, inversion_kwargs, load_scene, mesh_summary,
+    sampling_parameters, save_figure, save_mesh, workspace,
 )
 
 
@@ -60,12 +64,25 @@ def main():
 
     print("\nround 0 is data-driven and coarse; every later round is model-driven",
           flush=True)
+    adapt = adapt_kwargs(trace, frame)
+    if adapt is not None:
+        print(f"mesh adaptation ON: {adapt['rounds']} round(s), "
+              f"budget={adapt.get('budget')}, gain={adapt.get('gain')} -- the mesh "
+              "below is the starting one, not the one stage 2 and 3 will use",
+              flush=True)
+    if SAMPLING_FIELD != "model":
+        print(f"quadtree splits on {SAMPLING_FIELD!r}, not the predicted field",
+              flush=True)
     obs, model, history = iterate_sampling(
         gridded, mesh, trace, frame, sampling,
         inversion_kwargs=inversion_kwargs(),
         solve_kwargs={"smoothing": SMOOTHING, **BOUNDS},
+        mesh_adapt=adapt, sampling_field=SAMPLING_FIELD,
         **LOOP,
     )
+    # The loop may have replaced it, and everything downstream -- the figures
+    # here, `mesh_summary`, stages 2 and 3 -- has to describe what actually ran.
+    mesh = model.mesh
 
     pd.DataFrame(history).set_index("round").to_csv(OUT_DIR / "history.csv")
     obs.persist(ws, OBS_STAGE, overwrite=True)
@@ -88,6 +105,30 @@ def main():
 
     save_figure(plot_mesh(mesh, trace=trace, color="area")[0], "mesh")
     save_figure(plot_samples(obs, trace=trace)[0], "samples")
+
+    # Model resolution is the reason an adaptive mesh looks the way it does, and
+    # it is worth seeing even on a fixed one: it says which parts of the answer
+    # the data paid for and which the smoothing supplied.
+    resolution = resolution_diagonal(model.inversion, SMOOTHING,
+                                     **{k: v for k, v in BOUNDS.items()
+                                        if k in ("ss_ratio", "ds_ratio", "sides")})
+    per_element = element_resolution(model.inversion, resolution)
+    figure, axes = plot_mesh(mesh, trace=trace, color=per_element,
+                             label="model resolution")
+    save_figure(figure, "resolution")
+    print(f"model resolution: median {np.median(per_element):.3f}, "
+          f"{100.0 * float((per_element < 0.01).mean()):.0f}% of elements below "
+          f"0.01 (effectively unconstrained), effective rank "
+          f"{resolution.attrs['effective_rank']:.0f} of {2 * model.basis.n_basis}",
+          flush=True)
+
+    if adapt is not None:
+        mesh_json = json.dumps(mesh_summary(mesh), indent=2, sort_keys=True)
+        (OUT_DIR / "mesh_adapted.json").write_text(mesh_json + "\n")
+        # Stages 2 and 3 rebuild the geometry from the config, which cannot
+        # reproduce a mesh the data shaped -- so hand it over explicitly, or they
+        # would invert these observations on a different discretisation.
+        print(f"adapted mesh -> {save_mesh(mesh)}\n{mesh_json}", flush=True)
 
     print(f"\ndone -- next: run_lcurve.py, then run_inversion.py", flush=True)
 

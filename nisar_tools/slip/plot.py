@@ -166,16 +166,19 @@ def plot_slip_3d(model, component="magnitude", ax=None, cmap="magma_r",
     return ax.figure, ax
 
 
-def plot_mesh(mesh, trace=None, color="area", axes=None, cmap="viridis"):
+def plot_mesh(mesh, trace=None, color="area", axes=None, cmap="viridis",
+              label=None):
     """The fault discretisation itself: map view beside the unrolled section.
 
     Takes a bare :class:`~nisar_tools.slip.mesh.FaultMesh`, no solved model
     needed -- this is the figure to look at *before* committing to an inversion,
     which is when the mesh can still be changed.
 
-    ``color`` is ``"area"`` (the default), ``"depth"`` or ``"dip"``. Element area
-    is the useful one: it is what a graded mesh (``bias_w``) is changing, and it
-    should be read against the sample spacing from
+    ``color`` is ``"area"`` (the default), ``"depth"``, ``"dip"``, or a
+    per-element array with ``label`` naming it -- which is how model resolution
+    is drawn, and resolution is the field this figure is most worth reading for
+    on an irregular mesh. Element area is the other one: it is what grading
+    changes, and it should be read against the sample spacing from
     :func:`~nisar_tools.slip.plot.plot_samples` -- elements much smaller than the
     data that constrain them are what the smoothing weight then has to paper over.
     """
@@ -187,9 +190,17 @@ def plot_mesh(mesh, trace=None, color="area", axes=None, cmap="viridis"):
         "depth": (-mesh.centroids[:, 2] / 1e3, "Centroid depth (km)"),
         "dip": (mesh.dip, "Dip (deg)"),
     }
-    if color not in fields:
-        raise ValueError(f"color must be one of {sorted(fields)}")
-    value, label = fields[color]
+    if isinstance(color, str):
+        if color not in fields:
+            raise ValueError(
+                f"color must be one of {sorted(fields)}, or a per-element array")
+        value, label = fields[color]
+    else:
+        value = np.asarray(color, dtype=float)
+        if value.shape != (mesh.n_elements,):
+            raise ValueError(
+                f"color has {value.shape} entries for {mesh.n_elements} elements")
+        label = label or "value"
 
     if axes is None:
         _, axes = plt.subplots(2, 1, figsize=(12, 7.5),
@@ -207,9 +218,13 @@ def plot_mesh(mesh, trace=None, color="area", axes=None, cmap="viridis"):
     map_ax.set_aspect("equal")
     map_ax.set_xlabel("East (km)")
     map_ax.set_ylabel("North (km)")
+    # The element-size *range*, not `edge_length`: a graded or adapted mesh has no
+    # single edge length, and the attribute reads 0 on a mesh that never had one.
+    size = np.sqrt(2.0 * mesh.areas) / 1e3
     map_ax.set_title(
         f"{mesh.n_elements} elements, {mesh.n_nodes} nodes "
-        f"({mesh.attrs.get('kind', '?')}, edge {mesh.attrs.get('edge_length', 0) / 1e3:g} km)"
+        f"({mesh.attrs.get('kind', '?')}/{mesh.attrs.get('layout', 'uniform')}, "
+        f"{size.min():.1f}-{size.max():.1f} km)"
     )
 
     sec = PolyCollection(mesh.param_vertices / 1e3, array=value, cmap=cmap,

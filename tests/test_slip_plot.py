@@ -199,6 +199,21 @@ def test_plot_mesh_rejects_an_unknown_colour(solved):
         slip_plot.plot_mesh(mesh, color="slip")
 
 
+def test_plot_mesh_draws_an_arbitrary_per_element_field(solved):
+    """How model resolution gets drawn -- the field worth seeing before solving."""
+    _, mesh, _, _, _ = solved
+    values = np.linspace(0.0, 1.0, mesh.n_elements)
+
+    figure, axes = slip_plot.plot_mesh(mesh, color=values, label="model resolution")
+    for axis in axes:
+        collection = axis.collections[0]
+        np.testing.assert_allclose(collection.get_array(), values)
+    matplotlib.pyplot.close(figure)
+
+    with pytest.raises(ValueError, match="entries for"):
+        slip_plot.plot_mesh(mesh, color=values[:-1], label="short")
+
+
 def test_param_vertices_matches_the_triangles(solved):
     _, mesh, _, _, _ = solved
     assert mesh.param_vertices.shape == (mesh.n_elements, 3, 2)

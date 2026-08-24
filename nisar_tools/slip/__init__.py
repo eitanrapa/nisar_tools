@@ -49,15 +49,30 @@ Sign conventions, which matter more here than anywhere else in the package:
 """
 
 from .basis import ElementBasis, NodeBasis
-from .diagnostics import cell_size_ladder, noise_floor, ramp_content, scene_report
+from .diagnostics import (
+    cell_size_ladder,
+    noise_floor,
+    ramp_content,
+    ramp_leakage,
+    ramp_sweep,
+    scene_report,
+)
 from .edgrn import EdgrnTables, VelocityModel, run_edgrn, write_edgrn_input
 from .frame import LocalFrame
 from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel
 from .layered import LayeredPointSource
+from .layout import MeshLayout, graded_layout, lloyd_layout, triangulate
 from .mesh import FaultMesh
 from .predict import iterate_sampling, model_rms_min, predicted_los
 from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
+from .resolution import (
+    adapt_layout,
+    element_resolution,
+    resolution_diagonal,
+    resolution_gain,
+    target_element_size,
+)
 from .sampling import Observations
 from .surface import FaultSurface, gridfit
 from .trace import FaultSegment, FaultTrace
@@ -73,22 +88,33 @@ __all__ = [
     "HalfSpaceTDE",
     "LayeredPointSource",
     "LocalFrame",
+    "MeshLayout",
     "NodeBasis",
     "Observations",
     "SlipInversion",
     "SlipModel",
     "VelocityModel",
+    "adapt_layout",
     "cell_size_ladder",
+    "element_resolution",
     "frame_lattice",
+    "graded_layout",
     "gridfit",
     "iterate_sampling",
+    "lloyd_layout",
     "model_rms_min",
     "noise_floor",
     "predicted_los",
     "ramp_content",
+    "ramp_leakage",
+    "ramp_sweep",
     "resample_all",
     "resample_to_frame",
+    "resolution_diagonal",
+    "resolution_gain",
     "run_edgrn",
     "scene_report",
+    "target_element_size",
+    "triangulate",
     "write_edgrn_input",
 ]

@@ -224,21 +224,45 @@ class SlipInversion:
     def n_param(self):
         return self.n_slip + self.n_ramp
 
+    def with_ramp(self, kind):
+        """The same inversion with a different nuisance ramp, **sharing** ``G``.
+
+        Only the ramp block depends on ``kind``, and it costs milliseconds while
+        the Green's matrix costs tens of seconds -- so comparing two ramp degrees
+        is affordable, which is what makes
+        :func:`~nisar_tools.slip.diagnostics.ramp_sweep` a routine check rather
+        than an hour of re-assembly. The copy shares ``g`` by reference; nothing
+        writes to it.
+        """
+        import copy
+
+        other = copy.copy(self)
+        other.ramp, other.ramp_labels = ramp_columns(self.obs, kind)
+        other.n_ramp = other.ramp.shape[1]
+        return other
+
     # -- solving -----------------------------------------------------------
     def solve(self, smoothing=0.3, ss_ratio=1.0, ds_ratio=3.0,
               boundary_ratio=1.0, sides=("bottom", "left", "right"),
               polarity=None, strike=(-10.0, 10.0), dip=(-10.0, 10.0),
               max_iter=DEFAULT_MAX_ITER, tol=1e-10,
-              lsmr_tol=DEFAULT_LSMR_TOL, verbose=0):
+              lsmr_tol=DEFAULT_LSMR_TOL, smooth_weighting="uniform", verbose=0):
         """Solve for slip at one smoothing weight; returns a :class:`SlipModel`.
 
         ``lsmr_tol`` is the inner least-squares tolerance; see
         :data:`DEFAULT_LSMR_TOL` for why the default is ``"auto"`` and not
         scipy's ``None``. Pass ``lsmr_tol=None`` to reproduce a pre-2026-07-27
         run exactly.
+
+        ``smooth_weighting`` applies only to the *element* basis: ``"length"``
+        turns the neighbour smoother from a difference into a gradient, which is
+        what a mesh with widely varying element size needs. The node basis's
+        Laplace-Beltrami operator is already area- and shape-weighted and
+        ignores it.
         """
         if self.basis.name == "element":
-            smooth = neighbor_smoothing(self.mesh.neighbors, ss_ratio, ds_ratio)
+            smooth = neighbor_smoothing(self.mesh.neighbors, ss_ratio, ds_ratio,
+                                        weighting=smooth_weighting, mesh=self.mesh)
         else:
             # A continuous field lives on the nodes, so neighbouring *elements* is
             # the wrong thing to difference; the surface Laplacian is the right one.
@@ -285,6 +309,7 @@ class SlipInversion:
                 "polarity": None if polarity is None else list(polarity),
                 "strike": list(strike), "dip": list(dip), "max_iter": int(max_iter),
                 "lsmr_tol": lsmr_tol,
+                "smooth_weighting": str(smooth_weighting),
                 # Carried so a saved model keeps its own rigidity; without it a
                 # reloaded layered model would report a 30 GPa moment.
                 "velocity_model": (None if self.velocity_model is None
@@ -601,10 +626,14 @@ class SlipModel:
         xx, yy = np.meshgrid(x, y)
 
         if exclude_within is None:
-            exclude_within = float(np.sqrt(2.0 * self.mesh.areas.mean()))
+            # The 90th percentile, not the mean: on a graded mesh the element
+            # area spans two orders of magnitude and a mean is then smaller than
+            # most of the elements it is meant to stand for.
+            exclude_within = float(
+                np.sqrt(2.0 * np.percentile(self.mesh.areas, 90)))
         # The fault outcrops along its shallowest node row; that is where a
         # dislocation solution is singular at the free surface.
-        top = nodes[self.mesh.params[:, 1] == self.mesh.params[:, 1].max()]
+        top = nodes[self.mesh.boundary_nodes("top")]
         keep = _far_enough(xx.ravel(), yy.ravel(), top, exclude_within)
 
         flat = np.full((xx.size, 3), np.nan)
@@ -991,7 +1020,9 @@ class SlipModel:
         # The smoothing operator is a pure function of the mesh and the options,
         # so `roughness` is recoverable exactly without storing a sparse matrix.
         smooth = (neighbor_smoothing(mesh.neighbors, options["ss_ratio"],
-                                     options["ds_ratio"])
+                                     options["ds_ratio"],
+                                     weighting=options.get("smooth_weighting", "uniform"),
+                                     mesh=mesh)
                   if self.basis.name == "element"
                   else laplace_beltrami(mesh, options["ss_ratio"], options["ds_ratio"]))
         n_ramp = self.ramp.size

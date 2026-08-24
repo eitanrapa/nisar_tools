@@ -446,3 +446,164 @@ def ramp_content(obs):
     out["cubic_only"] = (out["cubic"]["variance_reduction"]
                          - out["quadratic"]["variance_reduction"])
     return out
+
+
+#: Fractional moment change below which a ramp degree is treated as harmless.
+#: Calibrated against the real six-scene Venezuela sweep, where going from an
+#: offset to a quadratic ramp moved peak slip by 4% and Mw from 7.49 to 7.55 --
+#: a 23% moment *rise*, not a fall -- while the A061 residual dropped 43%. So a
+#: fifth of the moment is comfortably outside what a benign ramp did there.
+RAMP_MOMENT_TOLERANCE = 0.20
+
+
+def ramp_leakage(inversion, slip=None, kinds=("offset", "linear", "quadratic", "cubic")):
+    """How much of the fault's own signal each ramp degree *could* absorb.
+
+    The companion to :func:`ramp_content`, and the half it cannot do. That
+    function asks how much of the **data** a polynomial explains, which overstates
+    the ramp badly because nothing in it has a fault model. This one asks the
+    complementary question -- how much of the **earthquake** the polynomial can
+    reproduce -- which is what actually decides whether the two compete:
+
+    ``leakage = ||P_ramp (G s)|| / ||G s||``
+
+    with ``P_ramp`` the least-squares projector onto the weighted ramp columns.
+    Zero means the ramp is orthogonal to the coseismic field and cannot touch it
+    whatever its coefficients do; one means the ramp reproduces it exactly, and
+    since the ramp is unregularised while the slip is smoothed and bounded, the
+    ramp then wins.
+
+    ⚠️ **Read the marginal numbers, not the totals.** A per-track *offset* always
+    absorbs that track's mean coseismic displacement -- an unwrapped
+    interferogram has an arbitrary constant, so that leakage is unavoidable and
+    not a defect. ``curvature_only`` is what the quadratic terms add over the
+    linear ones, and that is the number the question "is the quadratic term
+    eating the earthquake?" is really about.
+
+    ``slip`` is a :class:`SlipModel`, a parameter vector, or ``None`` for uniform
+    unit strike-slip -- a generic earthquake shape, so the answer is a property of
+    the *geometry and aperture* rather than of one solved model. Costs one
+    matrix-vector product plus a tiny least-squares per degree; no solve.
+
+    ⚠️ Leakage says the ramp **can**, not that it **did**. Use
+    :func:`ramp_sweep` for that -- high leakage with a stable moment means the
+    data still pins the slip, which is what the real cubic run turned out to do.
+    """
+    from .regularize import ramp_columns
+
+    n = inversion.basis.n_basis
+    if slip is None:
+        # Uniform unit strike-slip: a generic coseismic shape, so the number
+        # describes the geometry rather than one particular answer.
+        parameters = np.concatenate([np.ones(n), np.zeros(n)])
+    elif hasattr(slip, "x"):
+        parameters = np.asarray(slip.x[:2 * n], dtype=float)
+    else:
+        parameters = np.asarray(slip, dtype=float).ravel()[:2 * n]
+
+    weight = inversion.w
+    predicted = (inversion.g[:, :2 * n] @ parameters) * weight
+    norm = float(np.linalg.norm(predicted))
+    if norm == 0:
+        raise ValueError("the slip pattern predicts no displacement to leak")
+
+    track = np.asarray(inversion.obs.ds["track"].values)
+    out = {}
+    for kind in kinds:
+        columns, _ = ramp_columns(inversion.obs, kind)
+        design = columns * weight[:, None]
+        coefficients, *_ = np.linalg.lstsq(design, predicted, rcond=None)
+        fitted = design @ coefficients
+        per_track = {}
+        for name in np.unique(track):
+            at = track == name
+            local = float(np.linalg.norm(predicted[at]))
+            per_track[str(name)] = (float(np.linalg.norm(fitted[at]) / local)
+                                    if local else float("nan"))
+        out[kind] = {"leakage": float(np.linalg.norm(fitted) / norm),
+                     "per_track": per_track}
+
+    for name, (a, b) in (("gradient_only", ("offset", "linear")),
+                         ("curvature_only", ("linear", "quadratic")),
+                         ("cubic_only", ("quadratic", "cubic"))):
+        if a in out and b in out:
+            out[name] = out[b]["leakage"] - out[a]["leakage"]
+    return out
+
+
+def ramp_sweep(inversion, kinds=("offset", "linear", "quadratic"),
+               reference="offset", tolerance=RAMP_MOMENT_TOLERANCE, **solve_kwargs):
+    """Solve at each ramp degree and report what it cost the earthquake.
+
+    The decisive test, and the one variance reduction cannot stand in for: extra
+    free columns can only *improve* the fit, so a ramp that is quietly absorbing
+    coseismic signal shows up as a **better fit with a smaller earthquake**. That
+    conjunction is the signature, and it is what this checks -- a moment that
+    falls while variance reduction rises. A moment that falls while the fit also
+    worsens is simply a worse model, and one that moves either way while the fit
+    barely changes is the columns doing their job.
+
+    Affordable because :meth:`SlipInversion.with_ramp` shares the Green's matrix:
+    the sweep costs one *solve* per degree, not one assembly.
+
+    Returns an :class:`xarray.Dataset` on a ``ramp`` coordinate carrying
+    ``n_ramp``, ``variance_reduction``, ``rms_misfit``, ``max_slip``,
+    ``moment_magnitude``, ``converged``, and -- against ``reference`` --
+    ``moment_ratio`` and ``vr_change``. A :class:`RuntimeWarning` names any degree
+    whose moment falls by more than ``tolerance`` while its variance reduction
+    rises.
+
+    ⚠️ An iteration-capped solve makes every number here meaningless, so check
+    ``converged`` before reading the rest; raise ``max_iter`` rather than
+    interpreting a ``False``.
+    """
+    import warnings
+
+    import xarray as xr
+
+    kinds = list(kinds)
+    if reference not in kinds:
+        raise ValueError(f"reference={reference!r} must be one of the swept kinds {kinds}")
+
+    rows, models = [], {}
+    for kind in kinds:
+        model = inversion.with_ramp(kind).solve(**solve_kwargs)
+        models[kind] = model
+        rows.append((model.inversion.n_ramp, model.variance_reduction, model.rms_misfit,
+                     float(np.abs(model.element_slip).max()), model.moment_magnitude,
+                     model.converged))
+
+    rows = np.array(rows, dtype=float)
+    base = kinds.index(reference)
+    # Moment from magnitude rather than a second `moment()` call, so the ratio is
+    # exactly consistent with the Mw column beside it whatever rigidity was used.
+    moment_ratio = 10.0 ** (1.5 * (rows[:, 4] - rows[base, 4]))
+    vr_change = rows[:, 1] - rows[base, 1]
+
+    out = xr.Dataset(
+        {"n_ramp": ("ramp", rows[:, 0].astype(int)),
+         "variance_reduction": ("ramp", rows[:, 1]),
+         "rms_misfit": ("ramp", rows[:, 2]),
+         "max_slip": ("ramp", rows[:, 3]),
+         "moment_magnitude": ("ramp", rows[:, 4]),
+         "converged": ("ramp", rows[:, 5].astype(bool)),
+         "moment_ratio": ("ramp", moment_ratio),
+         "vr_change": ("ramp", vr_change)},
+        coords={"ramp": kinds},
+    )
+    out.attrs.update(reference=reference, tolerance=float(tolerance))
+
+    eating = [k for i, k in enumerate(kinds)
+              if moment_ratio[i] < 1.0 - tolerance and vr_change[i] > 0.0]
+    if eating:
+        warnings.warn(
+            f"ramp={eating} fit better than {reference!r} while recovering "
+            f"{', '.join('%.0f%%' % (100 * moment_ratio[kinds.index(k)]) for k in eating)} "
+            "of its moment -- a better fit with a smaller earthquake is what a ramp "
+            "absorbing coseismic signal looks like, and variance reduction cannot "
+            "tell you otherwise. Check ramp_leakage()'s marginal terms and prefer "
+            "the lower degree unless something independent supports the ramp.",
+            RuntimeWarning, stacklevel=2,
+        )
+    out.attrs["suspect"] = eating
+    return out

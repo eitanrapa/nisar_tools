@@ -625,6 +625,57 @@ near east-west strike-slip fault the far-field pattern is an arctangent step
 across the trace, which over a finite aperture looks a great deal like a gradient
 perpendicular to strike, so the two genuinely compete.
 
+#### Is the ramp eating the earthquake?
+
+`ramp_content` overstates the ramp badly, and inherently — nothing in it has a
+fault model, so the polynomial is free to claim the coseismic pattern. Two
+functions close that gap, and they answer different halves of the question.
+
+```python
+from nisar_tools.slip import ramp_leakage, ramp_sweep
+
+leak = ramp_leakage(inversion)                      # no solve; what it *could* absorb
+sweep = ramp_sweep(inversion, ("offset", "linear", "quadratic"), **solve_kwargs)
+```
+
+`ramp_leakage` is geometric: the fraction of the fault's own predicted field that
+lies in the ramp's column space, `||P_ramp (G s)|| / ||G s||`. Zero means the ramp
+cannot touch the earthquake whatever its coefficients do; one means it reproduces
+it exactly — and since the ramp is unregularised while the slip is smoothed and
+bounded, the ramp then wins. **Read `curvature_only`, not the totals**: a per-track
+offset always absorbs that track's mean displacement, because an unwrapped
+interferogram has an arbitrary constant.
+
+`ramp_sweep` re-solves at each degree and reports what actually happened. It is
+affordable because `SlipInversion.with_ramp` shares the Green's matrix — one
+*solve* per degree, not one assembly.
+
+From the runners, after stage 1 has written the observations:
+
+```bash
+KMP_DUPLICATE_LIB_OK=TRUE NISAR_RAMP_KINDS=offset,linear,quadratic,cubic \
+nohup python -u scripts/run_ramp_check.py > workdir/ramp_check.log 2>&1 &
+```
+
+writing `ramp_leakage.json`, `ramp_sweep.csv` and `figures/ramp_check.png`, and
+printing a verdict. Outputs gain a `_bootstrap` suffix when the observations came
+from the coarse round-0 sampling, as the L-curve's do.
+
+- ⚠️ **Variance reduction cannot answer this, which is the whole problem.** Extra
+  free columns can only fit better, so a ramp absorbing coseismic signal looks like
+  a **better fit with a smaller earthquake**. `ramp_sweep` flags exactly that
+  conjunction — moment down by more than 20% while VR is up — and warns.
+- **The conjunction matters, not either half.** On the starved synthetic fixture the
+  *linear* ramp also loses 31% of the moment, but it fits *worse* while doing so:
+  that is a worse model, not absorption, and it is deliberately not flagged.
+- **Measured, two synthetic apertures.** Full aperture with the near field kept:
+  `curvature_only` +0.006, moment ratio 1.003, nothing flagged. Everything within
+  60 km of the trace discarded: quadratic leakage **0.992**, and the quadratic solve
+  recovers **13% of the moment while VR rises** — flagged.
+- **Leakage says *can*, not *did*.** The healthy fixture leaks 0.55 at linear order
+  and its moment is stable to 0.3%. A high leakage is a reason to run the sweep, not
+  a verdict on its own.
+
 **None of it fixes coverage, which is usually what binds.** The along-strike
 profile is the point of the report: on the Venezuela scenes an aggregate "19% of
 samples north of the trace" read like thin two-sided coverage, while the profile
@@ -870,6 +921,144 @@ fitted. A bottom trace *is* that line, already digitised.
   since it constrains nothing its neighbours do not.
 - The same folding guard applies, stated as the offset at the base of the mesh
   rather than as a dip. Mutually exclusive with `segments=`/`uniform_dip=`.
+
+### A mesh the data chooses
+
+`FaultMesh.curved` places one node per resampled trace vertex at every depth
+level. That is a reasonable default and a poor description of what surface data
+can see: resolution decays sharply with depth, so a deep level carries parameters
+nothing constrains while a shallow one may be too coarse. Three arguments place
+the nodes freely instead, and all three leave the geometry arguments above
+untouched — how a node is carried onto the fitted surface does not depend on
+where it sits.
+
+```python
+mesh = FaultMesh.curved(
+    trace, frame, bottom_trace="fault-bottom.kml", edge_length=5e3,
+    depths=[0, 1e3, 2.5e3, 4.5e3, 7e3, 10.5e3, 15e3, 21e3, 30e3, 40e3],
+    nodes_per_level=lambda depth: max(12, int(90 - 2e-3 * depth)),
+)
+```
+
+- **`depths=`** lists the levels outright, in place of the geometric
+  `bias_w`/`down_dip_levels` progression. Setting both raises rather than letting
+  one be silently ignored.
+- **`nodes_per_level=`** takes a scalar, one count per level, or a callable of
+  depth; **`along_spacing=`** says the same thing in metres. This is the thing
+  `bias_l` could not do, and `bias_l` still raises — a single geometric ratio is
+  not the same knob.
+- **`layout=`** takes a `MeshLayout` built by hand, including a fully unstructured
+  one from `layout.lloyd_layout`, which relaxes a point cloud against a target
+  element-size field. `FaultMesh.from_layout(layout, trace, frame, ...)` is the
+  same thing spelled the other way round.
+
+Rows of unequal count have no quads to split, so those meshes are triangulated by
+Delaunay in the `(arc length, depth)` plane. That used to be refused, because a
+triangle wound the wrong way negates its dip-slip Green's-function column and
+leaves strike-slip alone — a plausible model with a randomly signed dip-slip
+field. It is safe now because the winding is fixed in **parameter space**: the
+lattice split turns out to give one consistent sign of signed area in `(s, z)`,
+and forcing that sign on every simplex reproduces its normals exactly, at any
+strike. A uniform layout still takes the quad split, bit for bit, so switching to
+these arguments cannot move a mesh you already built.
+
+- **Adjacent levels are held to 2:1** in node count, and the levels themselves to
+  2:1 in thickness. Ask for a sharper jump and you get a warning and a refinement,
+  because a fine row against a coarse one is what makes Delaunay reach across for
+  a long thin triangle.
+- **Read a low minimum angle in context.** The real 918-node production mesh
+  already sits at 11.3°, from 5 km along strike against 1 km top levels. A graded
+  layout is not obviously worse — a 80→14 grading on the same fault measures 14.2°.
+- **`plot_mesh(mesh, color=values, label=...)`** draws any per-element field, which
+  is how model resolution is worth looking at before committing to a mesh.
+
+### Sizing the mesh from model resolution
+
+Variance reduction measures fit, and a slip model fits happily on a discretisation
+the data never constrained — the spare freedom goes to the noise. Model resolution
+measures the other thing.
+
+```python
+from nisar_tools.slip.resolution import (
+    resolution_diagonal, element_resolution, target_element_size, adapt_layout)
+
+resolution = resolution_diagonal(model.inversion, smoothing=0.3)
+per_element = element_resolution(model.inversion, resolution)
+layout = adapt_layout(mesh, target_element_size(mesh, per_element))
+mesh = FaultMesh.from_layout(layout, trace, frame, bottom_trace=bottom)
+```
+
+`resolution_diagonal` is the diagonal of `R = (A'A + S'S + B'B)⁻¹A'A`, assembled
+from exactly what `solve` stacks. One dense Cholesky; seconds at 918 nodes. `1`
+means the estimate came from the data, `0` means the smoothing supplied it.
+
+- ⚠️ **`solve` is bound-constrained and `R` is not.** The Venezuela run had 86% of
+  elements on a bound, where a linear resolution matrix describes a different
+  problem than the one solved. Use these numbers to size a mesh, never to state an
+  uncertainty. `R` also depends on the smoothing weight, so evaluate it at the one
+  the run uses.
+- ⚠️ **`budget` is what makes an adaptive loop converge rather than drift.**
+  Resolution is near zero over most of a fault, so a size field that merely
+  equalises it grows the mean element every round: measured, 330 elements to 44
+  over three rounds with variance reduction falling to **0.74%** — converging, and
+  returning nothing. `budget="conserve"` holds the element count and lets the
+  resolution decide only *where* the parameters go.
+- ⚠️ **There is no cheap column-norm shortcut, and it is worth knowing why.**
+  `‖G[:, k]‖` correlates with depth at −0.036 where resolution correlates at
+  −0.742; it stays flat from the surface to 20 km while resolution falls from 0.34
+  to 2e-6. A deeper element radiates a broader but weaker pattern whose norm is
+  conserved, and resolution collapses because deep elements trade off with *each
+  other* — which a column norm structurally cannot see.
+
+### The two-way loop
+
+`iterate_sampling` already samples the data from the model (Wang & Fialko 2015).
+`mesh_adapt=` adds the other direction, sizing the mesh from what the data
+resolves (Barnhart & Lohman 2010), and `sampling_field="resolution"` puts the
+sampling on the same footing (Lohman & Simons 2005) so both directions read one
+quantity instead of two heuristics in different currencies.
+
+```python
+obs, model, history = iterate_sampling(
+    scenes, mesh, trace, frame, sampling,
+    mesh_adapt={"geometry": {"bottom_trace": bottom, "edge_length": 5e3}},
+    sampling_field="both",
+)
+```
+
+- **`mesh_adapt` must carry `geometry`.** A layout says where the nodes go, not
+  what the fault is, so rebuilding needs the same keywords `curved` took. In the
+  runners `slip_config.geometry_kwargs()` is the single source, so an adaptive run
+  cannot quietly re-mesh at a different dip than stage 1 built.
+- **`sampling_field`** is `"model"` (the default and what every earlier run used),
+  `"resolution"`, or `"both"` — the sum of the two standardised fields. The two
+  answer different questions: the first avoids spending samples on atmosphere, the
+  second spends them where the model is unconstrained. Lohman & Simons needs no new
+  sampler, because `from_los(field=)` already accepts an arbitrary decision field.
+- **It moves samples rather than adding them.** Measured on a two-scene synthetic
+  pair: `"model"` placed 1974 samples with 33.5% inside 20 km of the trace,
+  `"resolution"` placed 890 with **74.4%**, `"both"` 1663 with 39.8%. Do not expect
+  `"both"` to sample more than either — `rms_min` is a fraction of the field's own
+  global scatter, so a field that is large but smooth raises the split threshold
+  everywhere without raising any cell's local scatter.
+- ⚠️ **A changing mesh invalidates the obvious convergence test.**
+  `max |element_slip − previous|` compares vectors of different length once the
+  mesh moves, so it is measured on a fixed `(s, z)` probe lattice instead. With the
+  mesh held fixed the element-space number is kept verbatim, so an existing run
+  prints exactly what it printed before.
+- ⚠️ **The mesh stops adapting before the last round, on purpose.** Resampling a
+  piecewise-constant slip field onto a fixed lattice differs by about the
+  element-boundary contrast however little the model moved — two models fitting the
+  *same* data on 240 and 232 elements agree to a 2 mm median and still differ by
+  0.97 m at the worst point — so a centimetre tolerance is unreachable while the
+  mesh moves. `mesh_adapt["rounds"]` defaults to `max_rounds - 1` so the run
+  finishes on a fixed mesh and converges on the exact criterion — measured, a
+  four-round run reports 3.50 / 2.14 / 2.22 m while the mesh is moving and
+  **0.075 m** on the round that holds it fixed.
+- `history` now carries `n_elements` and `n_nodes` per round, and the runner prints
+  them: a sample count read beside a silently changed element count means nothing.
+- From the runners: `NISAR_ADAPT_ROUNDS=2 NISAR_SAMPLING_FIELD=both python
+  scripts/run_sampling.py`. Off by default (`rounds=0`).
 
 ### A layered crust, and nodal slip
 
