@@ -39,6 +39,57 @@ def compute_chunks(ny, nx, halo, target_blocks=None):
     return (min(int(ny), side), min(int(nx), side))
 
 
+def match_pairs(self_ds, other_ds, tolerance_s, action="merge"):
+    """Order ``other``'s pairs to line up with ``self``'s by ref+secondary time.
+
+    Frames of the same acquisitions define the same pairs, but each frame's
+    ``zeroDopplerStartTime`` can differ by seconds, so pairs are matched by
+    nearest ``(ref_time, sec_time)`` within ``tolerance_s`` rather than by exact
+    time. Returns an index array ``order`` with ``other.isel(pair=order)`` in
+    ``self``'s pair order. Raises if the pair sets do not correspond one-to-one.
+
+    ``tolerance_s=None`` skips the matching entirely and pairs by position --
+    for two stacks built from *different* acquisition dates, which define
+    genuinely different interferograms and so have no correspondence to find.
+
+    ``action`` names the operation in the error messages; it serves
+    :meth:`~nisar_tools.unwrap.UnwrappedStack.merge` (two frames of one track)
+    and the dual-frequency ionosphere combination (two sub-bands of one frame)
+    alike, which is why it lives here rather than in ``unwrap`` -- importing it
+    from there would drag that module's top-level ``import snaphu`` into the
+    interferogram stage.
+    """
+    sr = np.asarray(self_ds["ref_time"].values)
+    ss = np.asarray(self_ds["sec_time"].values)
+    orr = np.asarray(other_ds["ref_time"].values)
+    ors = np.asarray(other_ds["sec_time"].values)
+    if len(orr) != len(sr):
+        raise ValueError(
+            f"Cannot {action}: stacks have different pair counts ({len(sr)} vs "
+            f"{len(orr)})"
+        )
+    if tolerance_s is None:
+        return np.arange(len(sr))
+
+    tol = np.timedelta64(int(round(tolerance_s * 1e9)), "ns")
+    order = np.empty(len(sr), dtype=int)
+    for i in range(len(sr)):
+        dr, dsec = np.abs(orr - sr[i]), np.abs(ors - ss[i])
+        j = int(np.argmin(dr + dsec))
+        if dr[j] > tol or dsec[j] > tol:
+            raise ValueError(
+                f"Cannot {action}: no pair in the other stack matches self pair "
+                f"{i} ({sr[i]} / {ss[i]}) within {tolerance_s}s. If the two "
+                "stacks really are different acquisitions -- independent "
+                "interferograms covering neighbouring ground -- pass "
+                "time_tolerance=None to pair them by position instead."
+            )
+        order[i] = j
+    if len(set(order.tolist())) != len(order):
+        raise ValueError(f"Cannot {action}: pairs do not correspond one-to-one")
+    return order
+
+
 def wrapped_phase(da):
     """Wrapped phase (radians in ``[-pi, pi]``) of a complex DataArray.
 

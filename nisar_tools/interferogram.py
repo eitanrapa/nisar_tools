@@ -139,6 +139,13 @@ class InterferogramStack(RasterStackMixin):
             y_spacing=float(stack.ds.attrs.get("y_spacing", np.nan)),
             pairs=[list(p) for p in pair_list],
         )
+        # Which sub-band this is, carried so the dual-frequency ionosphere
+        # correction can read both carriers off the stacks instead of being told
+        # them. Not in the persist hash: it is provenance, not a parameter, and
+        # folding it in would stale every existing igrams store.
+        for key in ("frequency", "center_frequency", "wavelength"):
+            if stack.ds.attrs.get(key) is not None:
+                ds.attrs[key] = stack.ds.attrs[key]
         return cls(ds)
 
     @classmethod
@@ -366,6 +373,50 @@ class InterferogramStack(RasterStackMixin):
         }
         return InterferogramStack(ds)
 
+    def correct_ionosphere(self, screen):
+        """Rotate the wrapped interferogram by an ionospheric screen (lazy).
+
+        ``screen`` is what
+        :func:`~nisar_tools.ionosphere.dual_frequency_screen` returns -- the
+        dispersive phase measured from two *unwrapped* sub-band stacks -- or an
+        :class:`~nisar_tools.unwrap.UnwrappedStack` carrying one as its
+        ``phase_screen`` layer. It is removed here as a phase rotation,
+        ``igram * exp(-i * screen)``, so the pair goes into SNAPHU already
+        flattened.
+
+        **Correcting before the unwrap is the point of this method.** A large
+        ionospheric ramp is fringes, and every one of them is an opportunity for
+        the unwrapper to lay a 2*pi seam in the wrong place; removing them first
+        is cheaper than unwrapping them and then subtracting. The screen itself
+        still has to come from unwrapped sub-band phases -- there is no
+        wrapped-domain estimate, only a wrapped-domain *application* (see
+        :mod:`nisar_tools.ionosphere`) -- but those can be unwrapped from a
+        coarsely multilooked pair, which is both easier and, for a
+        kilometre-scale screen, no less accurate. The screen is interpolated onto
+        this stack's grid, so the two need not match.
+
+        Coherence is untouched: a phase rotation changes no amplitude.
+        """
+        from . import ionosphere
+
+        if self.ds.attrs.get("ionosphere") is not None:
+            raise ValueError(
+                "An ionospheric screen has already been removed from this "
+                "stack; correcting again would subtract a second one."
+            )
+        field, provenance = ionosphere.as_screen(
+            screen, np.asarray(self.ds["y"].values),
+            np.asarray(self.ds["x"].values), self.sizes["pair"],
+        )
+        field = field.assign_coords(pair=self.ds["pair"].values)
+
+        igram = self.ds["igram"]
+        ds = self.ds.copy()
+        ds["igram"] = (igram * np.exp(-1j * field)).astype(igram.dtype)
+        ds.attrs.update(self.ds.attrs)
+        ds.attrs["ionosphere"] = {**provenance, "applied": "wrapped"}
+        return InterferogramStack(ds)
+
     def unwrap(self, workspace, name="unwrapped", nproc=1, res_az=8, res_rg=3,
                overwrite=False, **kwargs):
         """Unwrap every pair with SNAPHU. See
@@ -412,6 +463,8 @@ class InterferogramStack(RasterStackMixin):
             full["edges_masked"] = self.ds.attrs["edges_masked"]
         if self.ds.attrs.get("unconnected_removed") is not None:
             full["unconnected_removed"] = self.ds.attrs["unconnected_removed"]
+        if self.ds.attrs.get("ionosphere") is not None:
+            full["ionosphere"] = self.ds.attrs["ionosphere"]
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return InterferogramStack(reopened)
 

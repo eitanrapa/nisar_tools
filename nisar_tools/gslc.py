@@ -27,6 +27,7 @@ import rioxarray  # noqa: F401  (registers .rio accessor)
 import xarray as xr
 
 from . import geo
+from .geometry import SPEED_OF_LIGHT
 
 GRID_PATH = "science/LSAR/GSLC/grids/frequency{frequency}"
 IDENT_PATH = "science/LSAR/identification"
@@ -151,6 +152,15 @@ class GSLC:
         self.y_spacing = float(grid["yCoordinateSpacing"][()])
         self.epsg = int(grid["projection"].attrs["epsg_code"])
 
+        # The sub-band's own carrier. Real granules always carry it; a stripped
+        # test fixture may not, so an absent one is None rather than an error --
+        # only the dual-frequency ionosphere correction needs it, and that says
+        # so itself. Frequency A and B differ (1.239 vs 1.2935 GHz on a real
+        # product), which is exactly what makes that correction possible.
+        self.center_frequency = (
+            float(grid["centerFrequency"][()]) if "centerFrequency" in grid else None
+        )
+
         ident = self._file[IDENT_PATH]
         self.direction = _decode(ident["orbitPassDirection"][()])
         if "zeroDopplerStartTime" in ident:
@@ -175,6 +185,13 @@ class GSLC:
     @property
     def shape(self):
         return self._dset.shape
+
+    @property
+    def wavelength(self):
+        """Radar wavelength (m) of this sub-band, or None if unrecorded."""
+        if self.center_frequency is None:
+            return None
+        return SPEED_OF_LIGHT / self.center_frequency
 
     def _reader(self):
         """A :class:`DirectChunkReader` for this granule, or None to use h5py.

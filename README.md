@@ -227,6 +227,96 @@ Also available on `UnwrappedStack`, where it is worth chaining ahead of
 convolution that fills NaN gaps from their neighbours, so a stranded region drags
 the fitted surface out across the water separating it from the mainland.
 
+### The ionosphere, measured instead of fitted
+
+NISAR transmits **two sub-bands in every granule** — `frequencyA` at 1.239 GHz
+(40 MHz, 5 m posting) and `frequencyB` at 1.2935 GHz (5 MHz, 40 m posting) — and
+the ionosphere is dispersive while everything else is not. Unwrap both and
+`nisar_tools.ionosphere` separates them:
+
+```python
+from nisar_tools import GSLC, GSLCStack, ionosphere
+
+unw = {}
+for band, looks in (("A", 16), ("B", 2)):          # -> 80 m in x for both
+    stack = GSLCStack.from_gslcs([GSLC(p, frequency=band) for p in paths], bbox=bbox)
+    unw[band] = stack.form_interferograms(looks=looks).unwrap(ws, name=f"unw_{band}")
+
+corrected = unw["A"].correct_ionosphere(unw["B"])   # unwrapped-domain
+```
+
+The screen is kept as the `phase_screen` layer, `unw` comes back as the
+non-dispersive phase **at band A's own carrier** (so `to_los` needs no
+adjustment), and the provenance folds into the persist hash. To remove it
+*before* unwrapping instead — a large ionospheric ramp is fringes the unwrapper
+can lay a seam through — estimate it and apply it to the wrapped interferogram:
+
+```python
+screen = ionosphere.dual_frequency_screen(unw["A"], unw["B"], scale=..., min_coherence=0.3)
+unw_a = igrams_a.correct_ionosphere(screen).unwrap(ws, name="unw_corrected")
+```
+
+The screen is interpolated onto whatever grid it is applied to, so it can be
+estimated from a cheaply multilooked pair and removed at full posting.
+
+⚠️ **Both inputs must be unwrapped, and no wrapped-domain estimate exists.** The
+combination at NISAR's carriers is `12.12·φ_A − 11.61·φ_B`; an unknown 2π in
+either input moves the screen by ~76 rad. The complex product of the two bands
+does not help either — the exact identity is
+`φ_disp = 0.51·φ_A + 11.61·(φ_A − φ_B)`, so each band's *absolute* phase is
+needed, not just their difference. Wrapped is where the correction is
+**applied**, never where it is estimated.
+
+⚠️ **The low-pass is not optional.** Those coefficients amplify independent phase
+noise by `hypot(12.12, 11.61) = 16.8`, so an unsmoothed screen makes the data
+worse. `scale` (pixels of the corrected stack, default 2 km of ground) sets the
+Gaussian sigma; each band is smoothed **on its own grid** before combining —
+linearity makes that identical on a shared grid and strictly better on the real
+pair, where band B is posted 8× coarser in x and resampling its raw phase would
+put every interpolation error through the 12× coefficient. Below twice the
+coarser band's posting the resampling dominates and it warns.
+
+**Measured against a deramp on the real D_071 pair** (Mojave, 55 × 66 km at 80 m,
+12 days, band A `looks=16`, band B `looks=2`):
+
+| | std (rad) | non-planar part |
+|---|---|---|
+| band A unwrapped phase | 1.393 | 0.318 |
+| − dual-frequency screen | 0.497 | 0.348 |
+| − `deramp(degree=1)` | **0.318** | 0.318 |
+| − screen, then `deramp(degree=1)` | 0.348 | 0.348 |
+
+**The screen is 94% a plane on this pair** (correlation with the best-fit plane
++0.94; it removes 4.68 rad p2p of the data's 5.90). Its amplitude corresponds to
+0.32–0.46 TECU of differential TEC, which is a plausible number, and its
+non-planar content (0.28 rad std, 4.3 km correlation length) is **8× above the
+speckle floor** the two bands' coherence implies (0.038 rad after the 2 km
+low-pass) — so it is measuring something, not amplifying noise.
+
+But read the table the right way round. **A deramp always wins on variance**:
+it is a least-squares fit to the very field being scored, so it minimises exactly
+that number by construction. That is not the reason to prefer either one:
+
+- **A deramp is fitted, so it consumes whatever is under it.** Where deformation
+  spans the frame it removes part of the earthquake — the failure documented in
+  the next section, and the reason `SlipInversion(ramp=...)` exists. The
+  dual-frequency screen *cannot* do that: deformation scales with `f` like the
+  orbit does, so it does not appear in the dispersive half at all.
+- **Neither touches the troposphere.** In `A − plane` the alluvial fans are
+  plainly visible: topography-correlated, non-dispersive, and left behind by both.
+  On this scene it is the dominant residual, which is why the ionosphere
+  correction improves the *deramped* residual by so little here.
+- **Match the two bands' postings.** Re-unwrapping band B at 80 m instead of
+  320 m left the plane unchanged (4.68 vs 4.81 rad p2p — the ramp is robust) but
+  moved the non-planar part from 0.313 to 0.279 rad and its correlation with band
+  A's own residual from +0.22 to +0.32. The ramp survives a coarse second band;
+  finer structure does not.
+
+⇒ on a quiet pair, a deramp gets ~95% of what this does, faster and with one
+band. Reach for the dual-frequency screen when the scene has signal a deramp
+would eat, when the ionosphere is strong enough to matter for unwrapping, or when
+you need the correction to be a *measurement* you can defend rather than a fit.
+
 ### Cleaning the unwrapped phase
 
 Three lazy `UnwrappedStack` methods, chained before `to_los`:

@@ -19,10 +19,11 @@ import pytest
 # pytest's default import mode puts this directory on sys.path, so no manual
 # path manipulation is needed.
 
-GRID = "science/LSAR/GSLC/grids/frequencyA"
+GRID = "science/LSAR/GSLC/grids/frequency{f}"
 IDENT = "science/LSAR/identification"
 RADAR_GRID = "science/LSAR/GSLC/metadata/radarGrid"
 CENTER_FREQ_A = 1_239_000_000.0  # Hz, NISAR L-band frequency A -> lambda ~0.242 m
+CENTER_FREQ_B = 1_293_500_000.0  # Hz, the second sub-band, as on a real granule
 EARTH_RADIUS = 6_371_000.0       # m, spherical, for the synthetic look angle
 PLATFORM_ALT = 747_000.0         # m, NISAR's nominal orbit altitude
 
@@ -40,7 +41,6 @@ def _write_synthetic_geometry(f, grid, ident, x_coords, y_coords, dx, dy, epsg):
     ``sin(look) = Re/(Re+h) sin(incidence)`` at a NISAR-like altitude, so it is
     always the smaller of the two, as in a real product.
     """
-    grid.create_dataset("centerFrequency", data=np.float64(CENTER_FREQ_A))
     ident.create_dataset("lookDirection", data=np.bytes_("Left"))
 
     heights = np.array([-500.0, 0.0, 500.0, 1000.0])
@@ -88,6 +88,8 @@ def write_synthetic_gslc(
     seed=0,
     write_geometry=False,
     compressed=True,
+    frequency="A",
+    center_frequency=None,
 ):
     """Write a minimal but structurally faithful GSLC HDF5 file.
 
@@ -98,6 +100,12 @@ def write_synthetic_gslc(
     ``compressed`` (default, matching real products) writes the image gzip+
     shuffle filtered with a NaN fill value. Pass ``False`` for a plain
     uncompressed dataset, which exercises the h5py fallback read path.
+
+    ``frequency`` picks the sub-band group; ``"B"`` defaults to the second
+    carrier, which is what makes a pair of these usable for the dual-frequency
+    ionosphere correction. Real granules carry both bands in one file at
+    different postings; a fixture writes one band per file, which is all any
+    code path here cares about.
     """
     path = str(path)
     x_coords = x0 + dx * np.arange(nx, dtype=np.float64)
@@ -125,8 +133,11 @@ def write_synthetic_gslc(
         if compressed else {}
     )
 
+    if center_frequency is None:
+        center_frequency = CENTER_FREQ_B if frequency == "B" else CENTER_FREQ_A
+
     with h5py.File(path, "w") as f:
-        grid = f.create_group(GRID)
+        grid = f.create_group(GRID.format(f=frequency))
         grid.create_dataset(polarization, data=data,
                             chunks=(min(64, ny), min(64, nx)), **filters)
         grid.create_dataset("xCoordinates", data=x_coords)
@@ -135,6 +146,7 @@ def write_synthetic_gslc(
         grid.create_dataset("yCoordinateSpacing", data=np.float64(y_spacing))
         proj = grid.create_dataset("projection", data=np.int32(epsg))
         proj.attrs["epsg_code"] = np.int32(epsg)
+        grid.create_dataset("centerFrequency", data=np.float64(center_frequency))
 
         ident = f.create_group(IDENT)
         ident.create_dataset("orbitPassDirection", data=np.bytes_(direction))

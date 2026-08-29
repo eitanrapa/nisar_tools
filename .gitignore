@@ -9,3 +9,6 @@ dist/
 # Local processing outputs
 workdir/
 *.zarr/
+
+# macOS
+.DS_Store

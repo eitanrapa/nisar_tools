@@ -10,6 +10,7 @@ import rioxarray  # noqa: F401
 import xarray as xr
 
 from . import _kernels, geo
+from .geometry import SPEED_OF_LIGHT
 from ._base import (
     SPATIAL_CHUNK,
     RasterStackMixin,
@@ -55,6 +56,22 @@ class GSLCStack(RasterStackMixin):
         directions = {g.direction for g in gslcs}
         if len(directions) > 1:
             raise ValueError(f"GSLCs span multiple pass directions: {directions}")
+        bands = {g.frequency for g in gslcs}
+        if len(bands) > 1:
+            raise ValueError(
+                f"GSLCs span multiple sub-bands: {sorted(bands)}. Frequency A and "
+                "B have different carriers, so their phases are not "
+                "interferometric with each other; build one stack per band (that "
+                "is what the dual-frequency ionosphere correction combines)."
+            )
+        # Every granule of a band shares its carrier, so a mismatch here is a
+        # corrupt product rather than a user error -- but recording it is what
+        # lets the ionosphere correction find the two frequencies on its own.
+        carriers = {g.center_frequency for g in gslcs if g.center_frequency is not None}
+        if len(carriers) > 1:
+            raise ValueError(
+                f"GSLCs disagree on centerFrequency: {sorted(carriers)}"
+            )
 
         arrays = []
         times = []
@@ -78,7 +95,11 @@ class GSLCStack(RasterStackMixin):
             direction=gslcs[0].direction,
             x_spacing=float(gslcs[0].x_spacing),
             y_spacing=float(gslcs[0].y_spacing),
+            frequency=str(gslcs[0].frequency),
         )
+        if carriers:
+            ds.attrs["center_frequency"] = float(carriers.pop())
+            ds.attrs["wavelength"] = SPEED_OF_LIGHT / ds.attrs["center_frequency"]
         return cls(ds)
 
     @classmethod

@@ -19,6 +19,7 @@ Typical flow::
 """
 
 from . import download
+from . import ionosphere
 from . import slip
 from .download import download_dem, download_gslcs, login
 from .gslc import GSLC
@@ -73,6 +74,7 @@ __all__ = [
     "download",
     "download_dem",
     "download_gslcs",
+    "ionosphere",
     "login",
     "make_pairs",
     "run_edgrn",

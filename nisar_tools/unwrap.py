@@ -34,11 +34,13 @@ import snaphu
 import xarray as xr
 
 from . import _kernels, geometry
+from .geometry import SPEED_OF_LIGHT
 from ._base import (
     SPATIAL_CHUNK,
     RasterStackMixin,
     compute_chunks,
     masked_edges,
+    match_pairs as _match_pairs,
     open_stage,
     plane_kernel as _plane_kernel,
 )
@@ -66,50 +68,6 @@ def _as_list(paths):
     if isinstance(paths, (str, os.PathLike)):
         return [paths]
     return list(paths)
-
-
-def _match_pairs(self_ds, other_ds, tolerance_s):
-    """Order ``other``'s pairs to line up with ``self``'s by ref+secondary time.
-
-    Frames of the same acquisitions define the same pairs, but each frame's
-    ``zeroDopplerStartTime`` can differ by seconds, so pairs are matched by
-    nearest ``(ref_time, sec_time)`` within ``tolerance_s`` rather than by exact
-    time. Returns an index array ``order`` with ``other.isel(pair=order)`` in
-    ``self``'s pair order. Raises if the pair sets do not correspond one-to-one.
-
-    ``tolerance_s=None`` skips the matching entirely and pairs by position --
-    for two stacks built from *different* acquisition dates, which define
-    genuinely different interferograms and so have no correspondence to find.
-    """
-    sr = np.asarray(self_ds["ref_time"].values)
-    ss = np.asarray(self_ds["sec_time"].values)
-    orr = np.asarray(other_ds["ref_time"].values)
-    ors = np.asarray(other_ds["sec_time"].values)
-    if len(orr) != len(sr):
-        raise ValueError(
-            f"Cannot merge: stacks have different pair counts ({len(sr)} vs "
-            f"{len(orr)})"
-        )
-    if tolerance_s is None:
-        return np.arange(len(sr))
-
-    tol = np.timedelta64(int(round(tolerance_s * 1e9)), "ns")
-    order = np.empty(len(sr), dtype=int)
-    for i in range(len(sr)):
-        dr, dsec = np.abs(orr - sr[i]), np.abs(ors - ss[i])
-        j = int(np.argmin(dr + dsec))
-        if dr[j] > tol or dsec[j] > tol:
-            raise ValueError(
-                f"Cannot merge: no pair in the other stack matches self pair {i} "
-                f"({sr[i]} / {ss[i]}) within {tolerance_s}s. If the two stacks "
-                "really are different acquisitions -- independent "
-                "interferograms covering neighbouring ground -- pass "
-                "time_tolerance=None to pair them by position instead."
-            )
-        order[i] = j
-    if len(set(order.tolist())) != len(order):
-        raise ValueError("Cannot merge: pairs do not correspond one-to-one")
-    return order
 
 
 class UnwrappedStack(RasterStackMixin):
@@ -373,6 +331,7 @@ class UnwrappedStack(RasterStackMixin):
             direction=direction,
             look_direction=look_direction,
             wavelength=float(wavelength),
+            center_frequency=SPEED_OF_LIGHT / float(wavelength),
             frequency=frequency,
             polarization=polarization,
             # Kept so to_los can find the embedded geometry cube after a reload.
@@ -665,6 +624,67 @@ class UnwrappedStack(RasterStackMixin):
         ds["unw"] = (unw - self.ds["phase_screen"]).astype(unw.dtype)
         ds.attrs.update(self.ds.attrs)
         ds.attrs["phase_screen_removed"] = True
+        return UnwrappedStack(ds)
+
+    def correct_ionosphere(self, other, *, frequency=None, other_frequency=None,
+                           reference_frequency=None, scale=None,
+                           min_coherence=None, remove_offset=True,
+                           time_tolerance=600.0, replace=False):
+        """Remove the dual-frequency ionospheric screen (lazy). Returns a new stack.
+
+        ``other`` is the *second sub-band* of the same acquisitions -- band B
+        where this stack is band A -- unwrapped separately. The dispersive part
+        of the two phases is estimated at this stack's own carrier (see
+        :mod:`nisar_tools.ionosphere` for the algebra and for why both inputs
+        have to be unwrapped), kept as the ``phase_screen`` layer, and subtracted
+        from ``unw`` in one call.
+
+        The result is band A's **non-dispersive** phase: still at band A's
+        wavelength, so :meth:`to_los` needs no adjustment. What it is *not* is
+        deramped -- an orbital ramp scales with frequency like the deformation
+        does and comes through untouched, which is what
+        :meth:`deramp` (or the inversion's own ramp columns) is for.
+
+        Arguments beyond ``other`` are
+        :func:`~nisar_tools.ionosphere.dual_frequency_screen`'s; ``scale`` is the
+        one to know about, since the raw estimate amplifies phase noise ~17x and
+        the default low-pass is what makes the correction an improvement rather
+        than a degradation.
+
+        ``replace=True`` overwrites an existing screen -- a GUNW already carries
+        NASA's, and silently replacing it would lose the provenance of whichever
+        one the numbers came from.
+        """
+        from . import ionosphere
+
+        if "phase_screen" in self.ds and not replace:
+            raise ValueError(
+                "This stack already carries a 'phase_screen' "
+                f"({self.ds.attrs.get('ionosphere', {}).get('method', 'gunw')}). "
+                "Pass replace=True to overwrite it with the dual-frequency "
+                "estimate."
+            )
+        if self.ds.attrs.get("phase_screen_removed"):
+            raise ValueError(
+                "A phase screen has already been removed from this stack; "
+                "correcting again would subtract a second one."
+            )
+
+        screen = ionosphere.dual_frequency_screen(
+            self, other, frequency=frequency, other_frequency=other_frequency,
+            reference_frequency=reference_frequency, scale=scale,
+            min_coherence=min_coherence, remove_offset=remove_offset,
+            time_tolerance=time_tolerance,
+        )
+        provenance = dict(screen.attrs)
+
+        ds = self.ds.copy()
+        unw = self.ds["unw"]
+        ds["phase_screen"] = screen.astype(np.float32)
+        ds["unw"] = (unw - screen).astype(unw.dtype)
+        ds.attrs.update(self.ds.attrs)
+        ds.attrs["phase_screen_removed"] = True
+        ds.attrs["ionosphere"] = {**provenance, "applied": "unwrapped"}
         return UnwrappedStack(ds)
 
     def add_cycles(self, cycles, pair=None, conncomp=None):
@@ -994,7 +1014,7 @@ class UnwrappedStack(RasterStackMixin):
         # applied, so an untouched stage keeps its own identity.
         for key in ("water_mask", "cycle_shifts", "phase_screen_removed",
                     "edges_masked", "outliers_removed", "unconnected_removed",
-                    "deramp", "merged"):
+                    "deramp", "ionosphere", "merged"):
             value = self.ds.attrs.get(key)
             if value:
                 full[key] = value
@@ -1236,4 +1256,9 @@ def _template(igram_ds, npair, ny, nx):
         direction=igram_ds.attrs.get("direction"),
         looks=igram_ds.attrs.get("looks"),
     )
+    # The sub-band's identity follows the phase all the way down, so a
+    # dual-frequency correction on two unwrapped stacks needs no arguments.
+    for key in ("frequency", "center_frequency", "wavelength"):
+        if igram_ds.attrs.get(key) is not None:
+            template.attrs[key] = igram_ds.attrs[key]
     return template
