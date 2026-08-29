@@ -74,6 +74,7 @@ affordable: six blocks of ~1600 are a few MB each, against 900 MB for one dense
 matrix over 10 000 observations.
 """
 
+import warnings
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -101,6 +102,30 @@ DEFAULT_N_BINS = 25
 #: scatter swamps the shape it is meant to constrain -- the classic reason a
 #: variogram fit runs away to an enormous range.
 DEFAULT_MAX_LAG_FRACTION = 1.0 / 3.0
+
+#: Polynomial degree removed before the variogram is measured, and it **must
+#: match the nuisance ramp the inversion solves** -- ``ramp="quadratic"`` here,
+#: hence 2.
+#:
+#: ⚠️ This is not a tuning knob, it is the difference between a covariance and
+#: nonsense. Measured on the four real NISAR Venezuela scenes, which are stored
+#: un-deramped: at degree 1 the fit **collapses** -- sill 0.0 mm, nugget
+#: 174-501 mm, range 363-816 km against a 108 km maximum lag, i.e. the variogram
+#: never plateaus and the fit puts everything in an unbounded trend. At degree 2
+#: the same scenes give sill 18-41 mm, nugget 1.2-3.3 mm, range 22-29 km, which
+#: is what tropospheric delay actually looks like. Degree 3 starts eating the
+#: atmosphere itself (range falls to 7-25 km).
+#:
+#: The two ALOS scenes are the control: already deramped upstream, they barely
+#: move between degree 1 and 2 (16.5 -> 16.3 mm sill, 36 -> 33 km range). So the
+#: degree costs almost nothing on a clean scene and rescues a dirty one.
+DEFAULT_DETREND_DEGREE = 2
+
+#: A fitted range beyond this multiple of the largest lag the variogram covers
+#: means the curve never plateaued, so the "sill" and "range" are an
+#: extrapolation. :func:`fit_covariance` warns; see
+#: :data:`DEFAULT_DETREND_DEGREE` for the usual cause.
+RANGE_EXTRAPOLATION_LIMIT = 1.0
 
 #: Smallest nugget kept, as a fraction of the sill. A fitted nugget of exactly
 #: zero makes ``Cd`` singular the moment two cells coincide, and no real
@@ -184,7 +209,7 @@ class CovarianceModel:
                 f"range {self.range_m / 1e3:.1f} km")
 
 
-def _detrend(x, y, values):
+def _detrend(x, y, values, degree=1):
     """Remove a plane. A long-wavelength ramp is not what this is measuring.
 
     An orbital or ionospheric ramp is coherent across the whole scene, so it adds
@@ -193,7 +218,12 @@ def _detrend(x, y, values):
     published recipe removes a trend first; this is that step, and it is the
     single most important line in the estimator.
     """
-    design = np.column_stack([np.ones_like(x), x, y])
+    sx = np.ptp(x) or 1.0
+    sy = np.ptp(y) or 1.0
+    u, v = (x - x.mean()) / sx, (y - y.mean()) / sy
+    columns = [u ** (k - j) * v ** j
+               for k in range(int(degree) + 1) for j in range(k + 1)]
+    design = np.column_stack(columns)
     coef, *_ = np.linalg.lstsq(design, values, rcond=None)
     return values - design @ coef
 
@@ -202,7 +232,8 @@ def empirical_variogram(los_stack, trace, frame, pair=0, block=DEFAULT_BLOCK,
                         min_distance=None, min_valid_fraction=0.5,
                         n_bins=DEFAULT_N_BINS, max_lag=None,
                         max_lag_fraction=DEFAULT_MAX_LAG_FRACTION,
-                        detrend=True, max_blocks=4000, seed=0):
+                        detrend=DEFAULT_DETREND_DEGREE, max_blocks=4000,
+                        seed=0):
     """Binned semivariance of one scene's far field.
 
     Reduces the scene onto the same fixed ``block``-metre grid
@@ -243,8 +274,9 @@ def empirical_variogram(los_stack, trace, frame, pair=0, block=DEFAULT_BLOCK,
         pick = np.random.default_rng(seed).choice(x.size, int(max_blocks),
                                                   replace=False)
         x, y, z = x[pick], y[pick], z[pick]
-    if detrend:
-        z = _detrend(x, y, z)
+    degree = int(detrend) if detrend is not True else 1
+    if degree > 0:
+        z = _detrend(x, y, z, degree=degree)
 
     iu, ju = np.triu_indices(x.size, k=1)
     separation = np.hypot(x[iu] - x[ju], y[iu] - y[ju])
@@ -278,7 +310,7 @@ def empirical_variogram(los_stack, trace, frame, pair=0, block=DEFAULT_BLOCK,
             "n_blocks": int(x.size),
             "block_variance": float(np.var(z)),
             "min_distance": float(min_distance),
-            "detrended": bool(detrend),
+            "detrend_degree": int(degree),
             "max_lag": float(max_lag),
             # Pixels averaged into each block, and the median *within*-block
             # variance. The second is how the nugget is actually measured -- see
@@ -440,10 +472,40 @@ def fit_covariance(variogram, kind="exponential", weighted=True, nugget=None):
         )
         sill, range_m = (abs(float(v)) for v in fit.x)
 
-    return CovarianceModel(
+    model = CovarianceModel(
         sill=sill, range_m=range_m,
         nugget=max(fitted, MIN_NUGGET_FRACTION * max(sill, 1e-12)),
         kind=kind,
+    )
+    _warn_if_extrapolated(model, variogram)
+    return model
+
+
+def _warn_if_extrapolated(model, variogram):
+    """Say so when the variogram never plateaued inside the lags it covers.
+
+    A range past the largest measured lag means the fit is extrapolating a curve
+    it never saw level off, and the sill it reports is whatever that extrapolation
+    needed rather than a variance. It is a loud, checkable signature of a trend
+    left in the data -- see :data:`DEFAULT_DETREND_DEGREE` -- and it is worth
+    catching here because the resulting model is not obviously wrong downstream:
+    it whitens, it factorises, and it quietly tells the inversion the noise is
+    coherent across the whole scene.
+    """
+    max_lag = float(variogram.attrs.get("max_lag", 0.0))
+    if max_lag <= 0:
+        return
+    if model.range_m <= RANGE_EXTRAPOLATION_LIMIT * max_lag:
+        return
+    degree = variogram.attrs.get("detrend_degree", "?")
+    warnings.warn(
+        f"fitted range {model.range_m / 1e3:.0f} km exceeds the largest lag "
+        f"measured ({max_lag / 1e3:.0f} km), so the variogram never plateaued and "
+        f"this sill/range pair is an extrapolation. The usual cause is a trend "
+        f"the detrend did not remove -- this variogram removed degree "
+        f"{degree}. Match it to the ramp the inversion solves (see "
+        f"DEFAULT_DETREND_DEGREE), or widen the scene.",
+        RuntimeWarning, stacklevel=3,
     )
 
 

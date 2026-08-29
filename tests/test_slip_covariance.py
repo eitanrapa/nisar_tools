@@ -183,8 +183,13 @@ def test_the_within_block_corrections_are_both_needed(geometry):
     assert 0.0 < model.sill * (1.0 - rho) < NUGGET
 
 
+@pytest.mark.filterwarnings("ignore:fitted range.*:RuntimeWarning")
 def test_a_ramp_must_be_removed_or_the_range_runs_away(geometry):
-    """A trend is coherent at every lag, so it reads as an enormous range."""
+    """A trend is coherent at every lag, so it reads as an enormous range.
+
+    The extrapolation warning fires here by design -- that is the failure being
+    demonstrated; `test_an_unplateaued_variogram_says_so` is what pins it.
+    """
     trace, frame, _ = geometry
     # 200 mm across the scene -- a small orbital ramp, and far more than enough.
     stack = _noise_stack(frame, seed=13, ramp=1e-6)
@@ -200,6 +205,62 @@ def test_a_ramp_must_be_removed_or_the_range_runs_away(geometry):
     # and gives up on the sill entirely, dumping the whole variance in a nugget.
     assert dirty.range_m > 10.0 * clean.range_m, (clean, dirty)
     assert dirty.total_variance > 10.0 * clean.total_variance, (clean, dirty)
+
+
+def test_an_unplateaued_variogram_says_so(geometry):
+    """A range past the largest measured lag means the fit is extrapolating.
+
+    That is the loud, checkable signature of a trend the detrend did not remove,
+    and it matters because the resulting model is *not* obviously broken
+    downstream -- it whitens, it factorises, and it quietly tells the inversion
+    the noise is coherent across the entire scene. Measured on the four real
+    NISAR scenes, which are stored un-deramped: removing only a plane gives
+    ranges of 363-816 km against a 108 km maximum lag.
+    """
+    trace, frame, _ = geometry
+    stack = _noise_stack(frame, seed=13, ramp=1e-6)
+    variogram = C.empirical_variogram(stack, trace, frame, min_distance=0.0,
+                                      block=2000.0, n_bins=20, detrend=0)
+
+    with pytest.warns(RuntimeWarning, match="never plateaued"):
+        C.fit_covariance(variogram)
+
+    # And the properly detrended one is silent.
+    clean = C.empirical_variogram(stack, trace, frame, min_distance=0.0,
+                                  block=2000.0, n_bins=20)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        C.fit_covariance(clean)
+
+
+def test_the_detrend_degree_must_match_the_ramp_the_inversion_solves(geometry):
+    """A plane cannot remove a quadratic, and the failure is total, not gradual.
+
+    This is why `DEFAULT_DETREND_DEGREE` is 2 rather than 1: the scenes this
+    package inverts carry an unremoved ramp and the inversion solves a quadratic
+    one per track.
+    """
+    trace, frame, _ = geometry
+    x, y = ss._grid(frame, 32619, 110e3, 70e3, 1000.0)
+    field = ss.correlated_noise((y.size, x.size), 1000.0, SILL, RANGE,
+                                nugget=NUGGET, seed=31)
+    xx, yy = np.meshgrid(x - x.mean(), y - y.mean())
+    # ~120 mm across the scene, against ~22 mm of noise -- dominant, as a real
+    # un-removed orbital ramp is.
+    curved = field + 1e-11 * xx ** 2          # a quadratic, not a plane
+    stack = ss._stack(curved, x, y, ss.look_vector(**ss._geom("asc")), 32619, "asc")
+
+    kwargs = dict(min_distance=0.0, block=2000.0, n_bins=20)
+    plane = C.empirical_variogram(stack, trace, frame, detrend=1, **kwargs)
+    quad = C.empirical_variogram(stack, trace, frame, detrend=2, **kwargs)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        by_plane = C.fit_covariance(plane)
+    by_quad = C.fit_covariance(quad)
+
+    assert by_plane.range_m > 3.0 * by_quad.range_m, (by_plane, by_quad)
+    assert by_quad.range_m == pytest.approx(RANGE, rel=0.6), by_quad
 
 
 # -- Cd structure ----------------------------------------------------------
