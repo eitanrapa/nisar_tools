@@ -186,6 +186,7 @@ class Observations:
                 "look_u": ("obs", rows["look_u"][keep]),
                 "std": ("obs", rows["std"][keep]),
                 "cell_size": ("obs", rows["cell_size"][keep]),
+                "count": ("obs", rows["count"][keep]),
                 "weight": ("obs", np.ones(int(keep.sum()))),
                 "track": ("obs", np.full(int(keep.sum()), name, dtype=object)),
             }
@@ -470,7 +471,8 @@ def _reduce_cells(cells, los, look, valid, x_native, y_native, stat):
     """
     n = len(cells)
     out = {k: np.empty(n) for k in
-           ("x", "y", "los", "look_e", "look_n", "look_u", "std", "cell_size")}
+           ("x", "y", "los", "look_e", "look_n", "look_u", "std", "cell_size",
+            "count")}
     dx = abs(float(np.diff(x_native)[0]))
     dy = abs(float(np.diff(y_native)[0]))
 
@@ -479,6 +481,11 @@ def _reduce_cells(cells, los, look, valid, x_native, y_native, stat):
         d = los[r0:r1, c0:c1][m]
         out["los"][i] = np.median(d) if stat == "median" else d.mean()
         out["std"][i] = d.std() if d.size > 1 else 0.0
+        # How many pixels went into this average. Needed by
+        # `nisar_tools.slip.covariance`, where the *uncorrelated* part of the
+        # noise averages down as 1/n and the correlated part does not -- so a
+        # cell's variance is not a function of its size alone.
+        out["count"][i] = float(d.size)
 
         rr, cc = np.nonzero(m)
         out["x"][i] = x_native[c0:c1][cc].mean()

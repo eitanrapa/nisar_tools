@@ -26,10 +26,12 @@ plausible-looking model with a meaningless variance reduction -- so
 :class:`SlipModel` carries the solver's status and refuses to pretend.
 """
 
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
 import scipy.sparse as sp
+from scipy.linalg import solve_triangular
 from scipy.optimize import lsq_linear
 from scipy.sparse.linalg import LinearOperator
 
@@ -160,7 +162,7 @@ class SlipInversion:
     """
 
     def __init__(self, mesh, obs, engine=None, ramp="none", basis="element",
-                 velocity_model=None):
+                 velocity_model=None, covariance=None):
         """``engine`` and ``basis`` choose the physics and the parameterization.
 
         ``ramp`` adds unbounded per-track nuisance columns -- ``"none"``,
@@ -188,6 +190,14 @@ class SlipInversion:
         as the Venezuela CRUST2.0 profile's is, has a third the rigidity of the
         default over the top 2 km -- which is exactly where a vertical
         strike-slip fault's shallow slip sits.
+
+        ``covariance`` replaces the per-observation weights with a full spatially
+        correlated noise model: one
+        :class:`~nisar_tools.slip.covariance.CovarianceModel` for every track, or
+        a ``{track: model}`` mapping. The system is then solved whitened,
+        ``L^-1 G m = L^-1 d`` with ``Cd = L L'``, which is what
+        :meth:`whiten` applies. ``None`` keeps the diagonal weights and is
+        bit-for-bit what every run before this did.
         """
         self.mesh = mesh
         self.obs = obs
@@ -221,6 +231,60 @@ class SlipInversion:
         self.ramp_kind = str(ramp)
         self.n_slip = self.basis.n_param
         self.n_ramp = self.ramp.shape[1]
+
+        self.covariance = covariance
+        self._chol = self._track_rows = None
+        if covariance is not None:
+            self._build_whitening(covariance)
+
+    def _build_whitening(self, covariance):
+        """Cholesky factors of ``Cd``, one block per track."""
+        from .covariance import cell_ratio_warning, whitening_factors
+
+        normalize = self.obs.ds.attrs.get("normalize")
+        if normalize not in (None, "none"):
+            raise ValueError(
+                f"Observations were concatenated with normalize={normalize!r}, "
+                "which scales each track by its own sample count -- the same job "
+                "a covariance model does, and does properly. Passing both states "
+                "the relative track weighting twice. Re-run "
+                'Observations.concat(..., normalize="none") and let the '
+                "covariance set the weights."
+            )
+
+        track = np.asarray(self.obs.ds["track"].values, dtype=object)
+        self._chol = whitening_factors(self.obs, covariance)
+        self._track_rows = {name: np.flatnonzero(track == name)
+                            for name in self._chol}
+        for name in self._chol:
+            model = (covariance if not isinstance(covariance, dict)
+                     else covariance[name])
+            message = cell_ratio_warning(self.obs, model, track=name)
+            if message is not None:
+                warnings.warn(f"track {name!r}: {message}", RuntimeWarning,
+                              stacklevel=3)
+
+    def whiten(self, values):
+        """Left-multiply by ``Cd^-1/2`` -- or by the diagonal weights if no ``Cd``.
+
+        Every place the design matrix or the data meets the solver goes through
+        here, so that the resolution matrix, the data importance and the ramp
+        diagnostics all describe the system that was actually solved. Missing one
+        of them is caught by ``trace(R) == trace(N)``, which holds only when both
+        halves whiten the same ``A``.
+
+        Takes a vector or a matrix; whitening is applied down the observation
+        axis in both cases.
+        """
+        values = np.asarray(values, dtype=float)
+        if self._chol is None:
+            return values * (self.w[:, None] if values.ndim == 2 else self.w)
+
+        out = np.empty_like(values)
+        for name, factor in self._chol.items():
+            rows = self._track_rows[name]
+            out[rows] = solve_triangular(factor, values[rows], lower=True)
+        return out
 
     @property
     def n_param(self):
@@ -288,9 +352,9 @@ class SlipInversion:
         scaled_smooth = smooth * (float(smoothing) / n_smooth)
 
         design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
-        weighted = design * self.w[:, None]
+        weighted = self.whiten(design)
         rhs = np.concatenate([
-            self.d * self.w,
+            self.whiten(self.d),
             np.zeros(smooth.shape[0]),
             np.zeros(boundary.shape[0]),
         ])
@@ -498,6 +562,49 @@ class SlipModel:
     @property
     def rms_misfit(self):
         return float(np.sqrt(np.mean(self.residual ** 2)))
+
+    @property
+    def chi_square(self):
+        """``r' Cd^-1 r`` -- the misfit in the metric that was actually minimised.
+
+        ⚠️ :attr:`variance_reduction` and :attr:`rms_misfit` are computed on the
+        **unweighted** residual, so with a covariance model they report a
+        different quantity from the one the solver optimised. Both are still
+        worth having -- rms in millimetres is what a reader understands, and VR is
+        what every earlier run recorded -- but this is the one that says whether
+        the fit is consistent with the stated noise.
+
+        Returns ``None`` for a model whose inversion is gone (a loaded one), since
+        whitening needs the covariance factors and those are not saved.
+        """
+        inversion = self._inversion
+        if inversion is None or not hasattr(inversion, "whiten"):
+            return None
+        whitened = inversion.whiten(self.residual)
+        return float(whitened @ whitened)
+
+    @property
+    def reduced_chi_square(self):
+        """:attr:`chi_square` per observation. **1.0 means the fit matches the noise.**
+
+        Above 1 the model cannot explain the data to within its stated errors --
+        either the noise model is optimistic or the fault geometry is wrong. Below
+        1 the data is being over-fitted, or the noise was over-estimated.
+
+        Divided by the observation count rather than by a degree-of-freedom count,
+        deliberately. The nominal ``n_obs - n_param`` is meaningless here: this
+        problem routinely has more parameters than observations and the number
+        would go negative. The honest denominator is ``n_obs - trace(R)``, and
+        since a heavily damped inversion resolves only tens of parameters against
+        thousands of observations (38.7 of 1836 on the Venezuela run), ``n_obs``
+        is within a percent of it. Take ``trace(R)`` from
+        :func:`~nisar_tools.slip.resolution.resolution_report` when the percent
+        matters.
+        """
+        chi2 = self.chi_square
+        if chi2 is None:
+            return None
+        return chi2 / max(self.data.size, 1)
 
     @property
     def roughness(self):

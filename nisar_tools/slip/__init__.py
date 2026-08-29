@@ -49,6 +49,14 @@ Sign conventions, which matter more here than anywhere else in the package:
 """
 
 from .basis import ElementBasis, NodeBasis
+from .covariance import (
+    CovarianceModel,
+    empirical_variogram,
+    fit_covariance,
+    observation_covariance,
+    scene_covariance,
+    whitening_factors,
+)
 from .diagnostics import (
     cell_size_ladder,
     noise_floor,
@@ -77,6 +85,7 @@ from .resolution import (
     resolution_report,
     size_field,
     target_element_size,
+    weighted_design,
 )
 from .sampling import Observations
 from .surface import FaultSurface, gridfit
@@ -84,6 +93,7 @@ from .trace import FaultSegment, FaultTrace
 
 __all__ = [
     "ARCSEC_10",
+    "CovarianceModel",
     "EdgrnTables",
     "ElementBasis",
     "FaultMesh",
@@ -101,7 +111,10 @@ __all__ = [
     "VelocityModel",
     "adapt_layout",
     "cell_size_ladder",
+    "data_importance",
     "element_resolution",
+    "empirical_variogram",
+    "fit_covariance",
     "frame_lattice",
     "graded_layout",
     "gridfit",
@@ -109,22 +122,25 @@ __all__ = [
     "lloyd_layout",
     "model_rms_min",
     "noise_floor",
+    "observation_covariance",
     "predicted_los",
     "ramp_content",
     "ramp_leakage",
     "ramp_sweep",
     "resample_all",
     "resample_to_frame",
-    "data_importance",
     "resolution_diagonal",
     "resolution_gain",
-    "resolution_report",
-    "resolution_matrix",
     "resolution_kernels",
+    "resolution_matrix",
+    "resolution_report",
     "run_edgrn",
+    "scene_covariance",
     "scene_report",
     "size_field",
     "target_element_size",
     "triangulate",
+    "weighted_design",
+    "whitening_factors",
     "write_edgrn_input",
 ]

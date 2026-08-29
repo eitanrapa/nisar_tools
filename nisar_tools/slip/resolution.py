@@ -79,6 +79,21 @@ JITTER = 1e-10
 GAIN_SPACING = 5000.0
 
 
+def weighted_design(inversion):
+    """``Cd^-1/2 [G | ramp]`` -- the design matrix the solver actually sees.
+
+    Extracted because three functions here need it verbatim
+    (:func:`_normal_equations`, :func:`data_importance`,
+    :func:`resolution_report`) and because ``trace(R) == trace(N)`` holds **only
+    if all three whiten the same ``A``**. When the whitening changed and one site
+    was missed, that identity is what caught it -- so it is worth having exactly
+    one place the change can be made.
+    """
+    design = (np.hstack([inversion.g, inversion.ramp]) if inversion.n_ramp
+              else inversion.g)
+    return inversion.whiten(design)
+
+
 def _normal_equations(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
                       boundary_ratio=1.0, sides=("bottom", "left", "right"),
                       smooth_weighting="uniform"):
@@ -105,8 +120,7 @@ def _normal_equations(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
                              format="csr")
     smooth = smooth * (float(smoothing) / max(1, smooth.shape[0]))
 
-    design = np.hstack([inversion.g, inversion.ramp]) if n_ramp else inversion.g
-    weighted = design * inversion.w[:, None]
+    weighted = weighted_design(inversion)
 
     data = weighted.T @ weighted
     damping = (smooth.T @ smooth + boundary.T @ boundary).toarray()
@@ -317,9 +331,7 @@ def data_importance(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
 
     _, chol = _factorized(inversion, smoothing, ss_ratio, ds_ratio,
                           boundary_ratio, sides, smooth_weighting)
-    design = (np.hstack([inversion.g, inversion.ramp]) if inversion.n_ramp
-              else inversion.g)
-    weighted = design * inversion.w[:, None]
+    weighted = weighted_design(inversion)
     # diag(N)_i = ||L^-1 a_i||^2, so one triangular solve against A' rather than
     # forming N. Costs one (n_param, n_obs) array -- 165 MB at production size.
     factor, lower = chol
@@ -374,9 +386,7 @@ def resolution_report(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
     kernels = resolution_kernels(inversion, matrix)
 
     from scipy.linalg import solve_triangular
-    design = (np.hstack([inversion.g, inversion.ramp]) if inversion.n_ramp
-              else inversion.g)
-    weighted = design * inversion.w[:, None]
+    weighted = weighted_design(inversion)
     factor, lower = chol
     projected = solve_triangular(factor, weighted.T, lower=lower)
     importance = np.einsum("ij,ij->j", projected, projected)

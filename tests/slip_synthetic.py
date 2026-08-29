@@ -179,3 +179,54 @@ def _geom(name):
         raise ValueError(f"Unknown geometry {name!r}; expected one of {list(GEOMETRIES)}")
     g = GEOMETRIES[name]
     return {"incidence_deg": g["incidence"], "heading_deg": g["heading"]}
+
+
+def correlated_noise(shape, spacing, sill, range_m, nugget=0.0,
+                     kind="exponential", seed=0, pad=3):
+    """A Gaussian field with a **known** covariance, by circulant embedding.
+
+    The whole point of the covariance tests is that they must not verify the
+    estimator against itself. So the field is synthesised from the covariance
+    directly -- build ``C`` on the wrapped lag grid, take its DFT, filter white
+    noise by the square root, come back -- and the fit is then asked to return the
+    ``sill``/``range_m``/``nugget`` that went in.
+
+    ``pad`` embeds in a larger periodic grid so the wrap-around does not
+    contaminate the lags being tested; 3x is comfortable for an exponential, whose
+    correlation is under 5% past 3 ranges.
+
+    The correlated part and the nugget are generated separately, because that is
+    what they are: the nugget is white by definition, and a field built with the
+    nugget folded into ``C`` would embed a discontinuity at zero lag that the FFT
+    cannot represent.
+    """
+    ny, nx = int(shape[0]), int(shape[1])
+    py, px = int(pad * ny), int(pad * nx)
+    rng = np.random.default_rng(seed)
+
+    # Lag on a periodic grid: distance to the nearer of the two wrapped copies.
+    dy = np.minimum(np.arange(py), py - np.arange(py)) * float(spacing)
+    dx = np.minimum(np.arange(px), px - np.arange(px)) * float(spacing)
+    h = np.hypot(dy[:, None], dx[None, :])
+
+    if kind == "exponential":
+        cov = np.exp(-h / float(range_m))
+    elif kind == "gaussian":
+        cov = np.exp(-((h / float(range_m)) ** 2))
+    elif kind == "matern32":
+        root3 = np.sqrt(3.0) * h / float(range_m)
+        cov = (1.0 + root3) * np.exp(-root3)
+    else:
+        raise ValueError(f"unknown kind {kind!r}")
+    cov = float(sill) * cov
+
+    # `C` is real and symmetric, so its DFT is real; clip the small negative
+    # eigenvalues the embedding leaves rather than pretending they are not there.
+    spectrum = np.maximum(np.fft.fft2(cov).real, 0.0)
+    white = rng.standard_normal((py, px))
+    field = np.real(np.fft.ifft2(np.fft.fft2(white) * np.sqrt(spectrum)))
+    field = field[:ny, :nx]
+
+    if nugget:
+        field = field + np.sqrt(float(nugget)) * rng.standard_normal((ny, nx))
+    return field

@@ -138,6 +138,14 @@ def _blocks(los_stack, trace, frame, pair=0, block=2000.0):
 
     return {
         "std": std.ravel(),
+        # The block *value* and its position in the shared frame. `noise_floor`
+        # wants only the scatter, but a variogram is built from the values
+        # themselves and their separations, and both are already computed here --
+        # see `nisar_tools.slip.covariance.empirical_variogram`, which is the
+        # other caller.
+        "mean": mean.ravel(),
+        "x": fx,
+        "y": fy,
         "count": count.ravel(),
         "along": along,
         "distance": dist,
@@ -392,7 +400,7 @@ def scene_report(los_stack, trace, frame, mesh=None, pair=0, block=2000.0,
     return out
 
 
-def ramp_content(obs):
+def ramp_content(obs, covariance=None):
     """How much of the data each ramp degree explains, offset through cubic.
 
     The question this answers is whether ``ramp=`` is absorbing signal rather than
@@ -428,13 +436,38 @@ def ramp_content(obs):
 
     ds = obs.ds
     d = np.asarray(ds["los"].values, dtype=float)
-    w = np.asarray(ds["weight"].values, dtype=float)
     denom = float(d @ d)
+
+    # `covariance` is optional because this is a *pre-inversion* diagnostic --
+    # it is normally run to choose `ramp=` before any noise model is fitted, and
+    # then the diagonal weights are all there is. Pass one once it exists: a ramp
+    # is a long-wavelength shape and correlated noise is the thing most likely to
+    # be mistaken for it, so the two answers can differ materially.
+    if covariance is None:
+        w = np.asarray(ds["weight"].values, dtype=float)
+
+        def whiten(m):
+            return m * (w[:, None] if m.ndim == 2 else w)
+    else:
+        from .covariance import whitening_factors
+        from scipy.linalg import solve_triangular
+
+        track = np.asarray(ds["track"].values, dtype=object)
+        factors = whitening_factors(obs, covariance)
+        rows = {name: np.flatnonzero(track == name) for name in factors}
+
+        def whiten(m):
+            out_m = np.empty_like(np.asarray(m, dtype=float))
+            for name, factor in factors.items():
+                at = rows[name]
+                out_m[at] = solve_triangular(factor, np.asarray(m, float)[at],
+                                             lower=True)
+            return out_m
 
     out = {}
     for kind in ("offset", "linear", "quadratic", "cubic"):
         columns, labels = ramp_columns(obs, kind)
-        coef, *_ = np.linalg.lstsq(columns * w[:, None], d * w, rcond=None)
+        coef, *_ = np.linalg.lstsq(whiten(columns), whiten(d), rcond=None)
         residual = d - columns @ coef
         out[kind] = {
             "variance_reduction": 100.0 * (1.0 - float(residual @ residual) / denom) if denom else 0.0,
@@ -501,8 +534,10 @@ def ramp_leakage(inversion, slip=None, kinds=("offset", "linear", "quadratic", "
     else:
         parameters = np.asarray(slip, dtype=float).ravel()[:2 * n]
 
-    weight = inversion.w
-    predicted = (inversion.g[:, :2 * n] @ parameters) * weight
+    # Whitened, not merely weighted: leakage is "how much of this slip pattern
+    # can the ramp columns absorb", and that projection has to be taken in the
+    # metric the solver works in, or the answer describes a fit nobody performs.
+    predicted = inversion.whiten(inversion.g[:, :2 * n] @ parameters)
     norm = float(np.linalg.norm(predicted))
     if norm == 0:
         raise ValueError("the slip pattern predicts no displacement to leak")
@@ -511,7 +546,7 @@ def ramp_leakage(inversion, slip=None, kinds=("offset", "linear", "quadratic", "
     out = {}
     for kind in kinds:
         columns, _ = ramp_columns(inversion.obs, kind)
-        design = columns * weight[:, None]
+        design = inversion.whiten(columns)
         coefficients, *_ = np.linalg.lstsq(design, predicted, rcond=None)
         fitted = design @ coefficients
         per_track = {}
