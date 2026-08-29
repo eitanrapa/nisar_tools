@@ -47,6 +47,34 @@ the resolution and data-importance numbers describe the system that was actually
 solved, and it states the noise instead of assuming it away. Reach for it when
 the question is *how well is this constrained*, not *what is the best slip model*.
 
+**What it does change, measured on the real six-scene problem: which scenes the
+evidence comes from.** At matched total effective rank (~30 of 1836 parameters),
+the per-scene share of ``diag(N)`` shifts, and it shifts **monotonically with each
+scene's own sill**:
+
+.. code-block:: text
+
+    scene   sill      share vs white weighting
+    D135    13.4 mm   1.35x
+    D134    16.3 mm   1.31x
+    A061    18.1 mm   0.82x
+    A162    20.7 mm   0.82x
+    D126    27.3 mm   0.74x
+    D054    40.9 mm   0.73x
+
+Quiet scenes gain, noisy scenes lose, in exact rank order, and the spread across
+scenes widens from 1.43x to 2.02x. Under the old weighting a track's influence
+came from its sample count alone, so a noisy scene and a quiet one counted the
+same per sample; this is that error being corrected. Note the split falls cleanly
+along the two processing chains -- the two ALOS scenes are the quiet ones.
+
+⚠️ **Do not compare *total* effective data between the two weightings as if it
+measured something.** ``trace(R) == trace(N)`` is an identity this module
+enforces, so ``effective data == effective rank + n_ramp`` exactly, and matching
+on rank forces the totals to agree at 1.000 whatever ``Cd`` does. Only the
+*distribution* is free to move. (Recorded because the first attempt at this
+measurement was that tautology.)
+
 ⚠️ **Existing smoothing weights do not transfer.** The old diagonal weights were
 ``1/sqrt(n)``, order 0.02; whitening divides by sigma instead, so the data block
 grows by ~30x relative to the smoothing block and the same nominal ``lambda``
