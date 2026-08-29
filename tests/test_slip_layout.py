@@ -269,3 +269,59 @@ def test_lloyd_places_small_elements_where_the_size_field_is_small(trace, frame)
     assert deep > 1.5 * shallow, f"shallow {shallow:.0f} m vs deep {deep:.0f} m"
     for side in L.EDGE_SIDES:
         assert int(L.boundary_node_mask(layout.params, side).sum()) >= 2
+
+
+def test_the_relaxation_honours_the_size_field_it_was_given():
+    """A plain area-weighted centroid is the CVT iteration for a *uniform*
+    density, so it relaxes toward equal element sizes and flattens the grading
+    the rejection sampling just put in. Weighting by ``1/h**2`` is what makes the
+    achieved size track ``h``; without it the shallow-to-deep size ratio came
+    back at 2.16 against a wanted 2.85.
+    """
+    h = lambda s, d: 1e3 + 0.15 * d          # noqa: E731 -- 1 km to 4 km down dip
+    layout = L.lloyd_layout(60e3, 20e3, h, iterations=25)
+    params, triangles = layout.params, layout.triangles
+    centre = params[triangles].mean(axis=1)
+    size = np.sqrt(np.abs(L.signed_areas(params, triangles)))
+    depth = -centre[:, 1]
+
+    shallow = np.median(size[depth < 4e3])
+    deep = np.median(size[depth > 16e3])
+    wanted = h(0.0, 18e3) / h(0.0, 2e3)
+    assert abs((deep / shallow) / wanted - 1) < 0.15, (
+        f"size ratio {deep / shallow:.2f} against a target ratio of {wanted:.2f}"
+    )
+
+
+def test_the_relaxation_is_what_makes_the_cloud_usable():
+    """The rejection-sampled cloud on its own is full of slivers -- 0.4 degrees
+    measured -- so the iteration count is not a tuning nicety."""
+    h = lambda s, d: 2e3 + 0.2 * d           # noqa: E731
+    raw = L.lloyd_layout(60e3, 20e3, h, iterations=0)
+    relaxed = L.lloyd_layout(60e3, 20e3, h, iterations=25)
+    assert raw.quality()["min_angle_deg"] < 5.0
+    assert relaxed.quality()["min_angle_deg"] > 15.0
+
+
+def test_the_layout_is_reproducible():
+    """``FaultMesh.digest()`` hashes the node coordinates, so a layout that moved
+    between runs would stale every persisted store for no reason."""
+    h = lambda s, d: 2e3 + 0.2 * d           # noqa: E731
+    a = L.lloyd_layout(60e3, 20e3, h, iterations=10)
+    b = L.lloyd_layout(60e3, 20e3, h, iterations=10)
+    np.testing.assert_array_equal(a.params, b.params)
+    np.testing.assert_array_equal(a.triangles, b.triangles)
+
+
+def test_an_unstructured_layout_keeps_a_rectangular_outline():
+    """Freeform means the discretisation, not the fault's extent: the four edges
+    stay straight because ``boundary_node_mask`` finds them by exact equality and
+    the zero-slip constraint depends on that."""
+    layout = L.lloyd_layout(60e3, 20e3, lambda s, d: 2e3 + 0.2 * d, iterations=15)
+    s, z = layout.params[:, 0], layout.params[:, 1]
+    for side, expected in (("left", 0.0), ("right", 60e3),
+                           ("top", 0.0), ("bottom", -20e3)):
+        mask = L.boundary_node_mask(layout.params, side)
+        assert mask.sum() >= 2
+        got = (s if side in ("left", "right") else z)[mask]
+        np.testing.assert_array_equal(got, np.full(mask.sum(), expected))

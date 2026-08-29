@@ -327,6 +327,31 @@ def _ramp_term_label(degree, i):
     return "d" + "x" * (degree - i) + "y" * i
 
 
+def ramp_kind_for(n_columns, n_tracks):
+    """Which :func:`ramp_columns` kind produced ``n_columns`` over ``n_tracks``.
+
+    The inverse of the column count, for reading a saved model whose options
+    predate the ``ramp`` key. The map is one-to-one -- 1, 3, 6, 10 columns per
+    track -- so nothing is guessed; a count that matches no degree raises rather
+    than silently rebuilding the wrong design.
+    """
+    if n_columns == 0:
+        return "none"
+    if n_tracks <= 0 or n_columns % n_tracks:
+        raise ValueError(
+            f"{n_columns} ramp coefficients do not divide evenly among "
+            f"{n_tracks} tracks, so the ramp degree cannot be recovered."
+        )
+    per_track = n_columns // n_tracks
+    for kind, degree in RAMP_DEGREE.items():
+        if (degree + 1) * (degree + 2) // 2 == per_track:
+            return kind
+    raise ValueError(
+        f"{per_track} ramp coefficients per track match no ramp degree "
+        f"(expected one of 1, 3, 6, 10)."
+    )
+
+
 def ramp_columns(obs, kind="linear"):
     """Extra unbounded columns absorbing a per-track offset or ramp.
 

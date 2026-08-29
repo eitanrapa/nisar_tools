@@ -147,7 +147,10 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
     keyword arguments for :meth:`~nisar_tools.slip.mesh.FaultMesh.from_layout`
     naming what the fault *is* (``bottom_trace=``, ``uniform_dip=``, ...), since a
     layout says only where the nodes go. Everything else in the dict is passed to
-    ``target_element_size``, plus ``rounds`` to stop adapting after N rounds and
+    ``target_element_size``, ``structure`` (``"rows"``, the default, or
+    ``"unstructured"`` for a layout with no depth levels at all -- see
+    :func:`~nisar_tools.slip.resolution.adapt_layout`), plus ``rounds`` to stop
+    adapting after N rounds and
     ``smoothing`` to evaluate resolution at a weight other than ``solve_kwargs``'.
 
     ``sampling_field`` chooses what the quadtree splits on: ``"model"`` (the
@@ -294,6 +297,19 @@ def _adapt_spec(mesh_adapt, max_rounds):
     # stop on `max_rounds`.
     spec.setdefault("rounds", max(1, int(max_rounds) - 1))
     spec.setdefault("smoothing", None)
+    # Checked here rather than at the first re-mesh: that happens after round
+    # zero's sampling and solve, which on a real run is minutes in, and a typo
+    # in an environment variable should not cost that.
+    if spec.get("size_from", "diagonal") not in ("diagonal", "kernel"):
+        raise ValueError(
+            f"mesh_adapt['size_from'] must be 'diagonal' or 'kernel', got "
+            f"{spec['size_from']!r}"
+        )
+    if spec.get("structure", "rows") not in ("rows", "unstructured"):
+        raise ValueError(
+            f"mesh_adapt['structure'] must be 'rows' or 'unstructured', got "
+            f"{spec['structure']!r}"
+        )
     return spec
 
 
@@ -345,16 +361,34 @@ def _split_field(model, inversion, stack, frame, spacing, sampling_field, adapt,
 def _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs):
     """Re-size the elements from model resolution and rebuild on the new layout."""
     from .mesh import FaultMesh
-    from .resolution import adapt_layout, element_resolution, target_element_size
+    from .resolution import (adapt_layout, element_resolution,
+                             kernel_element_size, target_element_size)
 
-    resolution = _resolution_of(inversion, adapt, solve_kwargs)
-    sizes = target_element_size(
-        mesh, element_resolution(inversion, resolution),
+    if adapt.get("size_from", "diagonal") == "kernel":
+        # The averaging-kernel width: a lambda-stable length that never
+        # degenerates, unlike (target / r) on the diagonal. See
+        # `kernel_element_size` for the measurement behind that choice.
+        smoothing = adapt.get("smoothing")
+        if smoothing is None:
+            smoothing = solve_kwargs.get("smoothing", 1.0)
+        sizes = kernel_element_size(
+            inversion, smoothing,
+            **{k: v for k, v in adapt.items()
+               if k in ("fraction", "reduce", "size_min", "size_max")}
+        )
+    else:
+        resolution = _resolution_of(inversion, adapt, solve_kwargs)
+        sizes = target_element_size(
+            mesh, element_resolution(inversion, resolution),
+            **{k: v for k, v in adapt.items()
+               if k in ("target", "gain", "max_ratio", "size_min", "size_max")}
+        )
+    layout = adapt_layout(
+        mesh, sizes, budget=adapt.get("budget", "conserve"),
+        balance=adapt.get("balance", MAX_COUNT_RATIO),
         **{k: v for k, v in adapt.items()
-           if k in ("target", "gain", "max_ratio", "size_min", "size_max")}
+           if k in ("structure", "iterations", "seed")},
     )
-    layout = adapt_layout(mesh, sizes, budget=adapt.get("budget", "conserve"),
-                          balance=adapt.get("balance", MAX_COUNT_RATIO))
     return FaultMesh.from_layout(layout, trace, frame, **adapt["geometry"])
 
 

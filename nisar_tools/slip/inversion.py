@@ -39,6 +39,7 @@ from .regularize import (
     laplace_beltrami,
     neighbor_smoothing,
     ramp_columns,
+    ramp_kind_for,
     slip_bounds,
     zero_slip_boundary,  # noqa: F401  (public API, and used by callers)
 )
@@ -217,6 +218,7 @@ class SlipInversion:
                       else element_g @ _blocked(self.basis.projection()))
 
         self.ramp, self.ramp_labels = ramp_columns(obs, ramp)
+        self.ramp_kind = str(ramp)
         self.n_slip = self.basis.n_param
         self.n_ramp = self.ramp.shape[1]
 
@@ -238,6 +240,7 @@ class SlipInversion:
 
         other = copy.copy(self)
         other.ramp, other.ramp_labels = ramp_columns(self.obs, kind)
+        other.ramp_kind = str(kind)
         other.n_ramp = other.ramp.shape[1]
         return other
 
@@ -310,6 +313,9 @@ class SlipInversion:
                 "strike": list(strike), "dip": list(dip), "max_iter": int(max_iter),
                 "lsmr_tol": lsmr_tol,
                 "smooth_weighting": str(smooth_weighting),
+                # Carried so a reloaded model can rebuild the ramp columns and
+                # separate the nuisance surface from the fault's own prediction.
+                "ramp": getattr(self, "ramp_kind", "none"),
                 # Carried so a saved model keeps its own rigidity; without it a
                 # reloaded layered model would report a 30 GPa moment.
                 "velocity_model": (None if self.velocity_model is None
@@ -452,6 +458,7 @@ class SlipModel:
         #: residual is displacement the model failed to account for, and the
         #: residual map reads in the same sense as the data map beside it.
         self.residual = self.data - self.prediction
+        self._ramp_design = inversion.ramp
 
     # -- fit ---------------------------------------------------------------
     @property
@@ -559,6 +566,49 @@ class SlipModel:
     def track_residual(self, name):
         """One track's residual, observed minus modelled."""
         return self.residual[self.obs.track_mask(name)]
+
+    @property
+    def ramp_design(self):
+        """The nuisance ramp's design columns, ``(n_obs, n_ramp)``.
+
+        Rebuilt from the observations when the model came from :meth:`load` --
+        ``ramp_columns`` is a pure function of ``obs`` and the ramp kind, the
+        same reasoning that lets ``roughness`` recover its smoothing operator
+        without storing a sparse matrix.
+        """
+        if self._ramp_design is None:
+            kind = self.options.get("ramp")
+            if kind is None:
+                # Written before the options carried the kind; the column count
+                # per track identifies it exactly.
+                kind = ramp_kind_for(self.ramp.size, len(self.obs.tracks))
+            self._ramp_design = ramp_columns(self.obs, kind)[0]
+        return self._ramp_design
+
+    @property
+    def ramp_prediction(self):
+        """The nuisance surface alone, per observation -- zeros without a ramp.
+
+        What the unbounded per-track columns absorbed: an unwrapped
+        interferogram's arbitrary constant plus whatever orbital or ionospheric
+        trend sits on top. It is *not* part of the fault's prediction, and
+        looking at the two together is how a ramp that has drifted into eating
+        the earthquake gets caught -- variance reduction cannot see it (see
+        :func:`~nisar_tools.slip.regularize.ramp_columns`).
+        """
+        if self.ramp.size == 0:
+            return np.zeros_like(self.data)
+        return self.ramp_design @ self.ramp
+
+    @property
+    def fault_prediction(self):
+        """The model with its ramp removed: displacement the *slip* explains.
+
+        This is the panel to compare against ``data - ramp_prediction``; the
+        full :attr:`prediction` flatters the fit by however much the nuisance
+        columns are carrying.
+        """
+        return self.prediction - self.ramp_prediction
 
     # -- forward -----------------------------------------------------------
     @property
@@ -712,6 +762,7 @@ class SlipModel:
             "dip": ("element", self.mesh.dip),
             "data": ("obs", self.data),
             "prediction": ("obs", self.prediction),
+            "ramp_prediction": ("obs", self.ramp_prediction),
             "residual": ("obs", self.residual),
         }
         if lon is not None:
@@ -1045,6 +1096,10 @@ class SlipModel:
             engine=engine, basis=self.basis,
             g=None, ramp=None, n_ramp=n_ramp, ramp_labels=self.ramp_labels,
         )
+        # Rebuilt on demand from obs + the ramp kind, like the smoothing
+        # operator above -- G is deliberately not saved, but the ramp columns
+        # cost nothing to regenerate and the nuisance surface is worth seeing.
+        self._ramp_design = None
         return self
 
     def __repr__(self):

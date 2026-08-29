@@ -269,3 +269,120 @@ def test_quadrature_order_refuses_an_engine_without_one(solved):
     trace, mesh, obs, _, _ = solved
     with pytest.raises(TypeError, match="no quadrature"):
         slip_plot.plot_quadrature_order(HalfSpaceTDE(), mesh, obs)
+
+
+# -- the ramp, shown separately from the model it is bundled into -------------
+
+@pytest.fixture(scope="module")
+def solved_with_ramp():
+    """The same problem solved with per-track linear nuisance columns.
+
+    A real run almost always has them -- an unwrapped interferogram carries an
+    arbitrary constant and usually a trend on top -- so this, not `solved`, is
+    the layout `plot_fit` draws in practice.
+    """
+    trace = FaultTrace(_LON, _LAT, name="test_fault")
+    frame = trace.local_frame()
+    mesh = FaultMesh.vertical(trace, frame, max_depth=18e3, edge_length=9e3)
+    truth = tapered_slip(mesh, peak=-2.0)
+    obs = Observations.concat([
+        Observations.from_los(
+            forward_los_stack(mesh, truth, trace, frame, geometry=g, spacing=9000.0),
+            name=g, frame=frame, trace=trace,
+            rms_min=0.01, width_min=9000.0, width_max=40000.0, exclude_within=6000.0,
+        )
+        for g in ("asc", "desc")
+    ])
+    inversion = SlipInversion(mesh, obs, ramp="linear")
+    return trace, obs, inversion.solve(smoothing=0.5, polarity=(-1, 0, 0))
+
+
+def test_ramp_prediction_and_fault_prediction_split_the_model(solved_with_ramp):
+    """The two halves have to add back up to what the solver actually predicted,
+    or the extra panels would be drawing a different model than the top row."""
+    _, obs, model = solved_with_ramp
+    assert model.ramp.size == 3 * len(obs.tracks)      # offset + two gradients
+    np.testing.assert_allclose(
+        model.ramp_prediction + model.fault_prediction, model.prediction,
+        atol=1e-12,
+    )
+    # The ramp is a nuisance surface, not a copy of the fit.
+    assert np.abs(model.ramp_prediction).max() > 0.0
+
+
+def test_ramp_prediction_is_zero_without_ramp_columns(solved):
+    *_, model = solved
+    np.testing.assert_array_equal(model.ramp_prediction,
+                                  np.zeros_like(model.data))
+    np.testing.assert_allclose(model.fault_prediction, model.prediction)
+
+
+def test_plot_fit_adds_a_ramp_row_when_there_is_a_ramp(solved_with_ramp):
+    trace, obs, model = solved_with_ramp
+    fig, axes = slip_plot.plot_fit(model, track=obs.tracks[0], trace=trace)
+    assert axes.shape == (2, 3)
+    titles = [ax.get_title() for ax in axes.ravel()]
+    assert titles[:3] == ["Data", "Model", "Residual"]
+    assert titles[3] == "Ramp"
+    assert "ramp" in titles[4] and "slip only" in titles[5]
+
+    n_track = int(obs.track_mask(obs.tracks[0]).sum())
+    for ax in axes.ravel():
+        assert ax.collections[0].get_offsets().shape[0] == n_track
+
+    # The ramp shares the data's scale, so its size can be read off directly;
+    # the two deramped panels share their own.
+    assert axes[0, 0].collections[0].get_clim() == axes[1, 0].collections[0].get_clim()
+    assert axes[1, 1].collections[0].get_clim() == axes[1, 2].collections[0].get_clim()
+    assert "ramp spans" in fig._suptitle.get_text()
+    matplotlib.pyplot.close(fig)
+
+
+def test_plot_fit_keeps_the_three_panel_form_on_request(solved_with_ramp):
+    trace, obs, model = solved_with_ramp
+    fig, axes = slip_plot.plot_fit(model, track=obs.tracks[0], ramp=False)
+    assert len(axes) == 3
+    matplotlib.pyplot.close(fig)
+
+
+def test_a_reloaded_model_still_separates_its_ramp(solved_with_ramp, tmp_path):
+    """The Green's matrix is not saved, but the ramp columns are a pure function
+    of the observations -- so the split survives a round trip."""
+    from nisar_tools.slip import SlipModel
+
+    _, _, model = solved_with_ramp
+    path = model.save(tmp_path / "model.slip.zip")
+    back = SlipModel.load(path)
+    np.testing.assert_allclose(back.ramp_prediction, model.ramp_prediction,
+                               atol=1e-9)
+    np.testing.assert_allclose(back.fault_prediction, model.fault_prediction,
+                               atol=1e-9)
+
+
+def test_an_old_model_without_the_recorded_ramp_kind_still_splits(solved_with_ramp):
+    """Models saved before the options carried ``ramp`` are read back by
+    counting columns per track, which is one-to-one with the degree."""
+    from nisar_tools.slip.regularize import ramp_kind_for
+
+    _, obs, model = solved_with_ramp
+    assert ramp_kind_for(model.ramp.size, len(obs.tracks)) == "linear"
+    assert ramp_kind_for(0, len(obs.tracks)) == "none"
+    with pytest.raises(ValueError, match="match no ramp degree"):
+        ramp_kind_for(4 * len(obs.tracks), len(obs.tracks))
+
+
+def test_plot_slip_can_draw_the_resolving_length(solved):
+    """A slip map drawn at element scale shows more detail than the data
+    supports and nothing in the picture says so; ``kernels=`` is what says it."""
+    from nisar_tools.slip import resolution as R
+
+    _, _, obs, inversion, model = solved
+    report = R.resolution_report(inversion, 0.5)
+    fig, ax = slip_plot.plot_slip(model, kernels=report)
+    assert "resolving length" in ax.get_title()
+    # the bar itself, one kernel width long
+    (line,) = [ln for ln in ax.lines if ln.get_linewidth() == 3]
+    span = np.ptp(line.get_xdata()) * 1e3
+    assert span == pytest.approx(
+        float(np.median(report["width_along"].values)), rel=1e-6)
+    matplotlib.pyplot.close(fig)

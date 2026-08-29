@@ -299,6 +299,28 @@ def test_the_two_way_loop_remeshes_and_still_recovers_the_slip(setup):
     assert model.mesh.n_elements == counts[-1]
 
 
+def test_the_loop_runs_on_an_unstructured_mesh(setup):
+    """``structure="unstructured"`` reaches the loop and the result stays sane.
+
+    The mesh it builds has no depth levels at all, so this also checks that
+    everything downstream of the layout -- the basis, the boundary constraint,
+    the probe-lattice convergence test -- is indifferent to losing the rows.
+    """
+    trace, frame, mesh, truth, scenes = setup
+    _, model, history = iterate_sampling(
+        scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+        max_rounds=3, spacing=4000.0, solve_kwargs={"smoothing": 0.3}, verbose=False,
+        mesh_adapt={"geometry": {"uniform_dip": 90.0, "edge_length": 6e3},
+                    "structure": "unstructured"},
+    )
+    assert model.mesh.attrs["layout"] == "adapted_unstructured"
+    counts = [h["n_elements"] for h in history]
+    for count in counts[1:]:
+        assert 0.6 * mesh.n_elements <= count <= 1.7 * mesh.n_elements, counts
+    assert model.variance_reduction > 80.0
+    assert np.abs(model.element_slip).max() > 0.5, "not a degenerate model"
+
+
 def test_a_remesh_switches_the_convergence_test_to_the_probe_lattice(setup):
     """``max |element_slip - previous|`` cannot survive a change of mesh.
 
@@ -495,3 +517,39 @@ def test_a_degenerate_model_warns_instead_of_quietly_converging(setup):
     assert np.abs(model.element_slip).max() < 1e-3
     # The trap: it still reports as converged, which is why the warning exists.
     assert history[-1]["converged"]
+
+
+def test_an_unknown_mesh_structure_is_refused_before_the_first_solve(setup):
+    """A typo in NISAR_ADAPT_STRUCTURE should not cost a round of sampling and
+    solving before it surfaces."""
+    trace, frame, mesh, truth, scenes = setup
+    with pytest.raises(ValueError, match="must be 'rows' or 'unstructured'"):
+        iterate_sampling(
+            scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+            max_rounds=2, verbose=False,
+            mesh_adapt={"geometry": {"uniform_dip": 90.0}, "structure": "quadtree"},
+        )
+
+
+def test_the_loop_can_size_the_mesh_from_the_kernel_width(setup):
+    """``size_from="kernel"`` reaches the re-mesh and produces a usable mesh."""
+    trace, frame, mesh, truth, scenes = setup
+    _, model, history = iterate_sampling(
+        scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+        max_rounds=2, spacing=4000.0, solve_kwargs={"smoothing": 0.3}, verbose=False,
+        mesh_adapt={"geometry": {"uniform_dip": 90.0, "edge_length": 6e3},
+                    "structure": "unstructured", "size_from": "kernel"},
+    )
+    assert model.mesh.n_elements > 0
+    assert model.variance_reduction > 50.0
+    assert np.abs(model.element_slip).max() > 0.0
+
+
+def test_an_unknown_size_source_is_refused_before_the_first_solve(setup):
+    trace, frame, mesh, truth, scenes = setup
+    with pytest.raises(ValueError, match="must be 'diagonal' or 'kernel'"):
+        iterate_sampling(
+            scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+            max_rounds=2, verbose=False,
+            mesh_adapt={"geometry": {"uniform_dip": 90.0}, "size_from": "resolution"},
+        )

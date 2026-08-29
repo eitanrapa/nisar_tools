@@ -53,12 +53,20 @@ def _slip_title(model, component):
 
 
 def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
-              vmin=None, vmax=None, title=None):
+              vmin=None, vmax=None, title=None, kernels=None):
     """Slip on the unrolled fault: along-strike distance against depth.
 
     ``component`` is ``"magnitude"``, ``"strike"`` or ``"dip"``. Elements are
     drawn as true triangles, so the mesh itself is visible and a bad element
     cannot hide behind interpolation.
+
+    ``kernels`` takes a :func:`~nisar_tools.slip.resolution.resolution_report`
+    and draws the **resolving length** as a bar on the panel, with the median
+    along-strike kernel width in the title. Worth doing whenever the figure will
+    be read for structure: on the real six-scene data the elements are 2.4 km and
+    the along-strike kernel is 26-41 km, so a slip map drawn at element scale
+    shows roughly ten times more detail than the data supports, and nothing in
+    the picture itself says so.
 
     Slip is drawn **per element** whatever the model's basis. For a nodal model
     that means each triangle is shaded by the mean of its three nodes, which
@@ -86,7 +94,20 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     ax.set_xlabel("Distance along strike (km)")
     ax.set_ylabel("Depth (km)")
     ax.set_aspect("equal")
-    ax.set_title(_slip_title(model, component) if title is None else title)
+
+    heading = _slip_title(model, component) if title is None else title
+    if kernels is not None:
+        width = float(np.median(np.asarray(kernels["width_along"].values)))
+        heading += f"\nresolving length {width / 1e3:.0f} km along strike"
+        # Drawn at the top-left, one kernel width long: anything narrower than
+        # the bar is the regularizer's shape, not the data's.
+        x0 = mesh.params[:, 0].min() / 1e3 + 0.02 * np.ptp(mesh.params[:, 0]) / 1e3
+        y0 = 0.12 * mesh.params[:, 1].min() / 1e3
+        ax.plot([x0, x0 + width / 1e3], [y0, y0], "-", color="0.15", lw=3,
+                solid_capstyle="butt", zorder=5)
+        ax.annotate("resolving length", (x0, y0), textcoords="offset points",
+                    xytext=(0, 5), fontsize=8, color="0.15", zorder=5)
+    ax.set_title(heading)
     plt.colorbar(coll, ax=ax, label="Slip (m)", pad=0.02)
     return ax.figure, ax
 
@@ -240,8 +261,8 @@ def plot_mesh(mesh, trace=None, color="area", axes=None, cmap="viridis",
     return sec_ax.figure, axes
 
 
-def plot_fit(model, track=None, cmap="RdBu_r", trace=None):
-    """Data, model and residual for one track, as three map panels.
+def plot_fit(model, track=None, cmap="RdBu_r", trace=None, ramp=True):
+    """Data, model and residual for one track, as map panels.
 
     Sharing one colour scale between data and model is the point -- an
     independently scaled model panel can make a poor fit look convincing. The
@@ -250,6 +271,18 @@ def plot_fit(model, track=None, cmap="RdBu_r", trace=None):
     The residual is **observed minus modelled**, so it reads in the same sense as
     the data panel beside it: red where there is more displacement than the model
     accounts for, not less.
+
+    **When the inversion solved a nuisance ramp, the figure gains a second row**
+    (``ramp=False`` keeps the three-panel form): the ramp on its own, the data
+    with that ramp taken out, and the fault's own prediction. The top row shows
+    the fit; the bottom row shows *what was fitted with*. That separation is the
+    only way to see the failure mode :func:`~nisar_tools.slip.regularize.ramp_columns`
+    warns about -- unbounded ramp columns drifting into the coseismic signal --
+    because it leaves variance reduction untouched while the slip model quietly
+    goes wrong. The ramp panel deliberately shares the **data** panel's colour
+    scale, so how much of the data the ramp is carrying can be read off directly;
+    the deramped pair share their own, since between them that is the comparison
+    that matters.
     """
     import matplotlib.pyplot as plt
 
@@ -269,18 +302,35 @@ def plot_fit(model, track=None, cmap="RdBu_r", trace=None):
         )
     x = obs.ds["x"].values[sel] / 1e3
     y = obs.ds["y"].values[sel] / 1e3
+
+    data = model.data[sel]
+    prediction = model.prediction[sel]
+    residual = model.residual[sel]
+    ramp_surface = model.ramp_prediction[sel]
+    show_ramp = bool(ramp) and model.ramp.size > 0
+
+    limit = np.abs(np.concatenate([data, prediction])).max() or 1.0
+    res_limit = np.abs(residual).max() or 1.0
     panels = [
-        ("Data", model.data[sel]),
-        ("Model", model.prediction[sel]),
-        ("Residual", model.residual[sel]),
+        ("Data", data, limit),
+        ("Model", prediction, limit),
+        ("Residual", residual, res_limit),
     ]
+    if show_ramp:
+        deramped_data = data - ramp_surface
+        fault = prediction - ramp_surface
+        # One scale for the two deramped panels: they are the comparison.
+        flat = np.abs(np.concatenate([deramped_data, fault])).max() or 1.0
+        panels += [
+            ("Ramp", ramp_surface, limit),
+            ("Data - ramp", deramped_data, flat),
+            ("Model - ramp (slip only)", fault, flat),
+        ]
 
-    limit = np.abs(np.concatenate([panels[0][1], panels[1][1]])).max() or 1.0
-    res_limit = np.abs(panels[2][1]).max() or 1.0
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.4), sharex=True, sharey=True)
-    for ax, (name, value) in zip(axes, panels):
-        span = res_limit if name == "Residual" else limit
+    rows = 2 if show_ramp else 1
+    fig, axes = plt.subplots(rows, 3, figsize=(15, 4.4 * rows),
+                             sharex=True, sharey=True, squeeze=False)
+    for ax, (name, value, span) in zip(axes.ravel(), panels):
         sc = ax.scatter(x, y, c=value, s=9, cmap=cmap, vmin=-span, vmax=span)
         if trace is not None:
             tx, ty = trace.to_local(obs.frame)
@@ -289,10 +339,19 @@ def plot_fit(model, track=None, cmap="RdBu_r", trace=None):
         ax.set_xlabel("East (km)")
         ax.set_title(name)
         plt.colorbar(sc, ax=ax, label="LOS (m)", pad=0.02)
-    axes[0].set_ylabel("North (km)")
-    fig.suptitle(f"{track}: RMS residual {np.sqrt(np.mean(panels[2][1] ** 2)):.4f} m")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("North (km)")
+
+    title = f"{track}: RMS residual {np.sqrt(np.mean(residual ** 2)):.4f} m"
+    if show_ramp:
+        # How much of the data the nuisance columns are carrying, in the units
+        # the panels are drawn in -- the number to weigh against peak slip when
+        # deciding whether the ramp degree is too generous.
+        title += (f" | ramp spans {np.ptp(ramp_surface):.3f} m of "
+                  f"{np.ptp(data):.3f} m")
+    fig.suptitle(title)
     fig.tight_layout()
-    return fig, axes
+    return fig, (axes if show_ramp else axes[0])
 
 
 def plot_samples(obs, trace=None, ax=None, cmap="RdBu_r"):

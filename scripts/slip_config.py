@@ -413,6 +413,16 @@ ADAPT = dict(
     budget=os.environ.get("NISAR_ADAPT_BUDGET", "conserve"),
     gain=float(os.environ.get("NISAR_ADAPT_GAIN", 0.5)),
     max_ratio=float(os.environ.get("NISAR_ADAPT_MAX_RATIO", 3.0)),
+    # "rows" keeps depth levels (one depth for the whole fault, node count and
+    # positions free per level); "unstructured" drops them, so element size can
+    # follow resolution along strike as well as down dip. Reach for the second
+    # when coverage is uneven ALONG the fault -- which is the Venezuela case, the
+    # north block being absent along the eastern two thirds. Measured on exactly
+    # that shape of problem (samples over the western half only): the target size
+    # field then varies 2.6x along strike, and the unstructured layout follows it
+    # to 10.4% against the row layout's 15.3%, with a 19.1 degree minimum angle
+    # against 9.0.
+    structure=os.environ.get("NISAR_ADAPT_STRUCTURE", "rows"),
 )
 
 #: What the quadtree splits on. ``"model"`` is Wang & Fialko's predicted
@@ -571,8 +581,12 @@ def mesh_summary(mesh):
     out = {"kind": mesh.attrs.get("kind", "vertical"),
            "n_elements": int(mesh.n_elements),
            "n_nodes": int(mesh.n_nodes),
-           "n_down": int(mesh.attrs.get("n_down", 0)),
            "layout": mesh.attrs.get("layout", "uniform")}
+    # An unstructured layout has no depth levels, so reporting `n_down: 0` would
+    # read as a missing number rather than as "the concept does not apply".
+    # `element_size_m` below is the shape summary that means something for one.
+    if "n_down" in mesh.attrs:
+        out["n_down"] = int(mesh.attrs["n_down"])
     if "nodes_per_level" in mesh.attrs:
         out["nodes_per_level"] = [int(v) for v in mesh.attrs["nodes_per_level"]]
     # Read off the *mesh*, with the config only as a fallback: an adaptive run

@@ -766,6 +766,21 @@ from the coarse round-0 sampling, as the L-curve's do.
   and its moment is stable to 0.3%. A high leakage is a reason to run the sweep, not
   a verdict on its own.
 
+**`plot_fit` draws the ramp on its own, beside the model without it.** When the
+inversion solved nuisance columns the figure has two rows: `Data | Model |
+Residual` on top, and `Ramp | Data − ramp | Model − ramp (slip only)` below. The
+top row is the fit; the bottom row is *what it was fitted with*. That separation
+is the only place in the figures where a ramp drifting into the earthquake is
+visible at all — variance reduction is blind to it by construction, and the
+combined `Model` panel is exactly the sum that hides it. The ramp panel
+deliberately shares the **data** panel's colour scale so its size can be read off
+directly, the two deramped panels share their own, and the title reports how many
+metres of the data the ramp is carrying. `plot_fit(model, ramp=False)` keeps the
+old three-panel form; a model solved with `ramp="none"` gets it anyway.
+`model.ramp_prediction` and `model.fault_prediction` are the same two fields as
+arrays, and a model reloaded with `SlipModel.load` still splits — the ramp
+columns are rebuilt from the observations, exactly as the smoothing operator is.
+
 **None of it fixes coverage, which is usually what binds.** The along-strike
 profile is the point of the report: on the Venezuela scenes an aggregate "19% of
 samples north of the trace" read like thin two-sided coverage, while the profile
@@ -1099,6 +1114,60 @@ means the estimate came from the data, `0` means the smoothing supplied it.
   to 2e-6. A deeper element radiates a broader but weaker pattern whose norm is
   conserved, and resolution collapses because deep elements trade off with *each
   other* — which a column norm structurally cannot see.
+
+#### Depth levels, or no levels at all
+
+`adapt_layout(..., structure=)` chooses how much freedom the node set has.
+
+```python
+layout = adapt_layout(mesh, target_element_size(mesh, per_element),
+                      structure="unstructured")     # or "rows", the default
+```
+
+**`"rows"` keeps depth levels**: one depth for the whole fault, with each level's
+node count and positions free. That last part is the catch — a *level* is a single
+depth, so the layering itself has to be read off **one vertical, at the fault's
+midpoint**. Node density varies along strike; the levels cannot. A resolution field
+that wants fine layering at one end of the rupture and coarse layering at the other
+has no way to say so.
+
+**`"unstructured"` drops the levels entirely.** The size field goes to
+`lloyd_layout` as a density and the nodes relax to it in two dimensions, so a fine
+patch can sit at one along-strike position with a coarse one beside it at the same
+depth. Measured on exactly the case it exists for — samples over the western half
+only, so resolution collapses in the east and the target size varies 2.6× along
+strike:
+
+| structure | elements | corr(size, target) | median \|rel err\| | min angle |
+|---|---|---|---|---|
+| `"rows"` | 357 | +0.926 | 15.3% | 9.0° |
+| `"unstructured"` | 381 | +0.945 | **10.4%** | **19.1°** |
+
+It follows the field 1.5× more closely *and* the elements are better shaped — a
+coarse row against a fine one is what makes Delaunay reach for a sliver, and
+dropping the rows removes the cause. On a field that varies mostly with **depth**
+the two are equivalent (+0.930 vs +0.926), so this buys nothing where along-strike
+coverage is even. Uneven coverage along the fault is the case: on the Venezuela
+scenes the north block is absent along the eastern two-thirds.
+
+- **The fault's outline stays a rectangle in `(s, z)`.** Freeform means the
+  discretisation, not the extent: `boundary_node_mask` finds the four sides by
+  exact equality and the zero-slip constraint depends on it, so an undulating top
+  or bottom row would silently unconstrain the rim.
+- ⚠️ **The relaxation honours the size field only because it is density-weighted.**
+  An area-weighted centroid is the centroidal-Voronoi iteration for a *uniform*
+  density, so it relaxes toward equal element sizes and undoes the grading. With
+  the `1/h²` weight a 4× down-dip field comes back at a 2.95 size ratio against a
+  wanted 2.85; without it, 2.16.
+- `iterations` and `seed` are fixed, so a layout is reproducible and
+  `FaultMesh.digest()` is stable across runs. A minimum triangle angle below 10°
+  warns — the relaxation gives 21–27°, and the uniform production mesh already
+  sits at 11.3°, so that threshold only fires on something degenerate.
+- In the loop: `mesh_adapt={"geometry": ..., "structure": "unstructured"}`, or
+  `NISAR_ADAPT_STRUCTURE=unstructured` for the runners. Both converge; on the
+  two-scene acceptance fixture Mw agreed to 0.01 across the two structures while
+  the peak moved 1.63 → 2.03 m, the usual "moment is what the data constrains,
+  peak is what the discretisation does with it".
 
 ### The two-way loop
 

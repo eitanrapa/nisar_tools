@@ -247,3 +247,254 @@ def test_a_wrongly_shaped_resolution_vector_is_refused_by_name(setup):
     _, _, mesh, _ = setup
     with pytest.raises(ValueError, match="element_resolution"):
         R.target_element_size(mesh, np.ones(3))
+
+
+# -- unstructured adaptation, where the depth levels stop being straight ------
+#
+# A row-structured layout reads its depth levels off ONE vertical, at the fault's
+# midpoint, because a level is a single depth for the whole fault. When the size
+# field varies along strike -- which is what uneven coverage along the fault
+# produces -- that constraint is what limits how well the mesh can follow it.
+
+def _along_strike_size_field(mesh, fine=3e3, coarse=9e3):
+    """A target size that is fine in the west and coarse in the east.
+
+    Deliberately *not* from a solved inversion: the property under test is what
+    the builders do with a size field that varies along strike, and constructing
+    it directly keeps the test fast and its intent legible.
+    """
+    s = mesh.element_params[:, 0]
+    fraction = (s - s.min()) / max(np.ptp(s), 1.0)
+    return fine + (coarse - fine) * fraction
+
+
+def _follows(layout, want_at):
+    """Median |relative error| of the achieved element size, global scale removed.
+
+    The scale is divided out because the element budget sets it -- what is being
+    measured is whether the *shape* of the size field survived.
+    """
+    from nisar_tools.slip.layout import signed_areas
+
+    centre = layout.params[layout.triangles].mean(axis=1)
+    got = np.sqrt(np.abs(signed_areas(layout.params, layout.triangles)))
+    want = want_at(centre[:, 0], -centre[:, 1])
+    return float(np.median(np.abs(got / (want * np.median(got / want)) - 1)))
+
+
+def test_unstructured_follows_an_along_strike_size_field_better_than_rows(setup):
+    """The measurement the ``structure="unstructured"`` mode exists for."""
+    _, _, mesh, _ = setup
+    sizes = _along_strike_size_field(mesh)
+    want_at = R.size_field(mesh, sizes)
+
+    rows = R.adapt_layout(mesh, sizes, budget="conserve", structure="rows")
+    free = R.adapt_layout(mesh, sizes, budget="conserve", structure="unstructured")
+
+    assert rows.counts is not None
+    assert free.counts is None, "an unstructured layout has no depth levels"
+    assert _follows(free, want_at) < _follows(rows, want_at)
+
+
+def test_unstructured_respects_the_budget_and_the_boundaries(setup):
+    _, _, mesh, _ = setup
+    sizes = _along_strike_size_field(mesh)
+    for budget in ("conserve", 120):
+        layout = R.adapt_layout(mesh, sizes, budget=budget,
+                                structure="unstructured")
+        wanted = mesh.n_elements if budget == "conserve" else budget
+        assert abs(layout.n_elements - wanted) <= 0.2 * wanted
+        for side in ("top", "bottom", "left", "right"):
+            from nisar_tools.slip.layout import boundary_node_mask
+            assert int(boundary_node_mask(layout.params, side).sum()) >= 2
+
+
+def test_unstructured_records_its_provenance_and_quality(setup):
+    _, _, mesh, _ = setup
+    layout = R.adapt_layout(mesh, _along_strike_size_field(mesh),
+                            structure="unstructured")
+    assert layout.attrs["layout"] == "adapted_unstructured"
+    assert layout.attrs["quality"]["n_elements"] == layout.n_elements
+    assert layout.attrs["quality"]["min_angle_deg"] > R.MIN_ANGLE_WARN_DEG
+
+
+def test_an_unrelaxed_cloud_is_flagged_as_slivered(setup):
+    """The adaptive loop runs unattended, so a degenerate triangulation has to
+    say so; ``iterations=0`` is the rejection-sampled cloud, which is 0.4 deg."""
+    _, _, mesh, _ = setup
+    with pytest.warns(RuntimeWarning, match="minimum triangle angle"):
+        R.adapt_layout(mesh, _along_strike_size_field(mesh), budget=None,
+                       structure="unstructured", iterations=0)
+
+
+def test_the_rows_structure_is_unchanged(setup):
+    """The default must still produce exactly what it did before the mode split,
+    or every existing run's mesh moves."""
+    _, _, mesh, _ = setup
+    sizes = _along_strike_size_field(mesh)
+    default = R.adapt_layout(mesh, sizes, budget="conserve")
+    explicit = R.adapt_layout(mesh, sizes, budget="conserve", structure="rows")
+    np.testing.assert_array_equal(default.params, explicit.params)
+    assert default.attrs["layout"] == "adapted"
+
+
+def test_an_unknown_structure_is_refused(setup):
+    _, _, mesh, _ = setup
+    with pytest.raises(ValueError, match="structure must be"):
+        R.adapt_layout(mesh, _along_strike_size_field(mesh),
+                       budget=None, structure="quadtree")
+
+
+def test_the_size_field_keeps_the_shape_it_was_asked_on(setup):
+    """The row builder asks along a line and the unstructured one on a 2-D probe
+    grid; a lookup that only handled 1-D broke the second with a broadcast error."""
+    _, _, mesh, _ = setup
+    at = R.size_field(mesh, _along_strike_size_field(mesh))
+    line = at(np.linspace(0.0, 40e3, 7), np.full(7, 5e3))
+    assert line.shape == (7,)
+    grid_s, grid_d = np.meshgrid(np.linspace(0.0, 40e3, 5),
+                                 np.linspace(0.0, 15e3, 4))
+    assert at(grid_s, grid_d).shape == (4, 5)
+
+
+# -- the full model/data resolution pair --------------------------------------
+#
+# The diagonal answers "how much of this estimate is data". It cannot answer
+# "over what distance", which is the question that decides whether a mesh is
+# finer than the data supports -- for that you need the off-diagonal structure.
+
+def test_the_two_traces_are_the_same_number(setup):
+    """``trace(A M^-1 A') == trace(M^-1 A'A)`` identically, so model and data
+    resolution must agree on the effective parameter count. It is the one exact
+    check available on either of them, and it catches the two halves being built
+    from different factorizations."""
+    _, _, _, inv = setup
+    report = R.resolution_report(inv, 1.0)
+    assert report.attrs["trace_identity_error"] < 1e-8
+    assert report.attrs["trace_model_resolution"] == pytest.approx(
+        float(R.data_importance(inv, 1.0).sum()), rel=1e-9)
+
+
+def test_the_matrix_diagonal_is_the_diagonal_function(setup):
+    _, _, _, inv = setup
+    matrix = R.resolution_matrix(inv, 1.0)
+    diag = R.resolution_diagonal(inv, 1.0)
+    n = inv.basis.n_basis
+    np.testing.assert_allclose(np.diag(matrix)[:n], diag["strike_slip"].values,
+                               rtol=1e-10, atol=1e-12)
+
+
+def test_kernel_width_survives_a_smoothing_change_where_the_diagonal_does_not(setup):
+    """The measurement behind ``resolution_report``'s advice, and the reason the
+    adaptive loop misbehaves: ``target_element_size`` sizes the mesh from the
+    diagonal, which is mostly a function of lambda, rather than from the kernel
+    width, which is set by the data geometry."""
+    _, _, _, inv = setup
+    widths, diagonals = [], []
+    for lam in (0.1, 10.0):
+        report = R.resolution_report(inv, lam)
+        widths.append(report.attrs["median_kernel_width_m"])
+        diagonals.append(float(np.median(report["resolution"].values)))
+    width_ratio = max(widths) / min(widths)
+    diagonal_ratio = max(diagonals) / min(diagonals)
+    assert diagonal_ratio > 3.0, diagonal_ratio       # lambda moves the diagonal
+    assert width_ratio < 1.5, width_ratio             # ...and barely the width
+    assert width_ratio < diagonal_ratio
+
+
+def test_the_kernel_is_wider_than_the_elements_it_averages(setup):
+    """A mesh cannot claim more detail than its own averaging kernels carry."""
+    _, _, mesh, inv = setup
+    report = R.resolution_report(inv, 1.0)
+    assert report.attrs["over_discretisation"] > 1.0
+    assert report.attrs["median_kernel_width_m"] > np.median(R.element_size(mesh))
+
+
+def test_data_importance_is_a_diagonal_of_a_projection(setup):
+    """``N`` is a projection-like operator, so its diagonal lies in [0, 1] and
+    sums to the effective rank -- a datum near 1 is one nothing else replaces."""
+    _, _, _, inv = setup
+    importance = R.data_importance(inv, 1.0)
+    assert importance.shape == (inv.obs.n,)
+    assert importance.min() >= -1e-12
+    assert importance.max() <= 1.0 + 1e-9
+    assert importance.sum() == pytest.approx(
+        R.resolution_report(inv, 1.0).attrs["effective_rank"]
+        + sum(R.resolution_diagonal(inv, 1.0).attrs["ramp_resolution"]), rel=1e-8)
+
+
+def test_more_smoothing_resolves_fewer_parameters_and_less_data(setup):
+    _, _, _, inv = setup
+    ranks = [float(R.data_importance(inv, lam).sum()) for lam in (0.1, 1.0, 10.0)]
+    assert ranks[0] > ranks[1] > ranks[2]
+
+
+def test_kernels_refuse_a_matrix_from_a_different_basis(setup):
+    _, _, mesh, inv = setup
+    matrix = R.resolution_matrix(inv, 1.0)
+    wrong = SlipInversion(mesh, inv.obs, basis="element"
+                          if inv.basis.name == "node" else "node")
+    with pytest.raises(ValueError, match="parameters"):
+        R.resolution_kernels(wrong, matrix)
+
+
+# -- sizing a mesh from the kernel width instead of the diagonal --------------
+
+def test_the_diagonal_size_field_saturates_where_the_kernel_one_does_not(setup):
+    """The reason the kernel criterion exists, and it is *not* lambda drift.
+
+    ``target_element_size`` forms ``(target / r) ** gain`` on a diagonal that has
+    underflowed over most of the fault, so it is a ratio of two nearly-zero
+    numbers and runs to its clamp: measured here, a large fraction of elements
+    are pinned at ``max_ratio`` and carry no information at all. The kernel width
+    is a real length everywhere.
+    """
+    _, _, mesh, inv = setup
+    per_el = R.element_resolution(inv, R.resolution_diagonal(inv, 1.0))
+    ratio = (np.median(per_el) / np.maximum(per_el, 1e-12)) ** 0.5
+    pinned = (ratio >= 3.0 - 1e-9) | (ratio <= 1 / 3 + 1e-9)
+    assert pinned.mean() > 0.3, f"only {100 * pinned.mean():.0f}% pinned"
+
+    width = R.kernel_element_size(inv, 1.0, size_min=1.0, size_max=1e9)
+    assert np.all(np.isfinite(width)) and width.min() > 0.0
+    # ...and it is not a constant either: it still varies across the mesh.
+    assert np.ptp(width) > 0.05 * np.median(width)
+
+
+def test_kernel_element_size_never_degenerates(setup):
+    """Where resolution underflows, ``target / r`` saturates its clamp; the
+    kernel width stays a real length everywhere, which is the whole point."""
+    _, _, _, inv = setup
+    for lam in (0.1, 1.0, 100.0):
+        size = R.kernel_element_size(inv, lam)
+        assert np.all(np.isfinite(size))
+        assert size.min() > 0.0
+
+
+def test_kernel_reduction_ordering(setup):
+    """``min`` keeps the better-resolved direction and so asks for the finest
+    mesh; ``max`` discards it. Their order cannot silently swap."""
+    _, _, _, inv = setup
+    report = R.resolution_report(inv, 1.0)
+    sizes = {r: R.kernel_element_size(inv, 1.0, reduce=r, report=report,
+                                      size_min=1.0, size_max=1e9)
+             for r in R.KERNEL_REDUCTIONS}
+    assert np.median(sizes["min"]) <= np.median(sizes["geometric"])
+    assert np.median(sizes["geometric"]) <= np.median(sizes["max"])
+
+
+def test_kernel_element_size_rejects_an_unknown_reduction(setup):
+    _, _, _, inv = setup
+    with pytest.raises(ValueError, match="reduce must be one of"):
+        R.kernel_element_size(inv, 1.0, reduce="rms")
+
+
+def test_kernel_element_size_scales_with_fraction(setup):
+    """``fraction`` is elements per kernel width, so it multiplies straight
+    through -- there is no hidden normalisation."""
+    _, _, _, inv = setup
+    report = R.resolution_report(inv, 1.0)
+    kw = dict(report=report, size_min=1.0, size_max=1e9)
+    half = R.kernel_element_size(inv, 1.0, fraction=0.5, **kw)
+    quarter = R.kernel_element_size(inv, 1.0, fraction=0.25, **kw)
+    np.testing.assert_allclose(quarter, 0.5 * half, rtol=1e-12)
