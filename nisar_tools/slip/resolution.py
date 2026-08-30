@@ -420,6 +420,185 @@ def resolution_report(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
     return out
 
 
+#: Fraction of parameters allowed on a bound before
+#: :func:`posterior_covariance` refuses. The linear covariance describes the
+#: *unbounded* damped problem; a solution pressed against its bounds is a
+#: different problem and the number would be a plausible-looking lie.
+#:
+#: ⚠️ This is a property of the **model**, not of the code, and it has moved a
+#: long way. The 2026-07 Venezuela run had **86%** of elements on a bound, which
+#: is why this module's own docstring says the resolution matrix is never a
+#: statement about uncertainty. The 2026-08-30 production model has **1.6%**
+#: (6 of 374, all on the polarity constraint). Re-check it per run.
+MAX_BOUND_FRACTION = 0.10
+
+#: Which covariance :func:`posterior_covariance` returns. Named apart from
+#: :data:`nisar_tools.slip.covariance.COVARIANCE_KINDS`, which is the *noise*
+#: model's shape and a different thing entirely.
+POSTERIOR_KINDS = ("propagated", "posterior")
+
+
+def bound_fraction(model, tolerance=1e-3):
+    """Fraction of slip parameters sitting on one of their bounds.
+
+    The gate on every linear uncertainty statement here -- see
+    :data:`MAX_BOUND_FRACTION`.
+    """
+    options = getattr(model, "options", None) or {}
+    strike = options.get("strike", (-10.0, 10.0))
+    dip = options.get("dip", (-10.0, 10.0))
+    polarity = options.get("polarity")
+    if polarity:
+        lo, hi = strike
+        if polarity[0] < 0:
+            hi = min(hi, 0.0)
+        elif polarity[0] > 0:
+            lo = max(lo, 0.0)
+        strike = (lo, hi)
+
+    on = 0
+    for values, (lo, hi) in ((model.strike_slip, strike), (model.dip_slip, dip)):
+        v = np.asarray(values, dtype=float)
+        for edge in (lo, hi):
+            if np.isfinite(edge):
+                on += int(np.isclose(v, edge, atol=tolerance).sum())
+    total = np.size(model.strike_slip) + np.size(model.dip_slip)
+    return float(on) / max(total, 1)
+
+
+def posterior_covariance(inversion, smoothing, kind="propagated", full=False,
+                         model=None, ss_ratio=1.0, ds_ratio=3.0,
+                         boundary_ratio=1.0, sides=("bottom", "left", "right"),
+                         smooth_weighting="uniform"):
+    """Parameter covariance of the damped solve. Returns sigma, or the full matrix.
+
+    Two readings, and **they differ by an order of magnitude here**, so the choice
+    is not a detail:
+
+    * ``"propagated"`` (default) -- ``M^-1 (A' Cd^-1 A) M^-1``: the estimator's
+      variance under data noise. **This is the one that matches reality.**
+      Validated against 60 repeated bounded solves on noise drawn from the same
+      ``Cd``: empirical spread / analytic sigma = **1.01**, per-parameter
+      correlation **0.950**.
+    * ``"posterior"`` -- ``M^-1`` with ``M = A' Cd^-1 A + lam^2 L'L + W'W``. The
+      Bayesian posterior *if the smoothing is taken as a prior distribution you
+      believe*. On the same test it is **11x too wide** (ratio 0.09).
+
+    They differ by exactly ``M^-1 (lam^2 L'L + W'W) M^-1``, the prior's own
+    contribution, so ``posterior = propagated + prior term`` identically. The
+    factor of eleven is not an error in either: repeated observation varies only
+    the data, which is what ``"propagated"`` predicts, while ``M^-1`` also carries
+    a spread that no amount of re-observing samples. Ask for ``"posterior"`` only
+    if you mean the Bayesian question.
+
+    ⚠️ **Summarise with the mean or the max, never the median.** At light damping
+    the per-parameter sigma spans four orders of magnitude -- the unresolved
+    parameters carry enormous variance while the bulk stays small -- so the median
+    describes the bulk and hides the tail. Measured over lambda 0.01 to 1e4 on the
+    synthetic: mean sigma falls monotonically **128 -> 0.03 m** as it should,
+    while the median *rises* 0.059 -> 0.207 before falling, purely because the
+    damping pulls the tail in faster than it lifts the bulk. Reading the median as
+    "the uncertainty" would say more smoothing makes the model less certain.
+
+    ⚠️ **That the prior term dominates by 11x is itself the result.** It is the
+    same fact as an effective rank of 21 out of 748 parameters -- a typical
+    parameter is **97% regulariser** -- seen from the covariance side. Quote either
+    number alongside :func:`resolution_diagonal`, which says how much of each
+    estimate the data actually paid for.
+
+    ⚠️ **Requires a covariance model.** Without one,
+    :meth:`~nisar_tools.slip.inversion.SlipInversion.whiten` multiplies by
+    ``1/sqrt(n)`` per track, which is not ``Cd^-1/2`` and carries no units -- the
+    resulting "covariance" would be a number in arbitrary units that looks like
+    a variance. Same rule as
+    :attr:`~nisar_tools.slip.inversion.SlipModel.chi_square`.
+
+    ⚠️ **Describes the UNBOUNDED problem.** Pass ``model=`` and it checks the
+    fraction of parameters on a bound against :data:`MAX_BOUND_FRACTION` and
+    raises rather than returning a number for a problem that was not solved.
+    """
+    if kind not in POSTERIOR_KINDS:
+        raise ValueError(f"kind must be one of {POSTERIOR_KINDS}, got {kind!r}")
+    if getattr(inversion, "covariance", None) is None:
+        raise ValueError(
+            "posterior_covariance needs a covariance model: without one the "
+            "weights are 1/sqrt(n) per track, which is not Cd^-1/2, and the "
+            "result would be in arbitrary units rather than metres squared. "
+            "Build the inversion with SlipInversion(..., covariance=...)."
+        )
+    if model is not None:
+        fraction = bound_fraction(model)
+        if fraction > MAX_BOUND_FRACTION:
+            raise ValueError(
+                f"{fraction:.1%} of parameters sit on a bound, above "
+                f"MAX_BOUND_FRACTION={MAX_BOUND_FRACTION:.0%}. This covariance "
+                "describes the unbounded damped problem, so on a solution pressed "
+                "against its bounds it would be a plausible-looking lie. Loosen "
+                "the bounds, or use a Monte Carlo through the bounded solve."
+            )
+
+    data, chol = _factorized(inversion, smoothing, ss_ratio, ds_ratio,
+                             boundary_ratio, sides, smooth_weighting)
+    inverse = cho_solve(chol, np.eye(data.shape[0]))
+    covariance = inverse if kind == "posterior" else inverse @ data @ inverse
+    if full:
+        return covariance
+    return np.sqrt(np.maximum(np.diag(covariance), 0.0))
+
+
+def resolution_bias(matrix, model):
+    """``(R - I) @ m`` -- the smoothing's pull on *this* model, in metres.
+
+    The other half of the error. A regularised estimate carries variance from the
+    data noise (:func:`posterior_covariance`) **and** bias from the regulariser,
+    and they trade off along the L-curve: more damping buys variance down and
+    bias up. This is the bias term evaluated at the recovered model, which is the
+    best stand-in available for the true one.
+
+    Returns the pull per parameter **and** ``relative``, its norm over the model's
+    own norm.
+
+    ⚠️ **Across a lambda sweep, pass the SAME model every time.** Two traps sit
+    here and both were hit before this warning existed:
+
+    1. The **absolute** pull is taken at the recovered model, which shrinks as the
+       damping rises -- so it shrinks too, and appears to say that more smoothing
+       biases the answer *less*. Measured: mean pull 0.317 -> 0.098 m over lambda
+       1 -> 100, exactly backwards. Use ``relative``.
+    2. ``relative`` is not monotone either when the model moves with lambda,
+       because ``m`` **rotates** toward the smooth directions ``R`` preserves
+       best: measured 0.203 -> 0.431 -> 0.290 over the same sweep. The recovered
+       model is already the smoothed one, so ``(R - I) m`` understates the pull
+       away from the *truth*.
+
+    So a lambda sweep must hold the reference model fixed -- the model at the
+    corner, or the truth on a synthetic -- and vary only ``matrix``. Then
+    ``relative`` rises monotonically toward 1, which is the statement that at
+    heavy damping the estimate is entirely the regulariser's.
+
+    ⚠️ **Do not add this in quadrature with the posterior sigma and call the
+    result an error bar.** Both move when ``lambda`` moves, so they are not
+    independent contributions to one total; the honest presentation is the
+    trade-off across a ``lambda`` ladder, not a single number.
+    """
+    matrix = np.asarray(matrix, dtype=float)
+    n = np.size(model.strike_slip)
+    slip = np.concatenate([np.asarray(model.strike_slip, dtype=float),
+                           np.asarray(model.dip_slip, dtype=float)])
+    if matrix.shape[0] < 2 * n:
+        raise ValueError(
+            f"the matrix is {matrix.shape} but the model has {2 * n} slip "
+            "parameters; pass the resolution matrix this inversion produced")
+    block = matrix[:2 * n, :2 * n]
+    pulled = block @ slip - slip
+    norm = float(np.linalg.norm(slip))
+    return {
+        "strike_slip": pulled[:n],
+        "dip_slip": pulled[n:2 * n],
+        "relative": float(np.linalg.norm(pulled) / norm) if norm > 0 else 0.0,
+    }
+
+
 def element_resolution(inversion, resolution):
     """Resolution per element, whatever basis it was computed in."""
     values = np.asarray(resolution["resolution"].values, dtype=float)

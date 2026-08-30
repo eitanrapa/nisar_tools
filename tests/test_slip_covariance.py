@@ -576,3 +576,130 @@ def test_a_track_with_no_model_is_named(two_track_obs):
     with pytest.raises(ValueError, match="desc"):
         C.whitening_factors(two_track_obs, {"asc": CovarianceModel(
             sill=SILL, range_m=RANGE, nugget=NUGGET)})
+
+
+# -- uncertainty, and how much of it is the prior ---------------------------
+
+def test_the_propagated_sigma_matches_repeated_bounded_solves(signal_setup):
+    """⚠️ The forward-model check, and it is what set the default.
+
+    Draw noise from the SAME Cd the covariance is built from, re-solve through the
+    real bound-constrained solver, and compare the scatter with the prediction.
+    Measured over 60 draws on the synthetic: `"propagated"` gives ratio **1.01**
+    and per-parameter correlation **0.950**, while `"posterior"` is **11x too
+    wide**.
+
+    Both are right for their own question -- repeated observation varies only the
+    data, which is what `"propagated"` predicts, while `M^-1` also carries a prior
+    spread that no re-observation samples. But "uncertainty on a slip model"
+    conventionally means the former, so that is the default.
+    """
+    _, _, mesh, _, parts = signal_setup
+    obs = Observations.concat(parts, normalize="none")
+    model = CovarianceModel(sill=SILL, range_m=RANGE, nugget=NUGGET)
+    inversion = SlipInversion(mesh, obs, ramp="offset", covariance=model)
+    n = inversion.basis.n_basis
+    lam = 3.0
+    # Loose bounds: the linear covariance describes the *unbounded* problem, so
+    # this tests it in the regime it claims, rather than dodging the question.
+    bounds = {"strike": (-20.0, 20.0), "dip": (-20.0, 20.0)}
+
+    prop = R.posterior_covariance(inversion, lam)
+    post = R.posterior_covariance(inversion, lam, kind="posterior")
+    assert np.median(post[:n]) > 3.0 * np.median(prop[:n]), (
+        "the prior term should dominate on a problem this heavily damped")
+
+    clean = np.asarray(obs.ds["los"].values, dtype=float)
+    track = np.asarray(obs.ds["track"].values, dtype=object)
+    rng = np.random.default_rng(0)
+    draws = []
+    for _ in range(24):
+        noisy = clean.copy()
+        for name, factor in inversion._chol.items():
+            at = np.flatnonzero(track == name)
+            noisy[at] += factor @ rng.standard_normal(at.size)
+        shaken = Observations(obs.ds.assign(los=("obs", noisy)))
+        solved = SlipInversion(mesh, shaken, ramp="offset",
+                               covariance=model).solve(smoothing=lam, max_iter=400,
+                                                       **bounds)
+        draws.append(solved.strike_slip)
+
+    empirical = np.asarray(draws).std(axis=0, ddof=1)
+    ratio = float(np.median(empirical / np.maximum(prop[:n], 1e-12)))
+    assert 0.6 < ratio < 1.6, f"propagated sigma is off by {ratio:.2f}x"
+    assert np.corrcoef(empirical, prop[:n])[0, 1] > 0.7
+
+
+def test_a_covariance_is_required_for_a_covariance(signal_setup):
+    """Without Cd the weights are `1/sqrt(n)`, so the units are arbitrary.
+
+    Same rule as `chi_square`: a statistic only meaningful against a stated noise
+    model must be absent when none was stated, not silently wrong.
+    """
+    _, _, mesh, _, parts = signal_setup
+    plain = SlipInversion(mesh, Observations.concat(parts), ramp="offset")
+    with pytest.raises(ValueError, match="needs a covariance model"):
+        R.posterior_covariance(plain, 1.0)
+
+
+def test_a_bound_pressed_solution_is_refused(signal_setup):
+    """The linear covariance describes the UNBOUNDED problem.
+
+    `resolution.py` warns about exactly this, and the warning was written when the
+    real run had 86% of elements on a bound. Tight bounds must raise rather than
+    return a plausible-looking sigma for a problem nobody solved.
+    """
+    _, _, mesh, _, parts = signal_setup
+    obs = Observations.concat(parts, normalize="none")
+    model = CovarianceModel(sill=SILL, range_m=RANGE, nugget=NUGGET)
+    inversion = SlipInversion(mesh, obs, ramp="offset", covariance=model)
+    pinched = inversion.solve(smoothing=3.0, max_iter=200,
+                              strike=(-0.02, 0.0), dip=(-0.02, 0.0))
+    assert R.bound_fraction(pinched) > R.MAX_BOUND_FRACTION
+    with pytest.raises(ValueError, match="sit on a bound"):
+        R.posterior_covariance(inversion, 3.0, model=pinched)
+
+
+def test_the_bias_grows_with_lambda_against_a_FIXED_reference(signal_setup):
+    """`(R - I) m` -- the other half of the error. Two traps, both pinned.
+
+    More damping buys variance down and bias up, and that trade is why a single
+    error bar is the wrong presentation. But the pull must be measured against a
+    **fixed** reference model, or it moves the wrong way:
+
+    1. the *absolute* pull is taken at the recovered model, which shrinks with the
+       damping, so it shrinks too (0.317 -> 0.098 m measured);
+    2. even the *relative* pull is non-monotone when the model moves with lambda
+       (0.203 -> 0.431 -> 0.290), because `m` rotates toward the smooth directions
+       `R` preserves best -- the recovered model is already the smoothed one.
+    """
+    _, _, mesh, truth, parts = signal_setup
+    obs = Observations.concat(parts, normalize="none")
+    model = CovarianceModel(sill=SILL, range_m=RANGE, nugget=NUGGET)
+    inversion = SlipInversion(mesh, obs, ramp="offset", covariance=model)
+    n = inversion.basis.n_basis
+    bounds = {"strike": (-20.0, 20.0), "dip": (-20.0, 20.0)}
+
+    reference = inversion.solve(smoothing=1.0, max_iter=400, **bounds)
+    fixed, moving, sigma = [], [], []
+    for lam in (1.0, 10.0, 100.0):
+        matrix = R.resolution_matrix(inversion, lam)
+        fixed.append(R.resolution_bias(matrix, reference)["relative"])
+        moving.append(R.resolution_bias(
+            matrix, inversion.solve(smoothing=lam, max_iter=400, **bounds))["relative"])
+        # ⚠️ Mean, not median. At light damping the sigma distribution spans four
+        # orders of magnitude and the median describes only the bulk -- measured,
+        # it *rises* 0.059 -> 0.207 over lambda 0.01 -> 100 while the mean falls
+        # 128 -> 0.40, because damping pulls the tail in faster than it lifts the
+        # bulk. Reading the median would say more smoothing means less certainty.
+        sigma.append(float(np.mean(R.posterior_covariance(inversion, lam)[:n])))
+
+    assert fixed == sorted(fixed), f"against a fixed model the bias must grow: {fixed}"
+    assert fixed[-1] > 0.5, "at heavy damping the estimate is mostly the prior"
+    assert sigma == sorted(sigma, reverse=True), f"variance must fall: {sigma}"
+    assert sigma[0] > 3.0 * sigma[-1], "damping should cut the variance materially"
+
+    # The trap itself, pinned: let the reference move and monotonicity is lost.
+    assert moving != sorted(moving), (
+        "this fixture no longer demonstrates the moving-reference trap; if the "
+        "measure changed, re-check the warning in `resolution_bias`")
