@@ -553,3 +553,59 @@ def test_an_unknown_size_source_is_refused_before_the_first_solve(setup):
             max_rounds=2, verbose=False,
             mesh_adapt={"geometry": {"uniform_dip": 90.0}, "size_from": "resolution"},
         )
+
+
+def test_conserve_holds_the_element_count_over_a_long_loop(setup):
+    """⚠️ The drift that three rounds hides and eight rounds shows.
+
+    ``adapt_layout`` resolves ``budget="conserve"`` against whatever mesh it is
+    handed, and ``_fit_budget`` accepts any build within 5% of the target without
+    bisecting. So round N aimed at round N-1's *result*: a +/-5% random walk with
+    no restoring force, measured on the real problem as 1696 -> 1759 -> ... ->
+    1893, **+11.6% compounded over 8 rounds**, every single step inside tolerance
+    and therefore invisible to any per-round check.
+
+    Pinning "conserve" to the *starting* mesh once is the fix, and this is the
+    test that would have caught it: it looks at the trend across many rounds
+    rather than at any one step.
+    """
+    trace, frame, mesh, _, scenes = setup
+    _, _, history = iterate_sampling(
+        scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes},
+        max_rounds=8, spacing=4000.0, solve_kwargs={"smoothing": 0.3}, verbose=False,
+        mesh_adapt={"geometry": {"uniform_dip": 90.0, "edge_length": 6e3},
+                    "rounds": 8},
+    )
+    counts = np.array([h["n_elements"] for h in history[1:]], dtype=float)
+    assert counts.size >= 6, counts
+
+    # Every round within tolerance of the ORIGINAL count, not of its predecessor.
+    assert np.all(np.abs(counts - mesh.n_elements) <= 0.12 * mesh.n_elements), counts
+    # And no trend: a random walk would show one, a pinned target should not.
+    slope = np.polyfit(np.arange(counts.size), counts, 1)[0]
+    assert abs(slope) < 0.02 * mesh.n_elements, (slope, counts)
+
+
+def test_the_size_clamps_do_not_follow_the_mesh_they_are_bounding(setup):
+    """``size_min``/``size_max`` default from the *current* mesh, so they drift too.
+
+    ``max_ratio`` bounds the per-step ratio, not the cumulative one, so the size
+    spread widened without bound -- 6.5x after 3 rounds, 30x after 8. Resolved
+    against the starting mesh unless the caller was explicit.
+    """
+    from nisar_tools.slip.predict import _adapt_spec
+
+    _, _, mesh, _, _ = setup
+    spec = _adapt_spec({"geometry": {}}, 4, mesh=mesh)
+
+    from nisar_tools.slip.resolution import element_size
+    current = element_size(mesh)
+    assert spec["size_min"] == pytest.approx(current.min() / 3.0)
+    assert spec["size_max"] == pytest.approx(current.max() * 3.0)
+    assert spec["budget"] == mesh.n_elements
+
+    # An explicit value is never overridden.
+    explicit = _adapt_spec({"geometry": {}, "size_min": 123.0, "budget": 40}, 4,
+                           mesh=mesh)
+    assert explicit["size_min"] == 123.0
+    assert explicit["budget"] == 40

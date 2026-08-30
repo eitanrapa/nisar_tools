@@ -442,8 +442,10 @@ ADAPT = dict(
 #: What the quadtree splits on. ``"model"`` is Wang & Fialko's predicted
 #: displacement (the default, and what every run before this used);
 #: ``"resolution"`` is Lohman & Simons -- where a sample would most improve model
-#: resolution; ``"both"`` takes the pointwise maximum of the two standardised
-#: fields. The two answer different questions: the first avoids spending samples
+#: resolution; ``"both"`` **adds** the two standardised fields. Not a pointwise
+#: maximum, which this used to say: the quadtree splits on a cell's *scatter*, and
+#: the max of two fields can be flatter than either where one clips the other's
+#: variation. Measured, `fmax` gave 1432 samples against a sum's 1974. The two answer different questions: the first avoids spending samples
 #: on atmosphere, the second spends them where the model is unconstrained.
 SAMPLING_FIELD = os.environ.get("NISAR_SAMPLING_FIELD", "model")
 

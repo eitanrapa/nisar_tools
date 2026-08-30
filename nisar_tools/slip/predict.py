@@ -201,7 +201,7 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
             f"Unknown sampling_field {sampling_field!r}; expected 'model', "
             "'resolution' or 'both'"
         )
-    adapt = _adapt_spec(mesh_adapt, max_rounds)
+    adapt = _adapt_spec(mesh_adapt, max_rounds, mesh=mesh)
     probe = _probe_lattice(mesh) if (adapt or sampling_field != "model") else None
     if refine_within is None:
         refine_within = REFINE_MULTIPLE * max(
@@ -236,16 +236,22 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
         previous = model.element_slip.copy()
         previous_probe = None if probe is None else _probe_slip(mesh, model, probe)
 
+        # One factorization for the whole round: the sampling field needs it for
+        # every scene and the remesh needs it once, and they are the same matrix.
+        report = (None if (adapt is None and sampling_field == "model")
+                  else _round_report(inversion, adapt, solve_kwargs))
         fields = {}
         for name, stack in scenes.items():
             fields[name] = _split_field(model, inversion, stack, frame, spacing,
-                                        sampling_field, adapt, solve_kwargs)
+                                        sampling_field, adapt, solve_kwargs,
+                                        report=report)
         parts = [sample(name, stack, field=fields[name],
                         rms_min=model_rms_min(fields[name], rms_fraction))
                  for name, stack in scenes.items()]
 
         if adapt is not None and round_index <= adapt["rounds"]:
-            mesh = _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs)
+            mesh = _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs,
+                               report=report)
 
         obs = Observations.concat(parts, normalize=normalize)
         inversion = SlipInversion(mesh, obs, **inversion_kwargs)
@@ -275,11 +281,31 @@ def _entry(round_index, obs, model, mesh, field, change):
             "n_elements": int(mesh.n_elements), "n_nodes": int(mesh.n_nodes)}
 
 
-def _adapt_spec(mesh_adapt, max_rounds):
+def _adapt_spec(mesh_adapt, max_rounds, mesh=None):
     """Validate the mesh-adaptation request, or ``None`` when there is none."""
     if mesh_adapt is None:
         return None
     spec = dict(mesh_adapt)
+    # ⚠️ Pin "conserve" to the STARTING mesh, once. `adapt_layout` resolves it
+    # against whatever mesh it is handed, and `_fit_budget` accepts any build
+    # within 5% of the target without bisecting -- so round N's target was round
+    # N-1's *result*, and the count did a +/-5% random walk with no restoring
+    # force. Measured over 8 rounds: 1696 -> 1759 -> ... -> 1893, every step
+    # inside tolerance, **+11.6% compounded**. Three rounds hides it. Resolved
+    # here, every round aims at the same integer.
+    if spec.get("budget", "conserve") == "conserve" and mesh is not None:
+        spec["budget"] = int(mesh.n_elements)
+    # Same trap one level down: `target_element_size` and `kernel_element_size`
+    # default their clamps to `current.min()/max_ratio` and `current.max()*ratio`,
+    # recomputed from this round's mesh, so the clamp follows the drift and the
+    # size spread widens without bound (6.5x after 3 rounds, 30x after 8). Pin
+    # them to the starting mesh too, unless the caller was explicit.
+    if mesh is not None:
+        from .resolution import element_size
+        current = element_size(mesh)
+        ratio = float(spec.get("max_ratio", 3.0))
+        spec.setdefault("size_min", float(current.min()) / ratio)
+        spec.setdefault("size_max", float(current.max()) * ratio)
     if "geometry" not in spec:
         raise ValueError(
             "mesh_adapt needs a 'geometry' entry: a layout says where the nodes "
@@ -313,27 +339,54 @@ def _adapt_spec(mesh_adapt, max_rounds):
     return spec
 
 
-def _resolution_of(inversion, adapt, solve_kwargs):
-    """Model resolution at the weight the run actually solves at."""
-    from .resolution import resolution_diagonal
+def _adapt_smoothing(adapt, solve_kwargs):
+    """The weight resolution is evaluated at.
 
+    ⚠️ ``mesh_adapt["smoothing"]`` overrides, otherwise the weight the run
+    actually solves at. This used to be read in two places with **different**
+    fallbacks -- 0.3 for the sampling field and 1.0 for the kernel-driven mesh --
+    so a caller who omitted ``smoothing`` from ``solve_kwargs`` sized the mesh and
+    chose the samples at two different dampings without being told.
+    """
     smoothing = adapt.get("smoothing") if adapt else None
     if smoothing is None:
         smoothing = solve_kwargs.get("smoothing", 0.3)
+    return float(smoothing)
+
+
+def _round_report(inversion, adapt, solve_kwargs):
+    """One ``resolution_report`` for the whole round.
+
+    ⚠️ **This used to be one factorization per scene, plus one more for the
+    remesh.** ``_split_field`` is called inside the loop over scenes and each call
+    re-derived the resolution from scratch, so a six-scene run with
+    ``sampling_field="both"`` and ``mesh_adapt`` factorized a ~1870-square matrix
+    **seven times a round** to produce seven identical answers. The report carries
+    the diagonal (as ``resolution``), the kernels and ``diag(N)`` from a single
+    factorization, which is everything both callers need.
+    """
+    from .resolution import resolution_report
+
     keys = ("ss_ratio", "ds_ratio", "boundary_ratio", "sides", "smooth_weighting")
     passed = {k: solve_kwargs[k] for k in keys if k in solve_kwargs}
-    return resolution_diagonal(inversion, smoothing, **passed)
+    return resolution_report(inversion, _adapt_smoothing(adapt, solve_kwargs),
+                             **passed)
 
 
 def _split_field(model, inversion, stack, frame, spacing, sampling_field, adapt,
-                 solve_kwargs):
-    """What the quadtree splits on this round."""
+                 solve_kwargs, report=None):
+    """What the quadtree splits on this round.
+
+    ``report`` is the round's shared :func:`resolution_report`; it is required
+    whenever ``sampling_field`` is not ``"model"``, so that the factorization is
+    not repeated per scene.
+    """
     from .resolution import resolution_gain
 
     if sampling_field == "model":
         return predicted_los(model, stack, frame, spacing=spacing)
 
-    resolution = _resolution_of(inversion, adapt, solve_kwargs)
+    resolution = report
     # No `spacing=`: the gain has its own, much coarser default. It is a smooth
     # field used only to rank locations, and it costs a full design matrix at
     # every probe point where the predicted field costs one forward model.
@@ -358,28 +411,28 @@ def _split_field(model, inversion, stack, frame, spacing, sampling_field, adapt,
     return (predicted - predicted[finite].mean()) / scale + gain
 
 
-def _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs):
+def _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs, report=None):
     """Re-size the elements from model resolution and rebuild on the new layout."""
     from .mesh import FaultMesh
     from .resolution import (adapt_layout, element_resolution,
                              kernel_element_size, target_element_size)
 
+    if report is None:
+        report = _round_report(inversion, adapt, solve_kwargs)
+    smoothing = _adapt_smoothing(adapt, solve_kwargs)
+
     if adapt.get("size_from", "diagonal") == "kernel":
         # The averaging-kernel width: a lambda-stable length that never
         # degenerates, unlike (target / r) on the diagonal. See
         # `kernel_element_size` for the measurement behind that choice.
-        smoothing = adapt.get("smoothing")
-        if smoothing is None:
-            smoothing = solve_kwargs.get("smoothing", 1.0)
         sizes = kernel_element_size(
-            inversion, smoothing,
+            inversion, smoothing, report=report,
             **{k: v for k, v in adapt.items()
                if k in ("fraction", "reduce", "size_min", "size_max")}
         )
     else:
-        resolution = _resolution_of(inversion, adapt, solve_kwargs)
         sizes = target_element_size(
-            mesh, element_resolution(inversion, resolution),
+            mesh, element_resolution(inversion, report),
             **{k: v for k, v in adapt.items()
                if k in ("target", "gain", "max_ratio", "size_min", "size_max")}
         )
