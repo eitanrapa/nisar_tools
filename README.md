@@ -867,6 +867,56 @@ fig, ax = plot_slip_3d(model, component="strike", trace=trace,
   is easiest to see — the case a bottom trace produces and the unrolled panel
   cannot show at all.
 
+### Weighting by a measured noise model
+
+InSAR noise is spatially correlated — atmospheric delay over kilometres to tens of
+kilometres, the same scale as the deformation. Without a model for that, an
+observation's weight is `1.0`, scaled per track by `1/sqrt(n)`, so samples are
+weighted by *how many their track contributed* and nothing else.
+
+`nisar_tools.slip.covariance` fits the correlation from the far field and whitens
+the system:
+
+```python
+from nisar_tools.slip import covariance as C, SlipInversion
+
+model, variogram = C.scene_covariance(los_stack, trace, frame, min_distance=50e3)
+print(model)                     # exponential: sill 20.7 mm, nugget 2.2 mm, range 22.7 km
+inversion = SlipInversion(mesh, obs, covariance={"A162": model, ...})
+```
+
+Measured on six real Venezuela scenes: sill 13–41 mm, nugget 0.4–3.3 mm, and
+**range 22–33 km on all six** despite two different processing chains — that
+agreement is the validation. The noise is 15–100× more correlated than white.
+
+⚠️ **`detrend` must match the ramp the inversion solves.** The default is degree 2
+because these scenes carry an unremoved ramp and the inversion solves
+`ramp="quadratic"`. At degree 1 the fit *collapses* on all four NISAR scenes —
+sill 0.0 mm, range 363–816 km against a 108 km maximum lag, i.e. the variogram
+never plateaus. `fit_covariance` warns when the fitted range exceeds the largest
+lag measured, which is that failure's signature.
+
+⚠️ **A covariance does not improve the slip estimate, and that is measured.**
+Swept over 24 smoothing weights and compared at each arm's own optimum, the
+whitened solve recovered a planted patch *worse* — 0.147 m against 0.069 m rms, on
+5 of 5 seeds, and still worse at SNR 2.0 / 0.4 / 0.1 and at matched effective
+rank. Generalised least squares is minimum-variance only among *unbiased*
+estimators, and this one is bound-constrained and damped to tens of parameters out
+of hundreds, so the regulariser sets the error; an exponential `Cd` up-weights
+short wavelengths, exactly what the smoothing exists to suppress.
+
+What it *does* buy is an honest account of where the evidence came from. At
+matched rank the per-scene share of `diag(N)` shifts monotonically with each
+scene's own sill — quiet scenes gain, noisy lose, D135 ×1.35 through D054 ×0.73 —
+and `SlipModel.chi_square` becomes meaningful (it returns `None` without a
+covariance, rather than a number in arbitrary units). Solve plain, report
+resolution whitened, is the defensible split.
+
+⚠️ **No existing smoothing weight transfers.** Whitening divides by sigma instead
+of `1/sqrt(n)`, so a given `lambda` damps far less; on the real problem plain
+`lambda=300` and whitened `lambda=1e6` reach the same effective rank. Re-run the
+L-curve.
+
 ### Choosing the smoothing weight
 
 `l_curve` solves at many weights over the same Green's matrix and tabulates misfit
@@ -1239,9 +1289,40 @@ check worth running.
 The quadrature order is chosen per element **and per observation** rather than
 fixed at the reference's 91 points per triangle: a point source is a good stand-in
 for a patch once you are a few patch-widths away, and almost every observation is
-far from almost every element. Measured on the real problem (1148 elements, 8000
-observations) that is **89× fewer** source-receiver evaluations at 1e-2 accuracy
-and 10× at 1e-3. Pass `tolerance=None` for the fixed rule.
+far from almost every element. `scripts/bench_greens.py` reproduces the result
+from a clean checkout — synthetic fault, synthetic tables, no Fortran — at the
+real problem's geometry (median r/L 37.9 against 38):
+
+| assembly | seconds | vs half-space | points / pair |
+|---|---|---|---|
+| `HalfSpaceTDE` | 14.58 | 1.00× | — |
+| layered adaptive `3e-3` | **12.58** | **0.86×** | 1.69 |
+| layered reference (91 pt) | 231.0 | 15.9× | 81.0 |
+
+**A layered engine now costs less than the closed-form homogeneous one**, and 48×
+fewer quadrature points than the rule it replaces — so the shallow/deep slip bias
+above has no remaining computational excuse. Verified on real Crust2.0 tables
+against an order-30 rule: median relative error 7.2e-4, and the row sum (what
+would rescale slip magnitude) 2.5e-3 against a 3e-3 request.
+
+⚠️ **r/L is the controlling variable, and a small benchmark understates the win.**
+A small mesh has large elements, so r/L is small and the rule must ask for high
+orders — at 204 elements the reference is only 1.56× the half-space. The script
+prints the r/L distribution beside the timings for that reason.
+
+⚠️ **The cap is a silent tolerance violation, and it is now reported.** The order
+is capped at `max_points`, which binds within roughly twice an element's own size
+— i.e. on near-fault observations of shallow elements, precisely the pairs
+carrying the shallow-slip constraint. The guarantee the adaptive rule offers is
+never coarser than the fixed rule it replaces, **not** the tolerance. Every
+assembly fills `LayeredPointSource.quadrature_report` (pairs, capped,
+`capped_fraction`, points per pair, order histogram) and warns above 5%; the real
+six-scene run caps 0.00%.
+
+⚠️ **The reference rule is `tolerance=None` *with* `max_points=91`.**
+`tolerance=None` alone gives the *cap* — 900 points, order 30 — which is nine
+times more work than the rule it is meant to reproduce. From a run, that is
+`NISAR_EDGRN_TOLERANCE=none NISAR_EDGRN_MAX_POINTS=91`.
 
 ⚠️ **A loaded layered model refuses to `forward()`.** EDGRN tables are megabytes
 and are not saved with the model, so it installs an engine that raises and names

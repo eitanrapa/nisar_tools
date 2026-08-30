@@ -424,7 +424,12 @@ LAYOUT = dict(
 #: lets the resolution decide only *where* the parameters go.
 ADAPT = dict(
     rounds=int(os.environ.get("NISAR_ADAPT_ROUNDS", 0)),
-    budget=os.environ.get("NISAR_ADAPT_BUDGET", "conserve"),
+    # ⚠️ An integer, not "conserve", for any run of more than three rounds.
+    # "conserve" is resolved against the STARTING mesh now, so it no longer
+    # drifts -- but an absolute number is what makes two runs comparable.
+    budget=(int(os.environ["NISAR_ADAPT_BUDGET"])
+            if os.environ.get("NISAR_ADAPT_BUDGET", "conserve").lstrip("-").isdigit()
+            else os.environ.get("NISAR_ADAPT_BUDGET", "conserve")),
     gain=float(os.environ.get("NISAR_ADAPT_GAIN", 0.5)),
     max_ratio=float(os.environ.get("NISAR_ADAPT_MAX_RATIO", 3.0)),
     # "rows" keeps depth levels (one depth for the whole fault, node count and
@@ -437,7 +442,37 @@ ADAPT = dict(
     # to 10.4% against the row layout's 15.3%, with a 19.1 degree minimum angle
     # against 9.0.
     structure=os.environ.get("NISAR_ADAPT_STRUCTURE", "rows"),
+    # What the size field is built from.
+    #
+    # ⚠️ **"diagonal", not "kernel", and that is measured.** A four-arm A/B on the
+    # six real scenes, one budget, compared at matched effective rank, put the
+    # kernel-sized loop behind the diagonal one at *every* rank and behind a
+    # *fixed* mesh at rank 10 and 20 (rms 31.6 vs 28.7 mm). The argument against
+    # the diagonal still stands -- it saturates, 42-75% of elements pinned on the
+    # `max_ratio` clamp -- it simply does not translate into a better model.
+    #
+    # ⚠️ And `"kernel"` is **not Barnhart & Lohman's metric**, despite being the
+    # kernel-width option: they fit a Gaussian, `resolution_kernels` takes second
+    # moments, and against a kernel with 19.4% of its mass beyond 3 sigma the two
+    # differ by 3.09x along strike. See `kernel_element_size`.
+    size_from=os.environ.get("NISAR_ADAPT_SIZE_FROM", "diagonal"),
 )
+
+#: Absolute element-size clamps for the adaptive loop, metres. ``None`` lets
+#: `iterate_sampling` pin them to the STARTING mesh (``current.min()/max_ratio``
+#: and ``current.max()*max_ratio``).
+#:
+#: ⚠️ They used to be recomputed from *this round's* mesh, so the clamp followed
+#: the drift it was supposed to bound and the size spread widened without limit --
+#: 6.5x after three rounds, 30x after eight. `max_ratio` bounds the per-step
+#: ratio, not the cumulative one. Set them here to pin the spread outright.
+ADAPT_SIZE_MIN = (float(os.environ["NISAR_ADAPT_SIZE_MIN"])
+                  if os.environ.get("NISAR_ADAPT_SIZE_MIN") else None)
+ADAPT_SIZE_MAX = (float(os.environ["NISAR_ADAPT_SIZE_MAX"])
+                  if os.environ.get("NISAR_ADAPT_SIZE_MAX") else None)
+for _key, _value in (("size_min", ADAPT_SIZE_MIN), ("size_max", ADAPT_SIZE_MAX)):
+    if _value is not None:
+        ADAPT[_key] = _value
 
 #: What the quadtree splits on. ``"model"`` is Wang & Fialko's predicted
 #: displacement (the default, and what every run before this used);
