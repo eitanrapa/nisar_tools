@@ -57,6 +57,8 @@ degrees. Converting to angles and back would put that ambiguity in the middle of
 the one calculation whose sign nothing downstream can check.
 """
 
+import warnings
+
 import numpy as np
 
 from .greens import _as_points, _require_finite
@@ -128,6 +130,24 @@ _QUADRATURE_CONSTANT = 0.312
 #: the fraction of pairs exceeding their tolerance from **51.7% to 5.6%**.
 _QUADRATURE_SAFETY = 4.0
 
+#: Fraction of source-receiver pairs allowed to hit the order cap before
+#: :meth:`LayeredPointSource.los_matrix` says so.
+#:
+#: ⚠️ **A capped pair is a pair whose requested tolerance was not met**, and
+#: nothing used to report that. The cap binds inside roughly ``2 * L``, which is
+#: precisely where the near-fault observations that carry the shallow-slip
+#: constraint sit -- so silence there is the wrong default. The guarantee the
+#: adaptive rule actually offers is *"never coarser than the fixed rule it
+#: replaces"*, not the tolerance.
+#:
+#: 5% rather than zero because saturation is not by itself a fault: measured,
+#: 1.54% of pairs saturate on a 240-element synthetic and the assembly is still
+#: accurate to 1.2e-5. The real six-scene run saturates **0.00%** of 3.4 M pairs
+#: at the current cap, so anything above a few percent means the geometry has
+#: changed -- much larger elements, or observations much closer to the fault --
+#: and `max_points` should be raised.
+CAPPED_PAIR_WARN_FRACTION = 0.05
+
 
 class LayeredPointSource:
     """Point-source superposition through EDGRN tables; a layered engine.
@@ -157,6 +177,10 @@ class LayeredPointSource:
         self.nu = float(nu)
         self.tolerance = None if tolerance is None else float(tolerance)
         self.max_points = int(max_points)
+        #: Filled in by every assembly: how much quadrature it actually spent and
+        #: how many pairs went unresolved at the cap. Provenance, and the only
+        #: place the tolerance's *unmet* cases are visible.
+        self.quadrature_report = None
 
     # -- the engine protocol ----------------------------------------------
     #: This engine can integrate a basis function directly, so
@@ -231,6 +255,9 @@ class LayeredPointSource:
 
         vertices, areas = mesh.vertices, mesh.areas
         centroids, normals = mesh.centroids, mesh.normals
+        cap = int(np.sqrt(self.max_points))
+        pairs = capped = 0
+        histogram = {}
 
         for index, elements in supports:
             accumulated = [np.zeros((x.size, 3)), np.zeros((x.size, 3))]
@@ -239,6 +266,11 @@ class LayeredPointSource:
                 normal = normals[element]
                 size = np.sqrt(2.0 * areas[element])
                 orders = self._orders(centroids[element], size, x, y, z)
+                pairs += int(orders.size)
+                capped += int((orders >= cap).sum())
+                values, counts = np.unique(orders, return_counts=True)
+                for v, c in zip(values.tolist(), counts.tolist()):
+                    histogram[int(v)] = histogram.get(int(v), 0) + int(c)
 
                 for comp, direction in enumerate(_slip_directions(normal)):
                     moment = _moment_components(normal, direction)
@@ -253,6 +285,40 @@ class LayeredPointSource:
                             points, weights, moment, x[at], y[at])
             for comp in (0, 1):
                 yield index, comp, accumulated[comp]
+
+        self.quadrature_report = {
+            "pairs": pairs,
+            "capped": capped,
+            "capped_fraction": (capped / pairs) if pairs else 0.0,
+            "points_per_pair": (sum(k * k * n for k, n in histogram.items()) / pairs
+                                if pairs else 0.0),
+            "max_order": max(histogram) if histogram else 0,
+            "order_histogram": dict(sorted(histogram.items())),
+            "tolerance": self.tolerance,
+            "max_points": self.max_points,
+        }
+        self._warn_if_capped()
+    def _warn_if_capped(self):
+        """Say when the requested tolerance was not met, and on how many pairs.
+
+        The order cap binds inside roughly ``2 * L``, so the pairs it silences are
+        near-fault observations of shallow elements -- the ones carrying the
+        shallow-slip constraint. See :data:`CAPPED_PAIR_WARN_FRACTION`.
+        """
+        report = self.quadrature_report
+        if not report or self.tolerance is None:
+            return
+        fraction = report["capped_fraction"]
+        if fraction <= CAPPED_PAIR_WARN_FRACTION:
+            return
+        warnings.warn(
+            f"{fraction:.1%} of {report['pairs']} source-receiver pairs hit the "
+            f"quadrature order cap (max_points={self.max_points}), so tolerance="
+            f"{self.tolerance:g} was NOT met on them. The cap binds within about "
+            "twice an element's own size, i.e. on near-fault observations of "
+            "shallow elements. Raise max_points, or use larger exclude_within.",
+            RuntimeWarning, stacklevel=3,
+        )
 
     def _orders(self, centroid, size, x, y, z):
         """Quadrature order for each observation, from how far away it is.

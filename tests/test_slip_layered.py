@@ -22,6 +22,8 @@ import pytest
 from nisar_tools.slip import FaultMesh, FaultTrace, HalfSpaceTDE
 from nisar_tools.slip.edgrn import EdgrnTables, VelocityModel
 from nisar_tools.slip.layered import (
+    CAPPED_PAIR_WARN_FRACTION,
+    _QUADRATURE_CONSTANT,
     REFERENCE_QUADRATURE_POINTS,
     LayeredPointSource,
     _moment_components,
@@ -387,3 +389,132 @@ def test_tent_assembly_costs_about_three_element_assemblies(uniform_tables, scen
         for i in range(mesh.n_nodes) for e in basis._incident[i])
 
     assert 2.0 < nodal_points / element_points < 4.0
+
+
+# -- the error model behind the adaptive rule --------------------------------
+#
+# `_QUADRATURE_CONSTANT`, `_QUADRATURE_SAFETY`, `MAX_QUADRATURE_POINTS` and
+# `DEFAULT_TOLERANCE` were imported by no test at all, so the 2026-08-18
+# recalibration -- which moved the exponent from -1 to -2 and changed what the
+# tolerance knob *means* -- could have been reverted without anything failing.
+# These pin it.
+
+def _order_error(tables, mesh, element, order, x, y, truth_order=40):
+    """Relative error of an order-``k`` rule on one element, against a fine rule."""
+    slip = np.zeros(2 * mesh.n_elements)
+    slip[element] = 1.0
+    z = np.zeros_like(x)
+
+    def field(k):
+        engine = LayeredPointSource(tables, tolerance=None, max_points=k * k)
+        return engine.forward(mesh, slip, x, y, z=z)
+
+    truth = field(truth_order)
+    got = field(order)
+    scale = np.linalg.norm(truth, axis=1)
+    keep = scale > 0
+    return np.linalg.norm(got - truth, axis=1)[keep] / scale[keep]
+
+
+def test_the_quadrature_error_model_is_the_one_that_is_shipped(uniform_tables, scene):
+    """`err = C * (k*r/L)**-2`, with the exponent and constant both pinned.
+
+    ⚠️ **The exponent is 2, not 1**, because a triangle's first moment vanishes
+    about its own centroid so the centroid rule's leading term is second order.
+    Getting this wrong does not break anything visibly -- it makes the delivered
+    error scale as `tolerance**2`, so the knob silently stops meaning what it
+    says (asking 1e-2 delivered 5e-3; asking 3e-3 delivered 1e-5).
+    """
+    _, _, mesh, ox, oy = scene
+    element = int(np.argmin(mesh.centroids[:, 2]))     # shallowest, widest r/L range
+    centroid = mesh.centroids[element]
+    size = np.sqrt(2.0 * mesh.areas[element])
+
+    rows = []
+    for order in (1, 2, 3, 5, 8):
+        err = _order_error(uniform_tables, mesh, element, order, ox, oy)
+        r = np.sqrt((ox - centroid[0]) ** 2 + (oy - centroid[1]) ** 2
+                    + centroid[2] ** 2)
+        # Only pairs the smooth law is meant to describe, and only errors above
+        # float noise -- an order-8 rule at r/L = 30 is exact to rounding.
+        ok = (r / size > 1.5) & (err > 1e-11)
+        for rr, ee in zip((order * r / size)[ok[:err.size]], err[ok[:err.size]]):
+            rows.append((rr, ee))
+
+    rows = np.array(rows)
+    assert len(rows) > 100, len(rows)
+    slope, intercept = np.polyfit(np.log(rows[:, 0]), np.log(rows[:, 1]), 1)
+
+    assert slope == pytest.approx(-2.0, abs=0.5), f"exponent {slope:.2f}, expected -2"
+    fitted_c = float(np.exp(intercept))
+    assert 0.1 * _QUADRATURE_CONSTANT < fitted_c < 10.0 * _QUADRATURE_CONSTANT, (
+        f"fitted C {fitted_c:.3g} against the shipped {_QUADRATURE_CONSTANT}")
+
+
+def test_the_safety_factor_keeps_most_pairs_inside_their_tolerance(uniform_tables, scene):
+    """Fit scatter is ~1.9x at one sigma, so a median-centred model leaves half
+    the pairs over. The 4x safety factor is what takes that to a few percent.
+
+    ⚠️ Judged **only on uncapped pairs**: a capped pair never asked for its order
+    and `max |err|` over a whole array saturates on the cap, reading the same
+    value at every tolerance and so telling you nothing.
+    """
+    _, _, mesh, ox, oy = scene
+    tolerance = 3e-3
+    engine = LayeredPointSource(uniform_tables, tolerance=tolerance)
+    cap = int(np.sqrt(engine.max_points))
+
+    over = total = 0
+    for element in range(0, mesh.n_elements, 7):
+        centroid, size = mesh.centroids[element], np.sqrt(2.0 * mesh.areas[element])
+        orders = engine._orders(centroid, size, ox, oy, np.zeros_like(ox))
+        for order in np.unique(orders):
+            if order >= cap:
+                continue
+            at = orders == order
+            err = _order_error(uniform_tables, mesh, element, int(order),
+                               ox[at], oy[at])
+            total += err.size
+            over += int((err > tolerance).sum())
+
+    assert total > 200, total
+    assert over / total < 0.15, f"{over}/{total} pairs exceeded tolerance"
+
+
+def test_an_assembly_reports_what_quadrature_it_spent(uniform_tables, scene):
+    """Provenance, and the only place an unmet tolerance is visible.
+
+    The guarantee the adaptive rule offers is "never coarser than the fixed rule
+    it replaces", not the tolerance -- the cap binds within about `2 * L`. That
+    distinction was previously invisible to a caller.
+    """
+    _, _, mesh, ox, oy = scene
+    engine = LayeredPointSource(uniform_tables, tolerance=3e-3)
+    assert engine.quadrature_report is None
+
+    engine.displacement(mesh, ox, oy, np.zeros_like(ox))
+    report = engine.quadrature_report
+
+    assert report["pairs"] == mesh.n_elements * ox.size
+    assert 0.0 <= report["capped_fraction"] <= 1.0
+    assert report["tolerance"] == 3e-3
+    assert sum(report["order_histogram"].values()) == report["pairs"]
+    # Cheap, which is the whole claim: far fewer points per pair than the
+    # reference's fixed 91.
+    assert report["points_per_pair"] < REFERENCE_QUADRATURE_POINTS / 5.0
+
+    fixed = LayeredPointSource(uniform_tables, tolerance=None,
+                               max_points=REFERENCE_QUADRATURE_POINTS)
+    fixed.displacement(mesh, ox, oy, np.zeros_like(ox))
+    assert (fixed.quadrature_report["points_per_pair"]
+            > 5.0 * report["points_per_pair"])
+
+
+def test_saturating_the_cap_is_reported_not_swallowed(uniform_tables, scene):
+    """A tolerance nobody can meet must say so rather than quietly capping."""
+    _, _, mesh, ox, oy = scene
+    engine = LayeredPointSource(uniform_tables, tolerance=1e-12, max_points=9)
+
+    with pytest.warns(RuntimeWarning, match="hit the quadrature order cap"):
+        engine.displacement(mesh, ox, oy, np.zeros_like(ox))
+    assert engine.quadrature_report["capped_fraction"] > CAPPED_PAIR_WARN_FRACTION

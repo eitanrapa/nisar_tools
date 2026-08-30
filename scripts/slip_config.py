@@ -305,13 +305,27 @@ VELOCITY_MODEL = VelocityModel(
 #: only chooses quadtree cells and the observations it writes carry no trace of
 #: which engine picked them. Sampling with the half-space and inverting layered is
 #: the same reasoning as Wang & Fialko's "preliminary model", and it is much faster.
+from nisar_tools.slip.layered import MAX_QUADRATURE_POINTS  # noqa: E402
+
 ENGINE_KIND = os.environ.get("NISAR_ENGINE", "layered").lower()
 
 #: Quadrature accuracy for the layered engine. The order is chosen per element
 #: *and* per observation, which measured 52x fewer source-receiver evaluations at
-#: this tolerance than the reference's fixed 91 points; ``None`` restores the
-#: fixed rule.
-EDGRN_TOLERANCE = 3e-3
+#: this tolerance than the reference's fixed 91 points.
+#:
+#: ``NISAR_EDGRN_TOLERANCE=none`` restores a fixed rule at the cap -- and note
+#: that is the **cap**, not the reference: pair it with
+#: ``NISAR_EDGRN_MAX_POINTS=91`` to reproduce what this replaces.
+EDGRN_TOLERANCE = (None if os.environ.get("NISAR_EDGRN_TOLERANCE", "").lower()
+                   in ("none", "null", "fixed")
+                   else float(os.environ.get("NISAR_EDGRN_TOLERANCE", 3e-3)))
+
+#: Quadrature order cap, as a point count. Raising it costs almost nothing --
+#: the adaptive rule only spends where the error model asks -- and it is what
+#: decides whether near-fault observations of shallow elements get the tolerance
+#: they asked for. `LayeredPointSource` warns when too many pairs hit it.
+EDGRN_MAX_POINTS = int(os.environ.get("NISAR_EDGRN_MAX_POINTS",
+                                      MAX_QUADRATURE_POINTS))
 
 #: ``ramp`` gives each *named* track its own nuisance terms. Without it an
 #: interferogram's arbitrary constant lands in the slip as broad, deep, fictitious
@@ -645,13 +659,15 @@ def engine():
         try:
             tables = EdgrnTables.from_input_file(inp)
             print(f"    engine: layered, cached tables from {inp}", flush=True)
-            return LayeredPointSource(tables, tolerance=EDGRN_TOLERANCE)
+            return LayeredPointSource(tables, tolerance=EDGRN_TOLERANCE,
+                                      max_points=EDGRN_MAX_POINTS)
         except Exception as exc:                                   # noqa: BLE001
             print(f"    cached tables at {inp} unusable ({exc}); regenerating",
                   flush=True)
     print(f"    engine: layered, running EDGRN into {EDGRN_DIR}", flush=True)
     tables = run_edgrn(VELOCITY_MODEL, EDGRN_DIR)
-    return LayeredPointSource(tables, tolerance=EDGRN_TOLERANCE)
+    return LayeredPointSource(tables, tolerance=EDGRN_TOLERANCE,
+                              max_points=EDGRN_MAX_POINTS)
 
 
 def inversion_kwargs():

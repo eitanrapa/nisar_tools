@@ -265,3 +265,51 @@ def test_run_edgrn_says_what_to_do_when_there_is_no_binary(tmp_path, monkeypatch
     model = VelocityModel.uniform()
     with pytest.raises(RuntimeError, match="pygrnwang|executable"):
         run_edgrn(model, tmp_path)
+
+
+def test_interpolation_is_unchanged_by_the_clip_rewrite():
+    """`interpolate` is the layered engine's hot path and was rewritten for speed.
+
+    `np.clip` routes through `_methods._clip`, which builds a `finfo` per call for
+    NaN handling -- profiled at 316 096 `getlimits.__init__` calls and 20% of
+    assembly time, all overhead. `minimum(maximum(...))` skips it. Equivalent here
+    because nothing in the stencil is ever NaN, but "equivalent" is worth pinning
+    rather than asserting, so this checks the rewrite against a literal
+    transcription of what the function used to compute -- including the corners:
+    below the table, above it, and exactly on the last node.
+    """
+    r = np.linspace(0.0, 100e3, 21)
+    z = np.linspace(500.0, 20e3, 11)
+    tables = EdgrnTables.homogeneous(nu=0.25, r=r, z=z, n_azimuth=8)
+
+    def old(kind, component, distance, depth):
+        table = tables.tables[kind][component]
+        nr, nz = table.shape
+        dr = (r[-1] - r[0]) / (nr - 1)
+        dz = (z[-1] - z[0]) / (nz - 1)
+        fi = np.clip((np.asarray(distance, float) - r[0]) / dr, 0.0, nr - 1)
+        fj = np.clip((np.asarray(depth, float) - z[0]) / dz, 0.0, nz - 1)
+        i0 = np.clip(np.floor(fi).astype(int), 0, nr - 2)
+        j0 = np.clip(np.floor(fj).astype(int), 0, nz - 2)
+        ti, tj = fi - i0, fj - j0
+        i1, j1 = np.minimum(i0 + 1, nr - 1), np.minimum(j0 + 1, nz - 1)
+        return ((1 - ti) * (1 - tj) * table[i0, j0]
+                + ti * (1 - tj) * table[i1, j0]
+                + (1 - ti) * tj * table[i0, j1]
+                + ti * tj * table[i1, j1])
+
+    rng = np.random.default_rng(0)
+    distance = np.concatenate([
+        rng.uniform(0.0, 100e3, 500),
+        np.array([-5e3, 0.0, r[-1], 150e3]),          # below, at, at, above
+    ])
+    depth = np.concatenate([
+        rng.uniform(500.0, 20e3, 500),
+        np.array([0.0, z[0], z[-1], 40e3]),
+    ])
+
+    for kind in ("ss", "ds", "cl"):
+        for component in ("uz", "ur", "ut"):
+            want = old(kind, component, distance, depth)
+            got = tables.interpolate(kind, component, distance, depth)
+            assert np.array_equal(got, want), (kind, component)
