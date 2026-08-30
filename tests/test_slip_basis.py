@@ -356,3 +356,83 @@ def test_layered_engine_ignores_nu(scene):
     a = SlipInversion(mesh, obs, engine=LayeredPointSource(tables, nu=0.25))
     b = SlipInversion(mesh, obs, engine=LayeredPointSource(tables, nu=0.40))
     np.testing.assert_array_equal(a.g, b.g)
+
+
+# -- the two edge-weight families must share a scale ------------------------
+#
+# `_edge_weight` uses the cotangent weight where it is safe and Floater's
+# mean-value weight where it is not (obtuse opposite angle, or a boundary edge
+# with only one adjacent triangle). The cotangent weight is **dimensionless**;
+# Floater's is `.../|ij|`, one over a length. Mixed unscaled on a metre-unit mesh
+# with kilometre edges, the fallback lands ~2400x weaker -- and the confirmation
+# was exact on the real mesh: `cot / mean_value` measured **2397** against a
+# median edge length of **2397 m**. The ratio *was* the edge length.
+#
+# The consequence was not subtle. A node whose edges *all* fall back keeps almost
+# no regularisation, and on the real unstructured Venezuela mesh exactly one node
+# did -- on the free surface, the one boundary with no zero-slip row to save it.
+# Its smoothing row came out 1342x weaker than the median, its model resolution
+# 0.998 (best of 368 parameters, purely because nothing damped it), and it took
+# 4.59 m of slip against a 2.37 m second place -- *growing* with the smoothing
+# weight, to 6.47 m at lambda 300 and onto the 8 m bound at lambda 1000.
+
+def test_the_smoothing_operator_does_not_depend_on_the_units_of_the_mesh(mesh):
+    """The bug, stated directly: relative weights must not care about metres.
+
+    A mesh scaled by 1000 is the same mesh. If the two weight families are on
+    different scales, the *proportion* of edges taking each one changes nothing
+    but their relative sizes change by 1000 -- so the operator's shape moves.
+    """
+    from nisar_tools.slip.regularize import laplace_beltrami as lb
+
+    # x10, not x1000: the constructor refuses nodes beyond 1e7 m, which is itself
+    # a guard against the reference's silent km/m mix.
+    scale = 10.0
+    big = FaultMesh(mesh.nodes * scale, mesh.triangles, mesh.params * scale,
+                    frame=mesh.frame)
+
+    def shape(m):
+        rows = np.abs(lb(m).tocsr()[:m.n_nodes]).sum(axis=1).A.ravel()
+        return rows / np.median(rows)          # normalised: only the shape matters
+
+    assert np.allclose(shape(mesh), shape(big), rtol=1e-9), (
+        "the smoothing operator's shape changed when the mesh was rescaled")
+
+
+def test_no_node_is_left_effectively_unregularised(mesh):
+    """No smoothing row may be orders of magnitude weaker than typical.
+
+    That is what "unregularised free parameter" looks like in this operator, and
+    it is how the 4.59 m spike happened.
+    """
+    from nisar_tools.slip.regularize import laplace_beltrami as lb
+
+    rows = np.abs(lb(mesh).tocsr()[:mesh.n_nodes]).sum(axis=1).A.ravel()
+    assert rows.min() > 0.02 * np.median(rows), (
+        f"weakest row is {rows.min() / np.median(rows):.5f} of the median")
+
+
+def test_a_fully_fallback_node_is_still_smoothed(mesh):
+    """Specifically the node the fallback governs entirely."""
+    from nisar_tools.slip.regularize import (_angle_at, _one_rings,
+                                             laplace_beltrami as lb)
+
+    rings = _one_rings(mesh.triangles, mesh.n_nodes)
+    nodes = mesh.nodes
+    starved = []
+    for i, ring in enumerate(rings):
+        acute = sum(
+            1 for j, opp in ring.items()
+            if len(set(opp)) == 2
+            and all(0.0 < _angle_at(nodes, i, j, t) < np.pi / 2
+                    for t in sorted(set(opp))))
+        if ring and acute == 0:
+            starved.append(i)
+
+    if not starved:
+        pytest.skip("this mesh has no fully-fallback node")
+    rows = np.abs(lb(mesh).tocsr()[:mesh.n_nodes]).sum(axis=1).A.ravel()
+    for node in starved:
+        assert rows[node] > 0.02 * np.median(rows), (
+            f"node {node} takes the fallback on every edge and its row is "
+            f"{rows[node] / np.median(rows):.5f} of the median")

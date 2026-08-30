@@ -47,9 +47,26 @@ def _scale_slip(coll, value, component, vmin, vmax):
         coll.set_clim(vmin, vmax)
 
 
-def _slip_title(model, component):
-    return (f"{component} slip -- VR {model.variance_reduction:.1f}%, "
-            f"Mw {model.moment_magnitude:.2f}, max {model.max_slip:.2f} m")
+def _slip_title(model, component, drawn=None):
+    """Title for a slip panel.
+
+    ⚠️ ``max`` quotes the value **actually drawn**, not ``model.max_slip``. Those
+    differ for a nodal model: the panel shades each triangle by the mean of its
+    three nodes while ``max_slip`` is the peak of the continuous tent field, and
+    on the real six-scene model that gap was 3.04 m against 4.59 m -- **51%**, with
+    the larger number printed above a colourbar that stopped at the smaller one.
+    The nodal peak is still reported, in brackets, because it is the peak of the
+    field and the more conventional headline; it is simply labelled.
+    """
+    head = (f"{component} slip -- VR {model.variance_reduction:.1f}%, "
+            f"Mw {model.moment_magnitude:.2f}")
+    if drawn is None:
+        return head + f", max {model.max_slip:.2f} m"
+    peak = float(np.abs(np.asarray(drawn)).max())
+    nodal = float(model.max_slip)
+    if abs(nodal - peak) <= 0.01 * max(abs(nodal), 1e-9):
+        return head + f", max {peak:.2f} m"
+    return head + f", max {peak:.2f} m drawn ({nodal:.2f} m nodal)"
 
 
 def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
@@ -95,7 +112,7 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     ax.set_ylabel("Depth (km)")
     ax.set_aspect("equal")
 
-    heading = _slip_title(model, component) if title is None else title
+    heading = _slip_title(model, component, value) if title is None else title
     if kernels is not None:
         width = float(np.median(np.asarray(kernels["width_along"].values)))
         heading += f"\nresolving length {width / 1e3:.0f} km along strike"
@@ -180,7 +197,7 @@ def plot_slip_3d(model, component="magnitude", ax=None, cmap="magma_r",
     ax.set_ylabel("North (km)", labelpad=8)
     ax.set_zlabel("Depth (km)", labelpad=2)
     ax.tick_params(labelsize=7, pad=1)
-    ax.set_title(_slip_title(model, component) if title is None else title)
+    ax.set_title(_slip_title(model, component, value) if title is None else title)
     # A roomier pad than the flat panels use: a 3-D axes reserves no space for
     # its z label, so a tight colorbar lands on top of "Depth (km)".
     ax.figure.colorbar(coll, ax=ax, label="Slip (m)", shrink=0.6, pad=0.10)
