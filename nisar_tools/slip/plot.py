@@ -70,7 +70,7 @@ def _slip_title(model, component, drawn=None):
 
 
 def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
-              vmin=None, vmax=None, title=None, kernels=None):
+              vmin=None, vmax=None, title=None, kernels=None, shading="auto"):
     """Slip on the unrolled fault: along-strike distance against depth.
 
     ``component`` is ``"magnitude"``, ``"strike"`` or ``"dip"``. Elements are
@@ -85,26 +85,64 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     shows roughly ten times more detail than the data supports, and nothing in
     the picture itself says so.
 
-    Slip is drawn **per element** whatever the model's basis. For a nodal model
-    that means each triangle is shaded by the mean of its three nodes, which
-    understates the peak of a continuous field slightly -- but drawing the
-    parameters themselves would put a nodal model on a different geometry from an
-    element one and make the two impossible to compare by eye, which is the main
-    thing this plot is for.
+    ``shading`` decides how a triangle is coloured, and it is not cosmetic:
+
+    * ``"auto"`` (default) -- **Gouraud** for a nodal model, flat for an element
+      one. Each draws the field the model actually holds.
+    * ``"flat"`` -- one colour per triangle from the element mean, whatever the
+      basis. Use it only to put a nodal and an element model on the same footing
+      for a side-by-side.
+
+    ⚠️ **A nodal model must not be drawn flat by default.** Its slip is expanded
+    in piecewise-linear tents, so it varies *linearly* across every triangle;
+    colouring each one constant draws the piecewise-constant field a
+    constant-slip TDE would give -- which is exactly what this parameterization
+    exists not to be, and a reader cannot tell the difference by looking. The
+    Gouraud interpolation is not a smoothing convenience, it is the exact field.
+
+    It also removes a reporting trap. Under flat shading the panel's peak was the
+    element *mean* while the title quoted the nodal peak; on the real six-scene
+    model those were 3.04 m and 4.59 m, a **51%** disagreement between a figure
+    and its own caption. Drawing the nodal field makes the two the same number.
+
+    :func:`plot_slip_edges` is the other honest view -- nodal values along the
+    element edges, where adjacent edges disagreeing at a shared node is the nodal
+    signature a shaded triangle hides.
     """
     import matplotlib.pyplot as plt
     from matplotlib.collections import PolyCollection
 
     mesh = model.mesh
+    is_nodal = getattr(getattr(model, "basis", None), "name", None) == "node"
+    nodal = (_nodal_component(model, component)
+             if is_nodal and shading != "flat" else None)
     value = _slip_component(model, component)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 3.2))
 
-    coll = PolyCollection(mesh.param_vertices / 1e3, array=value, cmap=cmap,
-                          edgecolors="none")
-    _scale_slip(coll, value, component, vmin, vmax)
-    ax.add_collection(coll)
+    if nodal is not None:
+        # ⚠️ **Gouraud, because the field really is linear across a triangle.**
+        # A nodal basis expands slip in piecewise-linear tents, so shading each
+        # triangle one colour draws a *different model* -- the piecewise-constant
+        # field a constant-slip TDE would give, which is precisely what this
+        # parameterization exists not to be. Interpolating from the three nodal
+        # values is not a smoothing convenience; it is the exact field.
+        #
+        # It also removes a reporting trap: with flat shading the panel's peak was
+        # the element mean while the title quoted the nodal peak, and on the real
+        # model those were 3.04 m and 4.59 m -- a 51% disagreement between a
+        # figure and its own caption.
+        coll = ax.tripcolor(mesh.params[:, 0] / 1e3, mesh.params[:, 1] / 1e3,
+                            mesh.triangles, nodal, shading="gouraud", cmap=cmap)
+        _scale_slip(coll, nodal, component, vmin, vmax)
+        drawn = nodal
+    else:
+        coll = PolyCollection(mesh.param_vertices / 1e3, array=value, cmap=cmap,
+                              edgecolors="none")
+        _scale_slip(coll, value, component, vmin, vmax)
+        ax.add_collection(coll)
+        drawn = value
 
     ax.set_xlim(mesh.params[:, 0].min() / 1e3, mesh.params[:, 0].max() / 1e3)
     ax.set_ylim(mesh.params[:, 1].min() / 1e3, 0.0)
@@ -112,7 +150,7 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     ax.set_ylabel("Depth (km)")
     ax.set_aspect("equal")
 
-    heading = _slip_title(model, component, value) if title is None else title
+    heading = _slip_title(model, component, drawn) if title is None else title
     if kernels is not None:
         width = float(np.median(np.asarray(kernels["width_along"].values)))
         heading += f"\nresolving length {width / 1e3:.0f} km along strike"

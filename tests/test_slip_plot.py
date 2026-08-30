@@ -386,3 +386,67 @@ def test_plot_slip_can_draw_the_resolving_length(solved):
     assert span == pytest.approx(
         float(np.median(report["width_along"].values)), rel=1e-6)
     matplotlib.pyplot.close(fig)
+
+
+# -- a nodal model must not be drawn as a piecewise-constant one -------------
+
+def test_a_nodal_model_is_drawn_as_the_linear_field_it_is(solved_nodal):
+    """⚠️ Flat shading draws a *different model* -- the user's objection.
+
+    A nodal basis expands slip in piecewise-linear tents, so the field varies
+    linearly across every triangle. Colouring each triangle one colour draws the
+    piecewise-constant field a constant-slip TDE would give, and a reader cannot
+    tell the two apart by looking. Gouraud interpolation from the three nodal
+    values is not a smoothing convenience; it is the exact field.
+    """
+    from matplotlib.collections import PolyCollection
+    from matplotlib.collections import TriMesh
+
+    model = solved_nodal
+    assert model.basis.name == "node"
+
+    fig, ax = slip_plot.plot_slip(model)
+    # `tripcolor(shading="gouraud")` yields a TriMesh; flat shading a PolyCollection.
+    assert any(isinstance(c, TriMesh) for c in ax.collections), (
+        "a nodal model was drawn with flat per-triangle shading")
+    matplotlib.pyplot.close(fig)
+
+    fig, ax = slip_plot.plot_slip(model, shading="flat")
+    assert any(isinstance(c, PolyCollection) and not isinstance(c, TriMesh)
+               for c in ax.collections), "shading='flat' did not fall back"
+    matplotlib.pyplot.close(fig)
+
+
+def test_the_title_quotes_the_value_the_panel_actually_draws(solved_nodal):
+    """Title and colourbar must agree. They differed by 51% on the real model.
+
+    Flat shading reduces the peak to the element mean while `model.max_slip` is
+    the peak of the continuous field -- 3.04 m against 4.59 m on the six-scene
+    run, the larger number printed above a colourbar that stopped at the smaller.
+    """
+    model = solved_nodal
+    nodal = float(np.hypot(model.strike_slip, model.dip_slip).max())
+
+    fig, ax = slip_plot.plot_slip(model)                      # gouraud: draws the nodal field
+    assert f"{nodal:.2f}" in ax.get_title()
+    matplotlib.pyplot.close(fig)
+
+    fig, ax = slip_plot.plot_slip(model, shading="flat")      # flat: draws the element mean
+    element = float(np.linalg.norm(model.element_slip, axis=1).max())
+    title = ax.get_title()
+    assert f"{element:.2f}" in title
+    if abs(nodal - element) > 0.01 * nodal:
+        assert "nodal" in title, "the nodal peak must be labelled when it differs"
+    matplotlib.pyplot.close(fig)
+
+
+def test_an_element_model_is_still_drawn_flat(solved):
+    """An element basis really is piecewise constant, so flat is correct there."""
+    from matplotlib.collections import TriMesh
+
+    _, mesh, obs, _, _ = solved
+    model = SlipInversion(mesh, obs).solve(smoothing=0.5, polarity=(-1, 0, 0))
+    assert model.basis.name == "element"
+    fig, ax = slip_plot.plot_slip(model)
+    assert not any(isinstance(c, TriMesh) for c in ax.collections)
+    matplotlib.pyplot.close(fig)
