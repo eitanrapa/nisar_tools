@@ -574,11 +574,21 @@ class SlipModel:
         what every earlier run recorded -- but this is the one that says whether
         the fit is consistent with the stated noise.
 
-        Returns ``None`` for a model whose inversion is gone (a loaded one), since
+        ⚠️ **``None`` unless a covariance model was supplied**, and that is the
+        point rather than a limitation. Without one the whitening is a
+        multiplication by ``1/sqrt(n)``, so the sum of squares comes out around
+        ``1e-4`` times the residual norm -- a number in arbitrary units that looks
+        like a chi-square, reads as a spectacularly good fit, and means nothing.
+        A statistic that is only interpretable against a stated noise model should
+        be absent when no noise model was stated.
+
+        Also ``None`` for a model whose inversion is gone (a loaded one), since
         whitening needs the covariance factors and those are not saved.
         """
         inversion = self._inversion
         if inversion is None or not hasattr(inversion, "whiten"):
+            return None
+        if getattr(inversion, "covariance", None) is None:
             return None
         whitened = inversion.whiten(self.residual)
         return float(whitened @ whitened)

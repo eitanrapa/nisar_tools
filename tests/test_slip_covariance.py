@@ -523,6 +523,28 @@ def test_whitening_does_not_by_itself_improve_the_slip_estimate(signal_setup):
     )
 
 
+def test_chi_square_is_absent_without_a_noise_model(signal_setup):
+    """A statistic only meaningful against a stated noise model must not appear
+    when none was stated.
+
+    Without a covariance the whitening is a multiply by `1/sqrt(n)`, so the sum of
+    squares lands around 1e-4 times the residual norm -- it looks like a
+    chi-square, it reads as a spectacular fit, and it means nothing. Caught on the
+    real six-scene L-curve, where the plain arm printed `chi2/n 0.000` at every
+    weight.
+    """
+    _, _, mesh, _, parts = signal_setup
+    obs = Observations.concat(parts)
+    plain = SlipInversion(mesh, obs, ramp="offset")
+    solved = plain.solve(smoothing=0.3, max_iter=200,
+                         strike=(-10.0, 0.0), dip=(-1.0, 1.0))
+
+    assert solved.chi_square is None
+    assert solved.reduced_chi_square is None
+    # The metrics that do not depend on a noise model are still there.
+    assert solved.rms_misfit > 0 and solved.variance_reduction > 0
+
+
 def test_chi_square_reports_the_metric_that_was_minimised(signal_setup):
     _, _, mesh, _, parts = signal_setup
     obs = Observations.concat(parts, normalize="none")
