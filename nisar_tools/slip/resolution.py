@@ -594,6 +594,29 @@ def kernel_element_size(inversion, smoothing, fraction=0.5, reduce="min",
     ``reduce`` picks how the anisotropic kernel becomes one number; see
     :data:`KERNEL_REDUCTIONS`. ``report`` reuses a
     :func:`resolution_report` you already have, which is the expensive part.
+
+    ⚠️ **This is NOT Barnhart & Lohman's metric, despite being the kernel-width
+    option.** They fit a *Gaussian* to row ``k`` of ``R`` against 3-D distance and
+    take its 1-sigma; :func:`resolution_kernels` takes *second moments*, which
+    weight by distance squared. The averaging kernel here is strongly
+    non-Gaussian -- measured on the real six-scene model, **19.4% of a row's
+    ``|R|`` mass sits beyond 3 sigma of the Gaussian fit against the 0.27% a
+    Gaussian would put there**, a 70x excess -- so the second moment reads the
+    tails and comes out **3.09x** their sigma along strike (39.3 km against 11.5).
+    Trimming the weakest 10% of each row brings the ratio to 1.05, which
+    identifies the tails as the whole of the difference. Down dip the medians
+    nearly agree (1.21x) but the per-parameter correlation is only **0.50**.
+
+    ⚠️ And ``reduce="min"`` selects the down-dip width on **100%** of parameters
+    on that model, so the along-strike number never reaches the size field at all.
+    The anisotropy is real (2.67x median) but it is not being *reconciled* -- one
+    direction is simply always chosen.
+
+    Consequence, measured: a four-round loop sized from this lost to one sized
+    from the resolution diagonal at every effective rank, and to a *fixed* mesh at
+    low rank. That is evidence against **this estimator**, not against Barnhart &
+    Lohman's method, which has never been run here. Fitting a Gaussian instead is
+    the untested alternative.
     """
     if reduce not in KERNEL_REDUCTIONS:
         raise ValueError(
