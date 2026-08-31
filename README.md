@@ -3,18 +3,21 @@
 Object-oriented, out-of-core tools for cropping, merging NISAR GSLCs and making
 interferograms, unwrapping, masking, and plotting.
 
-Also supports slip inversions using a Python-port of [SlipSolve-Curve](https://github.com/x3zou/SlipSolve-Curve).
+The slip inversion that used to live here is now
+[slipsolve-python](https://github.com/eitanrapa/slipsolve-python), a Python
+port of [SlipSolve-Curve](https://github.com/x3zou/SlipSolve-Curve); this
+package feeds it through `LOSStack.to_observations`.
 
 Every processing stage is lazy (`xarray` + `dask`) and persisted to a Zarr
 `Workspace`, so a full stack of acquisitions never has to fit in memory and an
 interrupted run resumes where it left off.
 
-Two runnable end-to-end examples:
+A runnable end-to-end example:
 
 - [notebooks/nisar_tools.ipynb](notebooks/nisar_tools.ipynb) — the raster
-  pipeline, from granules to line-of-sight displacement.
-- [notebooks/slip_inversions.ipynb](notebooks/slip_inversions.ipynb) — the
-  inversion, from LOS displacement to slip on a fault.
+  pipeline, from granules to line-of-sight displacement. The inversion that
+  picks up from there is in the
+  [slipsolve-python](https://github.com/eitanrapa/slipsolve-python) repository.
 
 The notebooks show the path through. **This file is the reference for the parts
 that are easy to get wrong**: which knob to reach for, and what quietly breaks

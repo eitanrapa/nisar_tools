@@ -32,7 +32,7 @@ def as_crs(value):
 
     Historically every grid in this package was identified by an integer EPSG
     code, and the helpers below built ``f"EPSG:{code}"`` themselves. The slip
-    module's :class:`~nisar_tools.slip.frame.LocalFrame` is a transverse Mercator
+    module's :class:`~slipsolve.frame.LocalFrame` is a transverse Mercator
     centred on the study area, which has **no EPSG code at all** -- so a grid can
     now be identified by a :class:`pyproj.CRS` instead. An integer (or a string of
     digits) still means EPSG; anything else is passed through.

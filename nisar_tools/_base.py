@@ -284,7 +284,7 @@ class RasterStackMixin:
 
         Prefer this to :attr:`epsg` wherever the value is only being handed to
         rasterio or pyproj. A stack resampled into a
-        :class:`~nisar_tools.slip.frame.LocalFrame` for the slip inversion carries
+        :class:`~slipsolve.frame.LocalFrame` for the slip inversion carries
         a proj4 transverse Mercator with no EPSG code at all, so ``f"EPSG:{...}"``
         cannot describe it.
         """
