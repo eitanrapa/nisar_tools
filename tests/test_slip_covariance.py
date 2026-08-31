@@ -630,18 +630,6 @@ def test_the_propagated_sigma_matches_repeated_bounded_solves(signal_setup):
     assert np.corrcoef(empirical, prop[:n])[0, 1] > 0.7
 
 
-def test_a_covariance_is_required_for_a_covariance(signal_setup):
-    """Without Cd the weights are `1/sqrt(n)`, so the units are arbitrary.
-
-    Same rule as `chi_square`: a statistic only meaningful against a stated noise
-    model must be absent when none was stated, not silently wrong.
-    """
-    _, _, mesh, _, parts = signal_setup
-    plain = SlipInversion(mesh, Observations.concat(parts), ramp="offset")
-    with pytest.raises(ValueError, match="needs a covariance model"):
-        R.posterior_covariance(plain, 1.0)
-
-
 def test_a_bound_pressed_solution_is_refused(signal_setup):
     """The linear covariance describes the UNBOUNDED problem.
 
@@ -703,3 +691,60 @@ def test_the_bias_grows_with_lambda_against_a_FIXED_reference(signal_setup):
     assert moving != sorted(moving), (
         "this fixture no longer demonstrates the moving-reference trap; if the "
         "measure changed, re-check the warning in `resolution_bias`")
+
+
+def test_the_sandwich_matches_a_monte_carlo_of_the_PLAIN_solve(signal_setup):
+    """⚠️ The formula for the estimator this package actually ships.
+
+    The production model is solved with the diagonal weights, because whitening
+    measurably worsens the point estimate -- so the `"propagated"` form does not
+    describe it: the solver's weighting `w` and the true noise `Cd` disagree. The
+    sandwich puts the solver's own normal matrix outside and the true noise in the
+    middle, and on the real six-scene model it reproduces a 40-draw Monte Carlo at
+    **ratio 0.99, correlation 0.980, in under a second against forty minutes**.
+
+    ⚠️ `w` appears **twice** on each side of the middle term, not once. The normal
+    equations are `(wA)'(wA) m = (wA)'(w d)`, so the right-hand side carries `w^2`.
+    Getting that wrong gave a sigma 29x too large on the real model -- with the
+    correlation still at 0.978, which is what identified it as a scale error.
+    """
+    _, _, mesh, _, parts = signal_setup
+    obs = Observations.concat(parts)                    # plain: normalize stays on
+    noise = CovarianceModel(sill=SILL, range_m=RANGE, nugget=NUGGET)
+    plain = SlipInversion(mesh, obs, ramp="offset")
+    n = plain.basis.n_basis
+    lam, bounds = 3.0, {"strike": (-20.0, 20.0), "dip": (-20.0, 20.0)}
+
+    assert plain.covariance is None
+    sandwich = R.posterior_covariance(plain, lam, noise=noise)[:n]
+
+    clean = np.asarray(obs.ds["los"].values, dtype=float)
+    track = np.asarray(obs.ds["track"].values, dtype=object)
+    factors = C.whitening_factors(obs, noise)
+    rng = np.random.default_rng(1)
+    draws = []
+    for _ in range(24):
+        noisy = clean.copy()
+        for name, factor in factors.items():
+            at = np.flatnonzero(track == name)
+            noisy[at] += factor @ rng.standard_normal(at.size)
+        shaken = SlipInversion(mesh, Observations(obs.ds.assign(los=("obs", noisy))),
+                               ramp="offset")
+        draws.append(shaken.solve(smoothing=lam, max_iter=400, **bounds).strike_slip)
+
+    empirical = np.asarray(draws).std(axis=0, ddof=1)
+    ratio = float(np.median(sandwich / np.maximum(empirical, 1e-12)))
+    assert 0.6 < ratio < 1.6, f"sandwich is off by {ratio:.2f}x"
+    assert np.corrcoef(sandwich, empirical)[0, 1] > 0.7
+
+
+def test_a_plain_inversion_still_refuses_without_a_noise_model(signal_setup):
+    """`noise=` is the way in for a plain solve; nothing else is."""
+    _, _, mesh, _, parts = signal_setup
+    plain = SlipInversion(mesh, Observations.concat(parts), ramp="offset")
+    with pytest.raises(ValueError, match="needs a noise model"):
+        R.posterior_covariance(plain, 1.0)
+    with pytest.raises(ValueError, match="no Bayesian posterior"):
+        R.posterior_covariance(plain, 1.0, kind="posterior",
+                               noise=CovarianceModel(sill=SILL, range_m=RANGE,
+                                                     nugget=NUGGET))

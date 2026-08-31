@@ -467,7 +467,7 @@ def bound_fraction(model, tolerance=1e-3):
 
 
 def posterior_covariance(inversion, smoothing, kind="propagated", full=False,
-                         model=None, ss_ratio=1.0, ds_ratio=3.0,
+                         model=None, noise=None, ss_ratio=1.0, ds_ratio=3.0,
                          boundary_ratio=1.0, sides=("bottom", "left", "right"),
                          smooth_weighting="uniform"):
     """Parameter covariance of the damped solve. Returns sigma, or the full matrix.
@@ -506,7 +506,23 @@ def posterior_covariance(inversion, smoothing, kind="propagated", full=False,
     number alongside :func:`resolution_diagonal`, which says how much of each
     estimate the data actually paid for.
 
-    ⚠️ **Requires a covariance model.** Without one,
+    ``noise`` gives the **sandwich for an estimator whose weighting is not
+    ``Cd^-1/2``** -- which is the one this package ships. The production model is
+    solved with the diagonal weights, because whitening measurably worsens the
+    point estimate, so the formula above does not describe it: the solver's
+    weighting ``w`` and the true noise ``Cd`` disagree. With ``noise`` set,
+
+    .. code-block:: text
+
+        C = M^-1 (A' w Cd w A) M^-1,    M = (wA)'(wA) + lam^2 L'L + B'B
+
+    i.e. the solver's own normal matrix outside and the *true* noise in the
+    middle. Pass ``noise={track: CovarianceModel}`` on a plain inversion and this
+    is a seconds-long stand-in for an hours-long Monte Carlo. When the two
+    weightings agree it reduces to ``"propagated"`` exactly.
+
+    ⚠️ **One or the other is required.** Without ``noise``, and without a
+    covariance on the inversion,
     :meth:`~nisar_tools.slip.inversion.SlipInversion.whiten` multiplies by
     ``1/sqrt(n)`` per track, which is not ``Cd^-1/2`` and carries no units -- the
     resulting "covariance" would be a number in arbitrary units that looks like
@@ -519,12 +535,19 @@ def posterior_covariance(inversion, smoothing, kind="propagated", full=False,
     """
     if kind not in POSTERIOR_KINDS:
         raise ValueError(f"kind must be one of {POSTERIOR_KINDS}, got {kind!r}")
-    if getattr(inversion, "covariance", None) is None:
+    if noise is None and getattr(inversion, "covariance", None) is None:
         raise ValueError(
-            "posterior_covariance needs a covariance model: without one the "
-            "weights are 1/sqrt(n) per track, which is not Cd^-1/2, and the "
-            "result would be in arbitrary units rather than metres squared. "
-            "Build the inversion with SlipInversion(..., covariance=...)."
+            "posterior_covariance needs a noise model: without one the weights "
+            "are 1/sqrt(n) per track, which is not Cd^-1/2, and the result would "
+            "be in arbitrary units rather than metres squared. Either build the "
+            "inversion with SlipInversion(..., covariance=...), or -- for a "
+            "plainly-weighted solve, which is what this package ships -- pass "
+            "noise={track: CovarianceModel} for the sandwich form."
+        )
+    if noise is not None and kind != "propagated":
+        raise ValueError(
+            "noise= gives the propagated sandwich; there is no Bayesian posterior "
+            "for an estimator whose weighting is not the noise model's own"
         )
     if model is not None:
         fraction = bound_fraction(model)
@@ -540,10 +563,45 @@ def posterior_covariance(inversion, smoothing, kind="propagated", full=False,
     data, chol = _factorized(inversion, smoothing, ss_ratio, ds_ratio,
                              boundary_ratio, sides, smooth_weighting)
     inverse = cho_solve(chol, np.eye(data.shape[0]))
-    covariance = inverse if kind == "posterior" else inverse @ data @ inverse
+    if noise is not None:
+        middle = _noise_normal_matrix(inversion, noise)
+    elif kind == "posterior":
+        middle = None
+    else:
+        middle = data
+    covariance = inverse if middle is None else inverse @ middle @ inverse
     if full:
         return covariance
     return np.sqrt(np.maximum(np.diag(covariance), 0.0))
+
+
+def _noise_normal_matrix(inversion, noise):
+    """``A' w^2 Cd w^2 A`` -- the sandwich's middle, with ``Cd = L L'`` per track.
+
+    ⚠️ **``w`` appears TWICE on each side, not once.** The solver's normal
+    equations are ``(wA)'(wA) m = (wA)'(w d)``, so the right-hand side carries
+    ``w^2`` and its variance is ``A' w^2 Cd w^2 A``. Applying ``w`` once gives a
+    covariance too large by ``1/w^2`` -- with ``w = 1/sqrt(n)`` and tracks of
+    ~1000 samples that is a factor of a thousand in variance, **29x in sigma**,
+    which is exactly what the first version of this returned against the Monte
+    Carlo. The correlation was 0.978 throughout, which is what identified it as a
+    scale error rather than a wrong shape.
+
+    Formed as ``sum_t (L_t' w_t Aw_t)' (L_t' w_t Aw_t)`` so the dense ``Cd`` is
+    never built: at production size one track's block is a few MB against ~900 MB
+    for the whole thing.
+    """
+    from .covariance import whitening_factors
+
+    design = weighted_design(inversion)
+    weights = np.asarray(inversion.w, dtype=float)
+    track = np.asarray(inversion.obs.ds["track"].values, dtype=object)
+    middle = np.zeros((design.shape[1], design.shape[1]))
+    for name, factor in whitening_factors(inversion.obs, noise).items():
+        at = np.flatnonzero(track == name)
+        projected = factor.T @ (weights[at, None] * design[at])
+        middle += projected.T @ projected
+    return middle
 
 
 def resolution_bias(matrix, model):
