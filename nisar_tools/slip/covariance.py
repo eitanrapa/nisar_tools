@@ -673,3 +673,60 @@ def scaled_to_unit_variance(model, reference=None):
     if scale <= 0:
         raise ValueError("reference variance must be positive")
     return replace(model, sill=model.sill / scale, nugget=model.nugget / scale)
+
+
+def correlated_field(shape, spacing, model, seed=0, pad=3):
+    """Draw a Gaussian field with the covariance ``model`` describes.
+
+    The forward direction of this module: everything above estimates a
+    :class:`CovarianceModel` from a residual, and this synthesises a residual
+    from a model. Circulant embedding -- build ``C`` on the wrapped lag grid,
+    take its DFT, filter white noise by the square root, transform back.
+
+    Used to give a synthetic recovery experiment (see
+    :mod:`nisar_tools.slip.calibrate`) noise with the same structure as the real
+    scenes, which is what makes such an experiment's answer about damping
+    transferable to the real data.
+
+    ⚠️ **This must never come to share code with the estimator above it.** The
+    covariance tests verify the fit by round trip -- synthesise from known
+    parameters, demand them back -- and that argument only holds while the two
+    directions are independent implementations. ``tests/slip_synthetic.py``
+    keeps its own copy as the oracle for exactly this reason, and a test pins
+    the two against each other; if you refactor them onto a shared helper, that
+    test starts passing for the wrong reason.
+
+    ``pad`` embeds in a larger periodic grid so wrap-around does not contaminate
+    the lags of interest; 3x is comfortable for an exponential, whose correlation
+    is under 5% past three ranges. The nugget is added separately because it is
+    white by definition, and folding it into ``C`` would put a discontinuity at
+    zero lag that the FFT cannot represent.
+    """
+    ny, nx = int(shape[0]), int(shape[1])
+    py, px = int(pad * ny), int(pad * nx)
+    rng = np.random.default_rng(seed)
+
+    dy = np.minimum(np.arange(py), py - np.arange(py)) * float(spacing)
+    dx = np.minimum(np.arange(px), px - np.arange(px)) * float(spacing)
+    h = np.hypot(dy[:, None], dx[None, :])
+
+    if model.kind == "exponential":
+        shape_fn = np.exp(-h / float(model.range_m))
+    elif model.kind == "gaussian":
+        shape_fn = np.exp(-((h / float(model.range_m)) ** 2))
+    elif model.kind == "matern32":
+        root3 = np.sqrt(3.0) * h / float(model.range_m)
+        shape_fn = (1.0 + root3) * np.exp(-root3)
+    else:
+        raise ValueError(f"cannot synthesise kind {model.kind!r}")
+
+    # C is real and symmetric so its DFT is real; clip the small negative
+    # eigenvalues the embedding leaves rather than pretending they are absent.
+    spectrum = np.maximum(np.fft.fft2(float(model.sill) * shape_fn).real, 0.0)
+    white = rng.standard_normal((py, px))
+    field = np.real(np.fft.ifft2(np.fft.fft2(white) * np.sqrt(spectrum)))
+    field = field[:ny, :nx]
+
+    if model.nugget:
+        field = field + np.sqrt(float(model.nugget)) * rng.standard_normal((ny, nx))
+    return field

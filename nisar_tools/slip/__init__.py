@@ -50,6 +50,7 @@ Sign conventions, which matter more here than anywhere else in the package:
 
 from .basis import ElementBasis, NodeBasis
 from .covariance import (
+    correlated_field,
     CovarianceModel,
     empirical_variogram,
     fit_covariance,
@@ -97,6 +98,7 @@ from .trace import FaultSegment, FaultTrace
 __all__ = [
     "ARCSEC_10",
     "CovarianceModel",
+    "correlated_field",
     "EdgrnTables",
     "ElementBasis",
     "FaultMesh",
