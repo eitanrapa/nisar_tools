@@ -234,7 +234,7 @@ class LOSStack(RasterStackMixin):
             raises rather than inverting the geometry.
 
         The grid is reprojected to a metric CRS if it is geographic -- the
-        quadtree in :meth:`~nisar_tools.slip.Observations.from_los` measures cell
+        quadtree in :meth:`~slipsolve.Observations.from_los` measures cell
         widths against ``width_min`` in metres, so a lon/lat lattice would put
         ``width_min=1000`` at a million columns. ``epsg`` picks the target
         (default: the UTM zone of the scene centre) and ``resolution`` its pixel
@@ -243,7 +243,7 @@ class LOSStack(RasterStackMixin):
         ``direction`` (``"ascending"``/``"descending"``) and ``look_direction``
         (``"left"``/``"right"``; ALOS is **right**-looking, NISAR is left) are
         carried as provenance and are what lets
-        :func:`nisar_tools.slip.diagnostics.scene_report` check ``los_east``'s
+        :func:`slipsolve.diagnostics.scene_report` check ``los_east``'s
         sign against the pass geometry -- the invariant that catches an inverted
         look vector. ``wavelength`` is provenance only; the grid is already
         displacement, so nothing rescales by it.

@@ -806,7 +806,7 @@ class UnwrappedStack(RasterStackMixin):
 
         A different-dates mosaic is one raster with **one** arbitrary constant and
         one ramp, so for a slip inversion prefer keeping the scenes apart and
-        combining them at :meth:`nisar_tools.slip.Observations.concat`, which gives
+        combining them at :meth:`slipsolve.Observations.concat`, which gives
         each its own nuisance columns via ``SlipInversion(..., ramp=...)``. Merge
         them here for a continuous map, an export, or when each frame covers a
         different piece of the fault and there is only one interferogram per frame.
