@@ -26,7 +26,8 @@ import json
 import numpy as np
 import pandas as pd
 
-from nisar_tools import ARCSEC_10, iterate_sampling, resample_all
+from nisar_tools import ARCSEC_10, resample_all
+from nisar_tools.slip import iterate_sampling
 from nisar_tools.slip.plot import plot_mesh, plot_samples
 from nisar_tools.slip.resolution import element_resolution, resolution_diagonal
 from slip_config import (

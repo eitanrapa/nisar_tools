@@ -14,12 +14,40 @@ centimetres, a right-looking pass -- and require the planted slip back.
 import numpy as np
 import pytest
 import xarray as xr
-from slip_synthetic import tapered_slip
 
-from nisar_tools import FaultMesh, FaultTrace, LOSStack, Observations, SlipInversion
+from nisar_tools import LOSStack
+
+# ⚠️ These tests are an **optional integration check**, not a core one.
+# `LOSStack.from_grd` exists to feed a slip inversion -- that is why it was
+# written -- so the honest way to test it end to end is against the inversion,
+# which now lives in its own package. `nisar-tools[slip]` installs it; without
+# it the whole file skips rather than failing, because nothing here is testing
+# this package in isolation.
+slipsolve = pytest.importorskip(
+    "slipsolve", reason="grd import is tested end-to-end against the slip "
+                        "inversion; pip install 'nisar-tools[slip]'")
+from slipsolve import FaultMesh, FaultTrace, Observations, SlipInversion
 from nisar_tools.geo import read_grd, utm_epsg
-from nisar_tools.slip.diagnostics import _geometry_consistent
-from nisar_tools.slip.greens import HalfSpaceTDE
+from slipsolve.diagnostics import _geometry_consistent
+from slipsolve.greens import HalfSpaceTDE
+
+
+def tapered_slip(mesh, peak=-2.0, along_centre=0.55, along_width=40e3,
+                 locking_depth=12e3):
+    """A single slip patch: Gaussian along strike, tapering with depth.
+
+    Copied from `slipsolve`'s test oracle, which is not installed with the
+    package. Negative `peak` is right-lateral, the sense of the San Sebastian
+    system these ALOS-style fixtures imitate.
+    """
+    s, z = mesh.element_params[:, 0], mesh.element_params[:, 1]
+    length = s.max() - s.min()
+    profile = np.exp(-((s - (s.min() + along_centre * length)) / along_width) ** 2)
+    taper = np.clip(1.0 + z / locking_depth, 0.0, 1.0)
+    slip = np.zeros(2 * mesh.n_elements)
+    slip[: mesh.n_elements] = peak * profile * taper
+    return slip
+
 
 _LON = np.array([-68.681, -68.300, -67.900, -67.500, -67.100, -66.700, -66.523])
 _LAT = np.array([10.410, 10.490, 10.540, 10.565, 10.595, 10.620, 10.630])

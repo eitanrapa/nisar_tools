@@ -360,6 +360,31 @@ class LOSStack(RasterStackMixin):
         return specs
 
     # -- reprojection / plotting ------------------------------------------
+    def to_observations(self, name, trace, frame=None, **kwargs):
+        """Quadtree-sample this stack into slip-inversion observations.
+
+        The seam between this package and
+        `slipsolve <https://github.com/eitanrapa/slipsolve-python>`_, and it
+        lives **here** on purpose. ``slipsolve`` is duck-typed on ``.ds`` and
+        knows nothing about NISAR; the adapter therefore belongs with the class
+        that is NISAR-specific, not with the inversion. That is what lets the
+        inversion be installed, tested and released without this package.
+
+        ``kwargs`` are passed through to
+        :meth:`slipsolve.Observations.from_los` -- ``rms_min``, ``width_min``,
+        ``width_max``, ``exclude_within`` and the rest of the quadtree controls.
+        """
+        try:
+            from slipsolve import Observations
+        except ImportError:
+            raise ImportError(
+                "LOSStack.to_observations needs the slip inversion package: "
+                "pip install 'nisar-tools[slip]', or pip install "
+                "slipsolve-python"
+            ) from None
+        return Observations.from_los(self, name=name, frame=frame, trace=trace,
+                                     **kwargs)
+
     def to_latlon(self, pair=0):
         """Reproject one pair's LOS displacement to lon/lat (eager)."""
         from . import geo
