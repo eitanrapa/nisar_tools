@@ -18,7 +18,7 @@ import rioxarray  # noqa: F401  (registers .rio, needed for write_crs)
 import xarray as xr
 from pyproj import Transformer
 
-from nisar_tools.los import LOSStack
+from nisar_tools.slip._geo import phase_to_los
 
 # Two look geometries roughly like NISAR ascending and descending passes at
 # mid-swath: **left**-looking, as NISAR flies, so the LOS unit vector's east
@@ -50,6 +50,40 @@ def look_vector(incidence_deg, heading_deg):
     return (-np.sin(inc) * np.sin(az), -np.sin(inc) * np.cos(az), np.cos(inc))
 
 
+class LosLike:
+    """A minimal stand-in for a LOS raster product.
+
+    The **slip** module reads only `.ds` -- verified by grep across
+    `sampling.py` and `predict.py` -- which is why these fixtures do not need
+    the NISAR `LOSStack`, and why the slip tests stay runnable without it.
+
+    `x`, `y` and `crs` exist for `nisar_tools.resample`, which is raster work
+    and legitimately needs the grid; they delegate to `.ds` so there is one
+    source of truth. Constructed from a Dataset and reconstructable the same
+    way, which is what `calibrate.unmask_geometry` relies on when it does
+    `type(stack)(ds)`.
+    """
+
+    def __init__(self, ds):
+        self.ds = ds
+
+    @property
+    def x(self):
+        return self.ds["x"].values
+
+    @property
+    def y(self):
+        return self.ds["y"].values
+
+    @property
+    def crs(self):
+        return self.ds.rio.crs
+
+    @property
+    def epsg(self):
+        return self.ds.attrs.get("epsg")
+
+
 def _grid(frame, epsg, half_x, half_y, spacing):
     """A north-up raster in ``epsg`` covering a box of the local frame."""
     t = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
@@ -78,7 +112,7 @@ def _stack(los, x, y, look, epsg, name, sign=1, incidence=35.0):
     ).rio.write_crs(f"EPSG:{epsg}")
     ds.attrs.update(epsg=int(epsg), sign=int(sign), direction=name,
                     wavelength=0.242, frequency="A")
-    return LOSStack(ds)
+    return LosLike(ds)
 
 
 def analytic_los_stack(trace, frame, geometry="asc", epsg=32619, spacing=800.0,
@@ -124,7 +158,6 @@ def forward_los_stack(mesh, slip, trace, frame, geometry="asc", epsg=32619,
     self-consistent under a global flip and blind to exactly the error that had
     a dextral fault inverting as sinistral.
     """
-    from nisar_tools.geometry import phase_to_los
     from nisar_tools.slip.greens import HalfSpaceTDE
 
     x, y = _grid(frame, epsg, half_x, half_y, spacing)

@@ -15,11 +15,13 @@ from pyproj import Transformer
 from slip_synthetic import forward_los_stack, tapered_slip
 
 from nisar_tools.slip import (
-    ARCSEC_10,
     FaultMesh,
     FaultTrace,
     LocalFrame,
     Observations,
+)
+from nisar_tools import (
+    ARCSEC_10,
     frame_lattice,
     resample_all,
     resample_to_frame,

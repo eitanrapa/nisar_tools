@@ -74,7 +74,6 @@ from .layered import LayeredPointSource
 from .layout import MeshLayout, graded_layout, lloyd_layout, triangulate
 from .mesh import FaultMesh
 from .predict import iterate_sampling, model_rms_min, predicted_los
-from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
 from .resolution import (
     adapt_layout,
     element_resolution,
@@ -96,7 +95,6 @@ from .surface import FaultSurface, gridfit
 from .trace import FaultSegment, FaultTrace
 
 __all__ = [
-    "ARCSEC_10",
     "CovarianceModel",
     "correlated_field",
     "EdgrnTables",
@@ -121,7 +119,6 @@ __all__ = [
     "element_resolution",
     "empirical_variogram",
     "fit_covariance",
-    "frame_lattice",
     "graded_layout",
     "gridfit",
     "iterate_sampling",
@@ -134,8 +131,6 @@ __all__ = [
     "ramp_content",
     "ramp_leakage",
     "ramp_sweep",
-    "resample_all",
-    "resample_to_frame",
     "resolution_bias",
     "resolution_diagonal",
     "resolution_gain",

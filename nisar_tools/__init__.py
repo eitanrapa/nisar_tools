@@ -21,6 +21,12 @@ Typical flow::
 from . import download
 from . import ionosphere
 from . import slip
+from .resample import (
+    ARCSEC_10,
+    frame_lattice,
+    resample_all,
+    resample_to_frame,
+)
 from .download import download_dem, download_gslcs, login
 from .gslc import GSLC
 from .stack import GSLCStack

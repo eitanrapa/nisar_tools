@@ -835,7 +835,7 @@ class SlipModel:
         """
         from pathlib import Path
 
-        from ..geo import write_grd
+        from ._geo import write_grd
 
         outdir = Path(outdir)
         outdir.mkdir(parents=True, exist_ok=True)
