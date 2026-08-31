@@ -4,7 +4,7 @@ Object-oriented, out-of-core tools for cropping, merging NISAR GSLCs and making
 interferograms, unwrapping, masking, and plotting.
 
 The slip inversion that used to live here is now
-[slipsolve-python](https://github.com/eitanrapa/slipsolve-python), a Python
+[slipsolve-python](https://github.com/eitanrapa/SlipSolve-Python), a Python
 port of [SlipSolve-Curve](https://github.com/x3zou/SlipSolve-Curve); this
 package feeds it through `LOSStack.to_observations`.
 
@@ -17,7 +17,7 @@ A runnable end-to-end example:
 - [notebooks/nisar_tools.ipynb](notebooks/nisar_tools.ipynb) — the raster
   pipeline, from granules to line-of-sight displacement. The inversion that
   picks up from there is in the
-  [slipsolve-python](https://github.com/eitanrapa/slipsolve-python) repository.
+  [slipsolve-python](https://github.com/eitanrapa/SlipSolve-Python) repository.
 
 The notebooks show the path through. **This file is the reference for the parts
 that are easy to get wrong**: which knob to reach for, and what quietly breaks
@@ -646,7 +646,7 @@ position; `tie` then decides how the overlap is reconciled:
 ## Slip inversion — moved
 
 The slip inversion now lives in its own repository,
-**[slipsolve-python](https://github.com/eitanrapa/slipsolve-python)** — a Python
+**[slipsolve-python](https://github.com/eitanrapa/SlipSolve-Python)** — a Python
 translation of, and extension to,
 [SlipSolve-Curve](https://github.com/x3zou/SlipSolve-Curve) (Xiaoyu Zou, MATLAB).
 
