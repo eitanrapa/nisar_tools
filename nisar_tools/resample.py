@@ -24,9 +24,9 @@ buys the inversion nothing and costs it noise.
 
 import numpy as np
 
-from .. import geo
-from ..los import LOSStack
-from ..stack import warp_onto_lattice
+from . import geo
+from .los import LOSStack
+from .stack import warp_onto_lattice
 
 #: 10 arc-seconds of latitude, in metres -- the conventional InSAR posting, and
 #: the exact spacing of the ALOS-2 grids this was written for (measured

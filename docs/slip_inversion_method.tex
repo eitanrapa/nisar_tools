@@ -8,6 +8,7 @@
 \usepackage{microtype}
 \usepackage[font=small,labelfont=bf]{caption}
 \usepackage{xcolor}
+\usepackage{url}
 \usepackage[colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
 
 \newcommand{\R}{\mathbf{R}}
@@ -36,7 +37,9 @@ Venezuela study}
 \begin{abstract}
 \noindent
 This note sets out the mathematics behind the slip-inversion module in
-\texttt{nisar\_tools}, and records what has been measured with it. The forward
+\texttt{nisar\_tools} --- a Python port of, and extension to,
+\href{https://github.com/x3zou/SlipSolve-Curve}{SlipSolve-Curve} (x3zou, MIT) ---
+and records what has been measured with it. The forward
 problem is standard: line-of-sight displacement from dislocation sources on a
 triangulated fault. Two pieces have no published equivalent that we could find.
 The first is a \emph{per-(triangle, observation) adaptive quadrature} rule for
@@ -150,8 +153,13 @@ for.
 \subsection{Adaptive quadrature (novel)}
 \label{sec:quad}
 
-The reference implementations (EDCMP, SlipSolve) use a \emph{fixed} rule --- 91
-points per source--receiver pair in EDCMP's case. That is wasteful by a wide
+The reference implementations use a \emph{fixed} rule --- 91 points per
+source--receiver pair in EDCMP's case. That includes this package's own direct
+ancestor: \textbf{SlipSolve-Curve} (x3zou, MIT), the MATLAB code this work is a
+port of and an extension to, itself descended from SlipSolve (ZeyuJin). It runs
+the same nine-stage arrangement --- quadtree-sampled InSAR, a curved triangular
+mesh, a fast homogeneous TDE pass and then a layered EDGRN/EDCMP inversion ---
+at a fixed quadrature order throughout. That is wasteful by a wide
 margin, because the integrand's difficulty depends entirely on how far the
 observation is from the element \emph{in units of the element's own size}.
 
@@ -920,6 +928,10 @@ reason they are worth listing.
 \item Wang, R., Martin, F.\ L.\ \& Roth, F.\ (2003). Computation of deformation induced by
       earthquakes in a multi-layered elastic crust (EDGRN/EDCMP).
       \emph{Computers \& Geosciences} 29, 195--207.
+\item x3zou. \emph{SlipSolve-Curve}: reproducible MATLAB coseismic-slip inversion
+      on triangular fault meshes (MIT; after SlipSolve by ZeyuJin).
+      \url{https://github.com/x3zou/SlipSolve-Curve} --- \textbf{the direct
+      ancestor of the code described here}.
 \end{itemize}
 
 \end{document}

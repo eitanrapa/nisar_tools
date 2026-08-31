@@ -24,7 +24,7 @@ unwrapped InSAR is decorrelated there anyway.
 import numpy as np
 import xarray as xr
 
-from .._base import open_stage
+from ._geo import open_stage
 
 
 class Observations:
