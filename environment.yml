@@ -14,6 +14,8 @@ dependencies:
   - gdal              # osgeo bindings + the gdal_* CLI tools; arrives anyway
                       # as a rasterio dependency, pinned here so it is guaranteed
   - pyproj
+  - pysolid           # solid Earth tides, for making GSLCs from RSLCs
+  - requests          # download_tec: re-applies ~/.netrc across the URS redirect
   - snaphu
   - pygmt             # optional; only needed for water masking
   - matplotlib

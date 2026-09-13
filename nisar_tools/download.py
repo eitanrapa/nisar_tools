@@ -201,6 +201,122 @@ def download_dem(dest, bbox, *, data_source="NISAR", output_format="GTiff",
     return dest
 
 
+# -- NISAR ionosphere TEC (GSLC timing corrections) ---------------------------
+#: CMR concept id of ASF's ``NISAR_TEC`` collection ("NISAR Total Electron
+#: Content"): daily IMAGEN JSON files, ``NISAR_ANC_TEC_<made>_<start>_<end>_s015``,
+#: each spanning 23:00 the day before to 23:59:52 UTC.
+TEC_COLLECTION = "C3622219145-ASF"
+_CMR_GRANULES = "https://cmr.earthdata.nasa.gov/search/granules.json"
+
+
+def _utc(value):
+    """A timezone-naive UTC ``datetime`` from a datetime, numpy datetime64 or ISO string."""
+    import datetime as dt
+
+    import numpy as np
+
+    if isinstance(value, dt.datetime):
+        return value.astimezone(dt.timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+    if isinstance(value, np.datetime64):
+        return dt.datetime.fromisoformat(str(value.astype("datetime64[us]")))
+    text = str(value).strip().replace("Z", "")
+    return dt.datetime.fromisoformat(text)
+
+
+def _acquisition_span(rslc):
+    """First and last zero-Doppler time of an RSLC (path or :class:`~nisar_tools.rslc.RSLC`)."""
+    import numpy as np
+
+    from .rslc import RSLC
+
+    own = not isinstance(rslc, RSLC)
+    r = RSLC(rslc) if own else rslc
+    try:
+        epoch = r.ref_epoch
+        t = r.zero_doppler_time
+        to_ns = lambda s: epoch + np.timedelta64(int(round(float(s) * 1e9)), "ns")  # noqa: E731
+        return _utc(to_ns(t[0])), _utc(to_ns(t[-1]))
+    finally:
+        if own:
+            r.close()
+
+
+def search_tec(start, end=None, *, margin=60.0, collection=TEC_COLLECTION):
+    """NISAR TEC files covering ``[start - margin, end + margin]``, best first.
+
+    ``start``/``end`` are UTC datetimes, ``datetime64`` or ISO strings
+    (``end`` defaults to ``start``); ``margin`` is seconds. Returns dicts with
+    ``name``, ``url``, ``start``, ``end`` and ``produced``, newest production
+    first. A day's file overlaps the next by an hour, so an acquisition after
+    23:00 UTC is covered twice; either works. Uses CMR's public search API, so
+    no login is needed to search.
+    """
+    import datetime as dt
+    import json
+    import urllib.parse
+    import urllib.request
+
+    start = _utc(start)
+    end = _utc(end) if end is not None else start
+    lo = start - dt.timedelta(seconds=margin)
+    hi = end + dt.timedelta(seconds=margin)
+    params = {"collection_concept_id": collection, "page_size": 50,
+              "temporal[]": f"{lo.isoformat()}Z,{hi.isoformat()}Z"}
+    url = _CMR_GRANULES + "?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=60) as response:
+        entries = json.load(response)["feed"]["entry"]
+    found = []
+    for e in entries:
+        name = e["title"]
+        t0, t1 = _utc(e["time_start"]), _utc(e["time_end"])
+        if not (t0 <= lo and hi <= t1):
+            continue
+        links = [link["href"] for link in e.get("links", [])
+                 if link.get("href", "").endswith(f"/{name}.json") and "PRIVATE" not in link["href"]]
+        if not links:
+            continue
+        made = name.split("_")[3] if name.count("_") >= 5 else ""
+        found.append(dict(name=name, url=links[0], start=t0, end=t1, produced=made))
+    return sorted(found, key=lambda d: d["produced"], reverse=True)
+
+
+def download_tec(dest, start=None, end=None, *, rslc=None, margin=60.0, overwrite=False):
+    """Download the NISAR TEC file for an acquisition. Returns its path.
+
+    Give the acquisition either as ``start``/``end`` (see :func:`search_tec`) or
+    as ``rslc=`` (a path or :class:`~nisar_tools.rslc.RSLC`), whose zero-Doppler
+    span is used. ``dest`` is a directory (the file keeps its own name) or a
+    ``.json`` path. The download authenticates with Earthdata Login through
+    ``~/.netrc``, the way ``requests`` re-applies netrc credentials across the
+    URS redirect. Pass the result to ``geocode_rslc(tec_file=...)``.
+    """
+    requests = _require("requests")
+    if rslc is not None:
+        if start is not None:
+            raise ValueError("pass either rslc= or start/end, not both")
+        start, end = _acquisition_span(rslc)
+    if start is None:
+        raise ValueError("download_tec needs start (and end) or rslc=")
+    hits = search_tec(start, end, margin=margin)
+    if not hits:
+        raise FileNotFoundError(f"no NISAR TEC file in CMR covers {start} .. {end or start}")
+    best = hits[0]
+    dest = Path(dest).expanduser()
+    path = dest if dest.suffix == ".json" else dest / f"{best['name']}.json"
+    if path.exists() and not overwrite:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with requests.Session() as session:
+        response = session.get(best["url"], timeout=300)
+        response.raise_for_status()
+        if response.content[:1] not in (b"{", b"["):
+            raise IOError(f"{best['url']} did not return JSON (Earthdata login in ~/.netrc?)")
+    tmp = path.with_name(path.name + ".partial")
+    tmp.write_bytes(response.content)
+    tmp.replace(path)
+    return path
+
+
 # -- direct ASF bulk download (the "current method") -------------------------
 def download_urls(dest, urls):
     """Download fully-formed Earthdata URLs with the ASF bulk downloader.
