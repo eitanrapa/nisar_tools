@@ -34,11 +34,15 @@ mask = ["pygmt"]
 # the download module and are imported lazily. NOTE: earthaccess's latest
 # release requires Python >= 3.12; on 3.11 pin an older earthaccess (or use the
 # standard-library-only direct method, download_gslcs(..., method="asf")).
-download = ["earthaccess", "sardem"]
+download = ["earthaccess", "sardem", "requests"]
+# Making GSLCs from RSLCs (gslc_geocode): pysolid for the solid Earth tide
+# correction. The writer also needs GDAL's osgeo bindings (projection WKT, DEM
+# staging) -- install those from conda-forge, see the `gdal` extra below.
+gslc = ["pysolid"]
 # The osgeo bindings and gdal_* CLI tools. Optional and deliberately not a hard
 # dependency: pip's gdal builds against system libgdal headers and commonly
 # fails, whereas conda-forge's does not -- environment.yml installs it there.
-# Nothing in the package imports osgeo; rasterio already vendors GDAL for it.
+# Only the GSLC writer imports osgeo (lazily); rasterio vendors its own GDAL.
 gdal = ["gdal"]
 # The slip inversion moved to its own package (slipsolve-python). Only
 # LOSStack.to_observations touches it, and only when called, so it is an
@@ -48,6 +52,11 @@ dev = ["pytest", "pytest-xdist", "dask[diagnostics]"]
 
 [tool.setuptools.packages.find]
 include = ["nisar_tools*"]
+
+[tool.setuptools.package-data]
+# The L2 GSLC product specification, vendored from ISCE3 (Apache-2.0), and
+# ISCE3's license notice, which covers it and the ported algorithms.
+nisar_tools = ["data/*.xml", "data/ISCE3_LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

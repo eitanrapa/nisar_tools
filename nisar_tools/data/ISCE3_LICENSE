@@ -1,0 +1,40 @@
+nisar_L2_GSLC.xml in this directory is copied unmodified from ISCE3 v0.25.16
+(python/packages/nisar/products/XML/L2/nisar_L2_GSLC.xml), and the RSLC -> GSLC
+modules of nisar_tools (radar, dem, corrections, _geocode_kernels, gslc_product,
+_gslc_metadata, gslc_geocode, rslc) port algorithms from ISCE3. ISCE3's license:
+
+-------------------------------------------------------------------------------
+
+COPYRIGHT (C) 2008-2019 CALIFORNIA INSTITUTE OF TECHNOLOGY. ALL RIGHTS RESERVED.
+
+THE ISCE3 SOFTWARE IS LICENSED UNDER THE APACHE LICENSE, VERSION 2.0 (THE "LICENSE");
+YOU MAY NOT USE THIS FILE EXCEPT IN COMPLIANCE WITH THE LICENSE.
+YOU MAY OBTAIN A COPY OF THE LICENSE AT
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING, SOFTWARE
+DISTRIBUTED UNDER THE LICENSE IS DISTRIBUTED ON AN "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
+SEE THE LICENSE FOR THE SPECIFIC LANGUAGE GOVERNING PERMISSIONS AND
+LIMITATIONS UNDER THE LICENSE.
+
+UNITED STATES GOVERNMENT SPONSORSHIP ACKNOWLEDGED. THIS SOFTWARE IS SUBJECT TO
+U.S. EXPORT CONTROL LAWS AND REGULATIONS AND HAS BEEN CLASSIFIED AS 'EAR99 NLR'
+(NO [EXPORT] LICENSE REQUIRED EXCEPT WHEN EXPORTING TO AN EMBARGOED COUNTRY,
+END USER, OR IN SUPPORT OF A PROHIBITED END USE). BY DOWNLOADING THIS SOFTWARE,
+THE USER AGREES TO COMPLY WITH ALL APPLICABLE U.S. EXPORT LAWS AND REGULATIONS.
+THE USER HAS THE RESPONSIBILITY TO OBTAIN EXPORT LICENSES, OR OTHER EXPORT
+AUTHORITY AS MAY BE REQUIRED BEFORE EXPORTING THIS SOFTWARE TO ANY 'EAR99'
+EMBARGOED FOREIGN COUNTRY OR CITIZEN OF THOSE COUNTRIES.
+
+===============================================================================
+Software from third parties included in ISCE3:
+===============================================================================
+ISCE3 contains third party software which is under different license terms. All
+such code will be identified clearly using at least one of two mechanisms:
+1) It will be in a separate directory tree with its own `LICENSE` or `README`
+   file at the top containing the specific license and restrictions which apply
+   to that software, or
+2) It will contain specific license and restriction terms at the top of every
+   file.

@@ -41,9 +41,10 @@ without any of them. Each extra buys exactly one thing:
 | extra | brings | needed for | without it |
 |---|---|---|---|
 | `mask` | `pygmt` | `mask_water` — GSHHG coastlines | water masking raises |
-| `download` | `earthaccess`, `sardem` | the `download` module: Earthdata search, DEMs | fetch inputs yourself, or use `method="asf"` |
+| `download` | `earthaccess`, `sardem`, `requests` | the `download` module: Earthdata search, DEMs, TEC files | fetch inputs yourself, or use `method="asf"` |
+| `gslc` | `pysolid` | the solid Earth tide correction when making a GSLC from an RSLC | pass `solid_earth_tides=False` |
 | `layered` | `pygrnwang` | `run_edgrn`, which generates EDGRN tables from a velocity model | supply tables from your own EDGRN run |
-| `gdal` | `gdal` | the `osgeo` bindings and `gdal_*` CLI tools | nothing in the package needs them |
+| `gdal` | `gdal` | the `osgeo` bindings: the GSLC writer's projection metadata, `stage_nisar_dem` | everything except making GSLCs |
 | `dev` | `pytest`, `pytest-xdist`, `cutde` | the test suite | the `cutde` cross-check skips |
 
 ```bash
@@ -58,9 +59,8 @@ Three things that trip up a plain `pip install` of these:
   (`method="asf"`), which uses only the standard library.
 - **`pygmt` and `gdal` come from conda-forge, not pip.** pip's gdal builds
   against system libgdal headers and commonly fails; conda-forge's does not, and
-  `environment.yml` installs it there. Nothing in the package imports `osgeo` —
-  `rasterio` already vendors GDAL for it — so the `gdal` extra is only for
-  calling the `gdal_*` tools yourself.
+  `environment.yml` installs it there. Only the RSLC → GSLC writer imports
+  `osgeo` (lazily); the rest of the package goes through `rasterio`'s own GDAL.
 - **`layered` compiles Fortran.** `pygrnwang` bundles Rongjiang Wang's
   EDGRN/EDCMP and builds it with gfortran. Skip it unless you want the
   Green's-function tables generated for you; the reference workflow has you run
@@ -133,6 +133,62 @@ standard library. Use the second where earthaccess can't be installed.
 
 Orbit files are not downloaded and not needed: orbits are embedded in the GSLC,
 and the LOS geometry comes from the granule's own `metadata/radarGrid` cube.
+
+## Making GSLCs from RSLCs
+
+ASF does not ship a GSLC for every RSLC. `geocode_rslc` makes the missing one:
+a port of the ISCE3 v0.25.16 GSLC workflow that produces ASF's products,
+written in the NISAR L2 GSLC layout (spec 1.5.0), so `GSLC` and everything
+downstream read it like any granule.
+
+```python
+from nisar_tools import download_tec, geocode_rslc
+from nisar_tools.dem import stage_nisar_dem
+
+dem = stage_nisar_dem("data/dem.tif", (lon_min, lon_max, lat_min, lat_max))
+tec = download_tec("data/", rslc=rslc_path)
+geocode_rslc(rslc_path, "data/", dem, tec_file=tec, like=same_frame_gunw_or_gslc)
+```
+
+The output is named after the RSLC with `L1_PR_RSLC` → `L2_OD_GSLC` (`OD` =
+on demand, so it cannot be mistaken for an SDS product). `RSLC(path).to_gslc(...)`
+is the same call.
+
+Checked against ASF: geocoding ASF's own source RSLC for a P05023 GSLC
+reproduces **99.8%** of its pixels bit for bit (frequency A; 99.87% for B) —
+the rest differ by one step of the 10-bit mantissa truncation — with the NaN
+pattern and subswath mask identical, every `radarGrid` cube layer equal to
+float32 rounding, the ionosphere LUTs identical and solid Earth tides within
+0.2 mm. `scripts/gslc_format_diff.py ASF.h5 OURS.h5` finds no structural
+difference.
+
+What to get right:
+
+- **Use the NISAR DEM v1.2, as `stage_nisar_dem` copies it.** The GSLC phase is
+  flattened by the range to the DEM surface, so a height difference moves the
+  phase by ~0.4 rad per centimetre. A GSLC flattened against another DEM (or a
+  resampled copy of this one) is not interferometrically compatible with ASF's.
+- **Pass the TEC file.** The ionospheric correction moves where each map pixel
+  samples the RSLC by metres of slant range — 2.6–3.2 m in a dawn acquisition,
+  7.7–9.7 m in an evening one (track 126, 18:54 local) — and every P05023 GSLC
+  and GUNW we checked used one. Without it the output is still a valid GSLC but
+  sits a pixel or more from ASF's geolocation, and it records that the
+  correction was not applied. `download_tec` finds the right daily file
+  in ASF's `NISAR_TEC` collection (searching needs no login; the download reads
+  `~/.netrc`). Solid Earth tides need `pysolid`.
+- **Pass `like=` a GUNW or GSLC of the same track and frame** to land on ASF's
+  frame grid. ASF grids every L2 product of a frame on one box (a GSLC and GUNW
+  of frame 022_162_A_006 share it to the metre), so this makes the output
+  pixel-aligned with ASF's GSLCs of other dates. Without it the box is the swath
+  footprint with corners snapped outward to 240 m — the same lattice, but a
+  smaller, different extent.
+- **Budget the disk and the time.** A full DHDH frame (both frequencies and
+  polarizations) is ~21 GB. On a 10-core M4 it takes about 40 minutes, at
+  ~400 MB per worker thread; throughput stops improving beyond four or five
+  workers on that machine.
+- Frequencies, polarizations, output projection, posting, an external orbit
+  file (`orbit_file=`) and the box (`bounds=`) are all overridable; see the
+  `geocode_rslc` docstring.
 
 ## Pipeline
 
@@ -776,4 +832,8 @@ about 4× faster than they can be decoded.
 ```bash
 pytest                     # synthetic GSLC fixtures; no real data needed
 NISAR_TEST_GSLC=/path/to/granule.h5 pytest tests/test_real_data.py   # real file
+
+# RSLC -> GSLC on a real granule (a 2 km box); the last two are optional
+NISAR_TEST_RSLC=rslc.h5 NISAR_TEST_DEM=dem.tif NISAR_TEST_TEC=tec.json \
+NISAR_TEST_GSLC_REF=any_asf_gslc.h5 pytest tests/test_real_gslc_geocode.py
 ```
