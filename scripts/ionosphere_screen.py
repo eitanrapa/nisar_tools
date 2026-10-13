@@ -155,7 +155,7 @@ class Track:
     # The track id is this Track's own name -- "D054" is direction D, track 054
     # -- so nothing has to be spelled twice.
     granules: object = None
-    granule_root: str = "~/Downloads"
+    granule_root: str = "~/Documents/data"
     frame: object = None                 # narrow discovery to one frame or a few
     bbox: tuple | None = None            # (lon_min, lon_max, lat_min, lat_max)
 
