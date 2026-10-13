@@ -57,10 +57,12 @@ class InterferogramStack(RasterStackMixin):
     def from_slc_stack(
         cls, stack, pairs="sequential", looks=5, downsample=True,
         convolution="Uniform", nan_aware=True, min_valid_fraction=0.5,
-        align_looks=True,
+        align_looks=True, sigma=None,
     ):
         if convolution not in _kernels.VALID_CONVOLUTIONS:
             raise ValueError("convolution must be Uniform or Gaussian")
+        if sigma is not None and convolution != "Gaussian":
+            raise ValueError("sigma applies to the Gaussian multilook only")
 
         pair_list = make_pairs(pairs, stack.sizes["time"])
         if len(pair_list) == 0:
@@ -102,7 +104,7 @@ class InterferogramStack(RasterStackMixin):
         # trailing spatial axes, so 3D dask arrays go straight through.
         igram, coherence = _kernels.igram_coherence(
             ref.data, sec.data, max_x, max_y, looks, downsample, convolution,
-            nan_aware=nan_aware, min_valid_fraction=min_valid_fraction,
+            nan_aware=nan_aware, min_valid_fraction=min_valid_fraction, sigma=sigma,
         )
 
         if downsample:
@@ -139,6 +141,8 @@ class InterferogramStack(RasterStackMixin):
             y_spacing=float(stack.ds.attrs.get("y_spacing", np.nan)),
             pairs=[list(p) for p in pair_list],
         )
+        if sigma is not None:
+            ds.attrs["sigma"] = float(sigma)
         # Which sub-band this is, carried so the dual-frequency ionosphere
         # correction can read both carriers off the stacks instead of being told
         # them. Not in the persist hash: it is provenance, not a parameter, and
@@ -453,6 +457,9 @@ class InterferogramStack(RasterStackMixin):
             "pairs": self.ds.attrs.get("pairs"),
             **params,
         }
+        # sigma only when set, so default-sigma stores keep their existing hashes
+        if self.ds.attrs.get("sigma") is not None:
+            full["sigma"] = float(self.ds.attrs["sigma"])
         # Only record filter params once filtered, so an unfiltered igrams stage
         # keeps its original hash (and re-running with a new alpha re-computes).
         if self.ds.attrs.get("goldstein") is not None:

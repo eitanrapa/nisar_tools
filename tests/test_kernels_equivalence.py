@@ -122,3 +122,19 @@ def test_snaphu_nlooks_matches_legacy():
     assert _kernels.snaphu_nlooks(5, 5, 10.0, 10.0, 8, 3) == legacy._calculate_snaphu_nlooks(
         5, 5, 10.0, 10.0, 8, 3
     )
+
+
+def test_gaussian_sigma_option_defaults_to_looks_and_narrows_the_filter():
+    """``sigma=None`` is the legacy ``sigma=looks``; a smaller sigma keeps more of a steep phase ramp."""
+    import numpy as np
+    from nisar_tools import _kernels as K
+    ny, nx, looks = 120, 120, 10
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    ramp = np.exp(1j * 2 * np.pi * xx / 25.0).astype(np.complex64)   # 25-sample fringes (half the output Nyquist rate)
+    a = K.multilook(ramp, nx, ny, looks, True, "Gaussian")
+    b = K.multilook(ramp, nx, ny, looks, True, "Gaussian", sigma=looks)
+    np.testing.assert_array_equal(a, b)
+    c = K.multilook(ramp, nx, ny, looks, True, "Gaussian", sigma=looks / 2)
+    inner = (slice(3, -3), slice(3, -3))
+    assert np.abs(c[inner]).mean() > 2 * np.abs(a[inner]).mean()
+    assert K._overlap_depth(looks, "Gaussian", looks / 2) == int(4.0 * looks / 2 + 0.5)

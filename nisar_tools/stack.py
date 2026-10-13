@@ -277,9 +277,14 @@ class GSLCStack(RasterStackMixin):
     def form_interferograms(
         self, pairs="sequential", looks=5, downsample=True,
         convolution="Uniform", nan_aware=True, min_valid_fraction=0.5,
-        align_looks=True,
+        align_looks=True, sigma=None,
     ):
         """Form an :class:`InterferogramStack` from pairs of acquisitions.
+
+        ``sigma`` (Gaussian only) is the filter's sigma in input samples; the
+        default ``None`` is ``looks``. ``sigma=looks/2`` keeps steep near-fault
+        phase gradients that the default smooths away (see
+        :func:`nisar_tools._kernels.gaussian_sigma`).
 
         ``nan_aware`` (default) multilooks over the valid samples only, so the
         NaN left by the swath edge or by :meth:`merge` does not spread across
@@ -302,6 +307,7 @@ class GSLCStack(RasterStackMixin):
             nan_aware=nan_aware,
             min_valid_fraction=min_valid_fraction,
             align_looks=align_looks,
+            sigma=sigma,
         )
 
     def pixel_offsets(self, pairs="sequential", **kwargs):
