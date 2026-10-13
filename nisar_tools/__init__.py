@@ -27,10 +27,12 @@ Making a GSLC from an RSLC (a port of ISCE3's GSLC workflow)::
 
 from . import download
 from . import ionosphere
+from . import roff
 from .download import download_dem, download_gslcs, download_tec, login, search_tec
 from .gslc import GSLC
 from .gslc_geocode import RegistrationField, default_gslc_name, geocode_rslc, product_bounds
 from .rslc import RSLC
+from .roff import dense_offsets, geocode_offsets, open_roff
 from .stack import GSLCStack
 from .interferogram import InterferogramStack, make_pairs
 from .los import LOSStack
@@ -52,15 +54,19 @@ __all__ = [
     "Workspace",
     "WorkspaceError",
     "default_gslc_name",
+    "dense_offsets",
     "download",
     "download_dem",
     "download_gslcs",
     "download_tec",
+    "geocode_offsets",
     "geocode_rslc",
     "ionosphere",
     "login",
     "make_pairs",
+    "open_roff",
     "product_bounds",
+    "roff",
     "search_tec",
     "__version__",
 ]
