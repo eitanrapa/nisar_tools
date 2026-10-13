@@ -59,11 +59,20 @@ def _write_synthetic_geometry(f, grid, ident, x_coords, y_coords, dx, dy, epsg):
                   * np.sin(np.deg2rad(inc)))
     ).astype(np.float32)
 
+    # The along-track unit vector: horizontal, toward the flight direction -- south
+    # for a left-looking sensor west of its target -- turned 0..10 deg across x so
+    # that interpolating its components shortens it.
+    turn = np.deg2rad(10.0 * frac)
+    alongx = np.ascontiguousarray(np.broadcast_to(np.sin(turn), inc.shape).astype(np.float32))
+    alongy = np.ascontiguousarray(np.broadcast_to(-np.cos(turn), inc.shape).astype(np.float32))
+
     rg = f.create_group(RADAR_GRID)
     rg.create_dataset("incidenceAngle", data=inc)
     rg.create_dataset("elevationAngle", data=np.ascontiguousarray(look))
     rg.create_dataset("losUnitVectorX", data=losx)
     rg.create_dataset("losUnitVectorY", data=losy)
+    rg.create_dataset("alongTrackUnitVectorX", data=alongx)
+    rg.create_dataset("alongTrackUnitVectorY", data=alongy)
     rg.create_dataset("heightAboveEllipsoid", data=heights)
     rg.create_dataset("xCoordinates", data=cx)
     rg.create_dataset("yCoordinates", data=cy)
