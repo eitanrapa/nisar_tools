@@ -148,6 +148,101 @@ def _lut_method(lines, samples, requested=None):
 
 
 # ---------------------------------------------------------------------------
+# Secondary registration
+# ---------------------------------------------------------------------------
+class RegistrationField:
+    """Extra radar-position shifts for :func:`geocode_rslc`'s ``registration``.
+
+    A regular map grid (``x``, ``y`` in the output projection, ``y`` may
+    descend) carrying, per node, the fractional ``lines`` and ``samples`` to
+    add to an output pixel's radar position before it is interpolated.
+    Evaluated bilinearly; beyond the grid, the nearest edge node. The field
+    must be finite everywhere -- fill gaps before building one.
+
+    **What it is for.** Two GSLCs geocoded independently are registered only
+    as well as their geolocation agrees, and ASF's per-date ionospheric
+    geolocation correction (from the global TEC map) can disagree with the
+    radar by metres -- about a resolution cell, which halves the pair's
+    coherence. Because NISAR keeps the ~950 Hz Doppler carrier in its SLCs,
+    an along-track misregistration of ``dt`` also biases the interferogram's
+    phase by ``-2 pi f_dc dt``, ~1.7 cm of LOS per metre at L-band. The GUNW
+    avoids both by resampling its secondary to measured dense offsets
+    ("rubbersheeting"); this is the same thing for a GSLC: geocode the
+    secondary at its geometric position plus the measured offsets, while the
+    phase is still flattened by the geometric range.
+    """
+
+    def __init__(self, x, y, lines, samples, description=None):
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        lines = np.asarray(lines, dtype=np.float64)
+        samples = np.asarray(samples, dtype=np.float64)
+        shape = (y.size, x.size)
+        if lines.shape != shape or samples.shape != shape:
+            raise ValueError(f"lines/samples must be (len(y), len(x)) = {shape}")
+        if x.size < 2 or y.size < 2:
+            raise ValueError("a registration field needs at least 2 nodes along x and y")
+        if not (np.isfinite(lines).all() and np.isfinite(samples).all()):
+            raise ValueError("the registration field has NaN; fill its gaps first")
+        dx, dy = np.diff(x), np.diff(y)
+        if not (np.allclose(dx, dx[0]) and np.allclose(dy, dy[0])):
+            raise ValueError("a registration field needs a regular grid")
+        self.x, self.y = x, y
+        self.lines, self.samples = lines, samples
+        self.description = description or "registration field"
+
+    @classmethod
+    def from_offsets(cls, x, y, along_track, slant_range, along_track_spacing,
+                     range_spacing, description=None):
+        """From offsets in metres: ``along_track / along_track_spacing`` lines
+        and ``slant_range / range_spacing`` samples (e.g. a GUNW's
+        ``pixelOffsets``, with the RSLC's ground-track metres per line)."""
+        return cls(x, y, np.asarray(along_track, dtype=np.float64) / along_track_spacing,
+                   np.asarray(slant_range, dtype=np.float64) / range_spacing,
+                   description=description)
+
+    def __call__(self, x, y):
+        from scipy.ndimage import map_coordinates
+
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        col = (x - self.x[0]) / (self.x[1] - self.x[0])
+        row = (y - self.y[0]) / (self.y[1] - self.y[0])
+        coords = np.stack([row.ravel(), col.ravel()])
+        sample = lambda f: map_coordinates(f, coords, order=1, mode="nearest").reshape(x.shape)  # noqa: E731
+        return sample(self.lines), sample(self.samples)
+
+    def __repr__(self):
+        return (f"RegistrationField({self.description!r}, {self.y.size} x {self.x.size} nodes, "
+                f"lines {np.min(self.lines):+.3f}..{np.max(self.lines):+.3f}, "
+                f"samples {np.min(self.samples):+.3f}..{np.max(self.samples):+.3f})")
+
+
+def pixel_radar_indices(x, y, epsg, dem, grid, orbit, doppler, valid, corrections=None,
+                        registration=None):
+    """Steps 1-5 of the geocoding for output pixels at map ``x``, ``y`` (1-D).
+
+    The DEM height, zero-Doppler ``geo2rdr``, the timing ``corrections`` and,
+    last, the ``registration`` shifts (see :class:`RegistrationField`). Returns
+    ``(lon, lat, h, az_index, rg_index, flatten_range, mask)``, lon/lat in
+    radians. ``flatten_range`` is the geometric range in every case, and the
+    subswath ``mask`` is that of the position *before* registration -- a shift
+    of a line or two does not change it except at a subswath edge.
+    """
+    lon, lat = _to_lonlat(epsg, x, y)
+    lon, lat = np.deg2rad(lon), np.deg2rad(lat)
+    h = dem.heights(lon, lat)
+    az_corr = corrections.azimuth if corrections is not None else None
+    rg_corr = corrections.slant_range if corrections is not None else None
+    az, rg, rng, mask = radar_indices(lon, lat, h, grid, orbit, doppler, valid, az_corr, rg_corr)
+    if registration is not None:
+        d_lines, d_samples = registration(x, y)
+        az = az + d_lines
+        rg = rg + d_samples
+    return lon, lat, h, az, rg, rng, mask
+
+
+# ---------------------------------------------------------------------------
 # The workflow
 # ---------------------------------------------------------------------------
 def product_bounds(path):
@@ -185,7 +280,7 @@ def product_bounds(path):
 def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
                  epsg=None, bounds=None, like=None, posting=None, snap=240.0,
                  orbit_file=None, tec_file=None, solid_earth_tides=True,
-                 flatten=True, block_size=1024, workers=None,
+                 flatten=True, registration=None, block_size=1024, workers=None,
                  granule_id=None, dem_description=None, overwrite=False,
                  log=print):
     """Geocode an RSLC into a NISAR L2 GSLC HDF5 file. Returns the output path.
@@ -220,6 +315,14 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         geolocation correction; see :func:`nisar_tools.download.download_tec`.
     solid_earth_tides : bool
         Apply the solid Earth tide correction (needs ``pysolid``).
+    registration : callable, optional
+        ``registration(x, y) -> (lines, samples)``: extra fractional radar
+        shifts for output pixels at map ``x``, ``y`` (output projection),
+        added after the timing corrections and before interpolation; the
+        flattening range is not changed. Usually a :class:`RegistrationField`
+        built from dense offsets, to make this GSLC the coregistered
+        secondary of a reference GSLC -- see that class for why ASF's GSLCs
+        need it. Recorded in ``runConfigurationContents``.
     block_size : int
         Output block edge in pixels; rounded to a multiple of the 512 chunk.
     workers : int, optional
@@ -276,7 +379,8 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
                 f, rslc, freq, pols, grids[freq], grid, orbit, dem_interp,
                 corrections[freq], flatten, block_size, workers, log,
                 exception_masks=(freq == first and _has_input_data_exception(src)),
-                exception_grid=grids[first], freq_pols=freq_pols))
+                exception_grid=grids[first], freq_pols=freq_pols,
+                registration=registration))
         for (freq, pol), st in stats.items():
             st.write(f[f"{gp.PRODUCT}/grids/frequency{freq}/{pol}"])
 
@@ -287,6 +391,8 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             software=SOFTWARE_VERSION, input_file=rslc.path, output_file=str(output),
             dem_file=dem, orbit_file=orbit_file, tec_file=tec_file,
             solid_earth_tides=solid_earth_tides, flatten=flatten,
+            registration=None if registration is None else getattr(
+                registration, "description", type(registration).__name__),
             frequencies=dict(freq_pols), epsg=epsg, bounds=bounds,
             like=str(like) if like is not None else None, snap=snap,
             geo2rdr_threshold=1e-8, geo2rdr_maxiter=25, block_size=block_size,
@@ -440,7 +546,7 @@ def _block_may_touch_swath(geogrid, row0, row1, col0, col1, grid, orbit, margin_
 
 def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
                        flatten, block_size, workers, log, exception_masks,
-                       exception_grid, freq_pols):
+                       exception_grid, freq_pols, registration=None):
     root = f"{gp.PRODUCT}/grids/frequency{freq}"
     writers = {pol: gp.ChunkWriter(f[f"{root}/{pol}"]) for pol in pols}
     mask_writer = gp.ChunkWriter(f[f"{root}/mask"])
@@ -467,11 +573,9 @@ def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
         xs = geogrid.x_coordinates[col0:col1]
         ys = geogrid.y_coordinates[row0:row1]
         X, Y = np.meshgrid(xs, ys)
-        lon, lat = _to_lonlat(geogrid.epsg, X.ravel(), Y.ravel())
-        lon, lat = np.deg2rad(lon), np.deg2rad(lat)
-        h = dem.heights(lon, lat)
-        az, rg, rng, mask = radar_indices(lon, lat, h, grid, orbit, doppler, valid,
-                                          corr.azimuth, corr.slant_range)
+        lon, lat, h, az, rg, rng, mask = pixel_radar_indices(
+            X.ravel(), Y.ravel(), geogrid.epsg, dem, grid, orbit, doppler, valid,
+            corr, registration)
         shape = (row1 - row0, col1 - col0)
         ok = np.isfinite(az)
         if ok.any():
