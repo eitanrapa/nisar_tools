@@ -51,7 +51,7 @@ def _is_dask(arr):
     return type(arr).__module__.split(".")[0] == "dask"
 
 
-def _multilook_many(arrays, max_x, max_y, looks, downsample, convolution):
+def _multilook_many(arrays, max_x, max_y, looks, downsample, convolution, *, sigma=None):
     """Multilook several same-shaped real arrays, fusing the dask passes.
 
     On dask the arrays are stacked on a new leading axis and pushed through a
@@ -69,11 +69,11 @@ def _multilook_many(arrays, max_x, max_y, looks, downsample, convolution):
         import dask.array as da
 
         stacked = multilook_dask(
-            da.stack(arrays), max_x, max_y, looks, downsample, convolution
+            da.stack(arrays), max_x, max_y, looks, downsample, convolution, sigma=sigma
         )
         return [stacked[i] for i in range(len(arrays))]
     return [
-        multilook(arr, max_x, max_y, looks, downsample, convolution)
+        multilook(arr, max_x, max_y, looks, downsample, convolution, sigma=sigma)
         for arr in arrays
     ]
 
@@ -92,31 +92,46 @@ def _fillna_zero(arr):
     return np.nan_to_num(arr, nan=0.0)
 
 
-def _overlap_depth(looks, convolution):
+def _overlap_depth(looks, convolution, sigma=None):
     """Chunk-overlap depth needed so a windowed filter matches the global one.
 
     The depth must be at least the filter's radius, otherwise contributions
     from neighbouring chunks are silently dropped and chunk seams appear.
 
     - Uniform filter of ``size=looks`` reaches at most ``looks // 2`` samples.
-    - Gaussian filter of ``sigma=looks`` reaches ``int(truncate*sigma + 0.5)``
-      samples, where scipy's default ``truncate`` is 4.0.
+    - Gaussian filter of ``sigma`` (default ``looks``) reaches
+      ``int(truncate*sigma + 0.5)`` samples, where scipy's default ``truncate`` is 4.0.
     """
     if convolution == "Gaussian":
-        return int(4.0 * looks + 0.5)
+        return int(4.0 * gaussian_sigma(looks, sigma) + 0.5)
     if convolution == "Uniform":
         return looks // 2 + 1
     raise ValueError("convolution must be Uniform or Gaussian")
 
 
-def multilook(arr, max_x, max_y, looks, downsample, convolution):
+def gaussian_sigma(looks, sigma=None):
+    """The Gaussian multilook's sigma in input samples: ``sigma`` if given, else ``looks``.
+
+    ``sigma=looks`` (the default, and the legacy kernel) is a heavy low-pass for a
+    stride of ``looks``: its amplitude response is 0.29 at half the output grid's
+    Nyquist and 0.007 at Nyquist, so steep phase gradients -- the near field of a
+    rupture -- lose coherence before unwrapping. ``sigma=looks/2`` keeps 0.73 / 0.29.
+    """
+    s = float(looks if sigma is None else sigma)
+    if not s > 0:
+        raise ValueError("the Gaussian multilook sigma must be positive")
+    return s
+
+
+def multilook(arr, max_x, max_y, looks, downsample, convolution, *, sigma=None):
     """Convolve and (optionally) downsample a 2D array. Verbatim numpy kernel.
 
     Mirrors the original ``_multilook_array``. Operates on real or complex
-    numpy arrays via scipy's filters directly.
+    numpy arrays via scipy's filters directly. ``sigma`` (Gaussian only) is the
+    filter's sigma in input samples, default ``looks`` (see :func:`gaussian_sigma`).
     """
     if convolution == "Gaussian":
-        smoothed = gaussian_filter(arr, sigma=looks, mode="constant", cval=0.0)
+        smoothed = gaussian_filter(arr, sigma=gaussian_sigma(looks, sigma), mode="constant", cval=0.0)
     elif convolution == "Uniform":
         smoothed = uniform_filter(arr, size=looks, mode="constant", cval=0.0)
     else:
@@ -129,7 +144,7 @@ def multilook(arr, max_x, max_y, looks, downsample, convolution):
     return smoothed
 
 
-def multilook_dask(arr, max_x, max_y, looks, downsample, convolution):
+def multilook_dask(arr, max_x, max_y, looks, downsample, convolution, *, sigma=None):
     """Lazy multilook over a chunked dask array, matching :func:`multilook`.
 
     Filters real and imaginary parts separately (linear filters make this
@@ -138,7 +153,7 @@ def multilook_dask(arr, max_x, max_y, looks, downsample, convolution):
     ``map_overlap`` with a mode-dependent depth so the result is independent
     of the chunk layout.
     """
-    depth = _overlap_depth(looks, convolution)
+    depth = _overlap_depth(looks, convolution, sigma)
     ndim = arr.ndim
     n_lead = ndim - 2  # leading non-spatial (stack/pair) axes, if any
 
@@ -146,10 +161,11 @@ def multilook_dask(arr, max_x, max_y, looks, downsample, convolution):
     # 0 (Gaussian sigma) or 1 (uniform size) leaves the leading stack axes
     # untouched, so pairs/dates never mix even when chunked together.
     if convolution == "Gaussian":
-        sigma = (0.0,) * n_lead + (looks, looks)
+        g = gaussian_sigma(looks, sigma)
+        sigmas = (0.0,) * n_lead + (g, g)
 
         def _f(block):
-            return gaussian_filter(block, sigma=sigma, mode="constant", cval=0.0)
+            return gaussian_filter(block, sigma=sigmas, mode="constant", cval=0.0)
     else:
         size = (1,) * n_lead + (looks, looks)
 
@@ -173,7 +189,7 @@ def multilook_dask(arr, max_x, max_y, looks, downsample, convolution):
     return smoothed
 
 
-def boundary_response(ny, nx, max_x, max_y, looks, downsample, convolution):
+def boundary_response(ny, nx, max_x, max_y, looks, downsample, convolution, *, sigma=None):
     """The filter's response to an all-valid raster, i.e. ``multilook(ones)``.
 
     ``mode="constant", cval=0.0`` treats everything beyond the raster as zero,
@@ -187,13 +203,13 @@ def boundary_response(ny, nx, max_x, max_y, looks, downsample, convolution):
     and ``nx``, negligible next to the arrays being multilooked.
     """
     prof_y, prof_x = boundary_response_profiles(
-        ny, nx, max_x, max_y, looks, downsample, convolution
+        ny, nx, max_x, max_y, looks, downsample, convolution, sigma=sigma
     )
     return np.outer(prof_y, prof_x)
 
 
 def boundary_response_profiles(ny, nx, max_x, max_y, looks, downsample,
-                               convolution):
+                               convolution, *, sigma=None):
     """The two 1-D profiles whose outer product is :func:`boundary_response`.
 
     Exposed separately so the nan-aware normalisation can divide a dask array by
@@ -203,7 +219,7 @@ def boundary_response_profiles(ny, nx, max_x, max_y, looks, downsample,
     if convolution == "Gaussian":
         def _f(n):
             return gaussian_filter1d(
-                np.ones(n), looks, mode="constant", cval=0.0
+                np.ones(n), gaussian_sigma(looks, sigma), mode="constant", cval=0.0
             )
     elif convolution == "Uniform":
         def _f(n):
@@ -223,7 +239,7 @@ def boundary_response_profiles(ny, nx, max_x, max_y, looks, downsample,
 
 
 def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
-                    nan_aware=True, min_valid_fraction=0.5):
+                    nan_aware=True, min_valid_fraction=0.5, *, sigma=None):
     """Form a multilooked interferogram and its coherence.
 
     Works on either numpy or dask arrays: the only backend-specific step is
@@ -261,9 +277,9 @@ def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
         raw_int2 = np.abs(c2) ** 2
 
         ml = multilook_dask if _is_dask(raw_interf) else multilook
-        ml_interf = ml(raw_interf, max_x, max_y, looks, downsample, convolution)
-        ml_int1 = ml(raw_int1, max_x, max_y, looks, downsample, convolution)
-        ml_int2 = ml(raw_int2, max_x, max_y, looks, downsample, convolution)
+        ml_interf = ml(raw_interf, max_x, max_y, looks, downsample, convolution, sigma=sigma)
+        ml_int1 = ml(raw_int1, max_x, max_y, looks, downsample, convolution, sigma=sigma)
+        ml_int2 = ml(raw_int2, max_x, max_y, looks, downsample, convolution, sigma=sigma)
 
         ml_corr = np.abs(ml_interf) / (np.sqrt(ml_int1 * ml_int2) + 1e-8)
 
@@ -282,7 +298,7 @@ def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
     ml = multilook_dask if _is_dask(c1) else multilook
 
     def _ml(arr):
-        return ml(arr, max_x, max_y, looks, downsample, convolution)
+        return ml(arr, max_x, max_y, looks, downsample, convolution, sigma=sigma)
 
     # Zero-fill before filtering: scipy never sees a NaN, so nothing spreads.
     #
@@ -297,7 +313,7 @@ def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
             np.where(valid, np.abs(c2) ** 2, 0.0),
             mask,
         ],
-        max_x, max_y, looks, downsample, convolution,
+        max_x, max_y, looks, downsample, convolution, sigma=sigma,
     )
 
     # ``sum_mask`` carries both effects we care about: how much of the
@@ -305,7 +321,7 @@ def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
     # first is a data boundary, so divide the second out before thresholding.
     ny, nx = c1.shape[-2:]
     prof_y, prof_x = boundary_response_profiles(
-        ny, nx, max_x, max_y, looks, downsample, convolution
+        ny, nx, max_x, max_y, looks, downsample, convolution, sigma=sigma
     )
     # Divided out one axis at a time: the response is separable, so this keeps two
     # vectors in the graph instead of a materialised full-grid float64 array.
