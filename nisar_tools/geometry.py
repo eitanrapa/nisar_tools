@@ -48,6 +48,14 @@ _CUBE_DATASETS = {
     "los_east": "losUnitVectorX",
     "los_north": "losUnitVectorY",
 }
+# The along-track unit vector at the target: the direction an along-track pixel
+# offset measures. Read on request only (``read_geometry_cube(along_track=True)``).
+# In the products it is horizontal -- east**2 + north**2 = 1 to 1e-6 on D141 and
+# A061 -- so its up component is zero.
+_ALONG_DATASETS = {
+    "along_east": "alongTrackUnitVectorX",
+    "along_north": "alongTrackUnitVectorY",
+}
 
 
 def _decode(value):
@@ -67,22 +75,26 @@ def radar_wavelength(path, frequency="A", product="GSLC"):
     return SPEED_OF_LIGHT / cf
 
 
-def read_geometry_cube(path, frequency="A", product="GSLC"):
+def read_geometry_cube(path, frequency="A", product="GSLC", along_track=False):
     """Load a NISAR ``metadata/radarGrid`` geometry cube as an xarray Dataset.
 
     Returns dims ``(height, y, x)`` with ``incidence_angle`` (degrees) and the
     ``los_east`` / ``los_north`` LOS-unit-vector components; attrs carry the
     cube's ``epsg``, the ``wavelength``, and the ``look_direction``.
+    ``along_track=True`` adds ``along_east`` / ``along_north``, the along-track
+    unit vector (horizontal, toward the flight direction), which
+    :func:`sample_look_geometry` then carries too.
 
     ``product`` picks the product group: a ``"GSLC"`` granule or a ``"GUNW"``,
     which embeds a cube of the same layout (the two differ only in the number of
     reference heights, read here from the file, not assumed).
     """
+    names = dict(_CUBE_DATASETS, **(_ALONG_DATASETS if along_track else {}))
     with h5py.File(str(path), "r") as f:
         rg = f[_RADAR_GRID.format(product=product)]
         data = {
             out: (("height", "y", "x"), rg[name][()])
-            for out, name in _CUBE_DATASETS.items()
+            for out, name in names.items()
         }
         height = rg["heightAboveEllipsoid"][()].astype(float)
         y = rg["yCoordinates"][()].astype(float)
@@ -149,7 +161,10 @@ def sample_look_geometry(cube, x, y, epsg, height=None, workers=None):
     with ``incidence_angle`` (deg), the ENU LOS unit vector ``los_east`` /
     ``los_north`` / ``los_up``, and the sampled ``height``. ``los_up`` is
     reconstructed as ``sqrt(1 - east^2 - north^2)`` (the LOS points up toward the
-    sensor), which equals ``cos(incidence)``.
+    sensor), which equals ``cos(incidence)``. A cube read with
+    ``along_track=True`` also gives ``along_east`` / ``along_north`` /
+    ``along_up``: the along-track unit vector, renormalised in the horizontal
+    after interpolation (``along_up`` is zero).
 
     Sampled a band of rows at a time on a thread pool rather than the whole grid
     at once. The interpolation is pointwise in ``(x, y, height)``, so banding
@@ -185,15 +200,17 @@ def sample_look_geometry(cube, x, y, epsg, height=None, workers=None):
 
     # Built once and shared: an interpolator only holds references to the cube's
     # (small) values, and its __call__ allocates nothing shared.
+    along = all(v in cube for v in _ALONG_DATASETS)
+    geom_vars = _GEOM_VARS + (tuple(_ALONG_DATASETS) if along else ())
     interps = {
         var: RegularGridInterpolator(
             axes, cube[var].values[np.ix_(hi, yi, xi)],
             bounds_error=False, fill_value=np.nan,
         )
-        for var in _GEOM_VARS
+        for var in geom_vars
     }
 
-    out = {var: np.empty((ny, nx), np.float32) for var in _GEOM_VARS}
+    out = {var: np.empty((ny, nx), np.float32) for var in geom_vars}
     out["los_up"] = np.empty((ny, nx), np.float32)
 
     def _band(rows):
@@ -215,6 +232,13 @@ def sample_look_geometry(cube, x, y, epsg, height=None, workers=None):
         out["los_up"][rows] = np.sqrt(np.clip(
             1.0 - sampled["los_east"] ** 2 - sampled["los_north"] ** 2, 0.0, 1.0
         ))
+        if along:
+            # Interpolating a unit vector's components shortens it; it is
+            # horizontal, so renormalise in the horizontal plane.
+            norm = np.hypot(sampled["along_east"], sampled["along_north"])
+            norm = np.where(norm > 0, norm, np.nan)
+            out["along_east"][rows] = sampled["along_east"] / norm
+            out["along_north"][rows] = sampled["along_north"] / norm
 
     if workers is None:
         workers = os.cpu_count() or 1
@@ -238,6 +262,11 @@ def sample_look_geometry(cube, x, y, epsg, height=None, workers=None):
         },
         coords={"y": y, "x": x},
     ).rio.write_crs(f"EPSG:{int(epsg)}")
+    if along:
+        ds["along_east"] = (("y", "x"), out["along_east"])
+        ds["along_north"] = (("y", "x"), out["along_north"])
+        ds["along_up"] = (("y", "x"), np.where(np.isfinite(out["along_east"]), 0.0, np.nan)
+                          .astype(np.float32))
     ds.attrs["epsg"] = int(epsg)
     return ds
 

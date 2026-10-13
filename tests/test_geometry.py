@@ -225,3 +225,27 @@ def test_missing_cube_raises(gslc_factory):
     p = gslc_factory(ny=32, nx=32, write_geometry=False)
     with pytest.raises((KeyError, OSError)):
         G.read_geometry_cube(p)
+
+
+# -- the along-track unit vector (offsets as inversion data) -------------------
+def test_along_track_vector_is_opt_in_horizontal_and_unit(gslc_factory):
+    p = gslc_factory(ny=40, nx=40, epsg=32611, write_geometry=True)
+    assert "along_east" not in G.read_geometry_cube(p)
+    cube = G.read_geometry_cube(p, along_track=True)
+    assert {"along_east", "along_north"} <= set(cube.data_vars)
+    # sample between the cube's nodes, where linear interpolation shortens it
+    x = np.linspace(cube.x.values[1], cube.x.values[-2], 37)
+    y = np.linspace(cube.y.values[-2], cube.y.values[1], 29)
+    s = G.sample_look_geometry(cube, x, y, 32611)
+    e, n, u = s["along_east"].values, s["along_north"].values, s["along_up"].values
+    np.testing.assert_allclose(np.hypot(e, n), 1.0, atol=1e-6)
+    np.testing.assert_array_equal(u, 0.0)
+    assert np.all(n < -0.98)                       # south: the flight direction
+    # turned 0..10 deg across the cube's x: the angle is linear in x there
+    cx = cube.x.values
+    turn = 10.0 * (x - cx.min()) / (cx.max() - cx.min())
+    np.testing.assert_allclose(np.degrees(np.arctan2(e, -n))[0], turn, atol=0.05)
+    # and the LOS outputs are what they were without it
+    plain = G.sample_look_geometry(G.read_geometry_cube(p), x, y, 32611)
+    for v in plain.data_vars:
+        np.testing.assert_array_equal(plain[v].values, s[v].values)

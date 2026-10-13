@@ -495,3 +495,75 @@ def geocode_offsets(ds, reference, dem, x, y, epsg, *, variables=OFFSET_VARIABLE
                       coords={"layer": layers, "x": x, "y": y},
                       attrs={"epsg": int(epsg), "window_centres": bool(window_centres),
                              **{k: v for k, v in ds.attrs.items() if isinstance(v, (str, int, float))}})
+
+
+def offset_los_stacks(ds, reference_gslc, reference, dem, x, y, epsg, *, layer="layer1",
+                      window_centres=False, frequency="A", geocoded=None):
+    """A ROFF as two LOS-style stacks a slip inversion reads like InSAR: ``{"range", "along"}``.
+
+    Each is an :class:`~nisar_tools.los.LOSStack` whose ``los`` (metres, ``(pair, y, x)``) is
+    the ground displacement projected on that stack's own unit vector, ``los_east`` /
+    ``los_north`` / ``los_up``:
+
+    - ``"range"``: ``-slantRangeOffset`` on the target->sensor LOS unit vector. A slant-range
+      offset is secondary minus reference range, + away from the sensor; this package's LOS is
+      + toward it, so it is the same quantity as an interferogram's LOS, with no 2 pi ambiguity;
+    - ``"along"``: ``+alongTrackOffset`` on the along-track unit vector, which is horizontal and
+      points along the flight direction (+ = the ground moved that way).
+
+    Both vectors come from ``reference_gslc``'s geometry cube (the ROFF's reference date, the
+    same cube :class:`~nisar_tools.los.LOSStack` uses), sampled at ``dem``'s heights.
+    ``reference`` is that date's RSLC and ``dem`` a GeoTIFF path; both geocode the offsets
+    (:func:`geocode_offsets`, or pass its output as ``geocoded``). Each stack also carries
+    ``variance`` (m**2, the correlator's), ``snr`` and ``correlationSurfacePeak``, for masking
+    and weighting -- per-window sigmas are ~0.2 m in range and ~0.3 m along-track on D141.
+
+    Signs checked on D141 Panama (left-lateral, the north block moving WNW): the north-minus-
+    south step 0.5-1.5 km from the trace is -4.29 m in slant range (toward a sensor looking ESE)
+    and -1.50 m along-track (against the SSW flight direction). The along-track vector is
+    orthogonal to the LOS to 0.018 there, as zero-Doppler geometry requires.
+    """
+    import xarray as xr
+
+    from . import geometry
+    from .los import LOSStack
+
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    if geocoded is None:
+        variables = ("alongTrackOffset", "slantRangeOffset", "alongTrackOffsetVariance",
+                     "slantRangeOffsetVariance", "snr", "correlationSurfacePeak")
+        geocoded = geocode_offsets(ds.sel(layer=[layer]), reference, dem, x, y, epsg,
+                                   variables=variables, window_centres=window_centres,
+                                   frequency=frequency)
+    geo = geocoded.sel(layer=layer)
+    heights = geometry.dem_heights_on_grid(dem, x, y, epsg)
+    cube = geometry.read_geometry_cube(reference_gslc, frequency, along_track=True)
+    look = geometry.sample_look_geometry(cube, x, y, epsg, heights)
+    attrs = {"epsg": int(epsg), "sign": 1, "wavelength": float(cube.attrs["wavelength"]),
+             "look_direction": cube.attrs.get("look_direction"), "frequency": frequency,
+             "layer": str(layer), "source": "ROFF pixel offsets",
+             **{k: v for k, v in ds.attrs.items() if k in ("reference", "secondary")}}
+    stacks = {}
+    for name, value, var, vector, extra in (
+            ("range", -geo["slantRangeOffset"], "slantRangeOffsetVariance",
+             ("los_east", "los_north", "los_up"), ("incidence_angle", "look_angle")),
+            ("along", geo["alongTrackOffset"], "alongTrackOffsetVariance",
+             ("along_east", "along_north", "along_up"), ())):
+        out = xr.Dataset(
+            {"los": (("pair", "y", "x"), np.asarray(value.values, np.float32)[None]),
+             **{f"los_{c}": (("y", "x"), np.asarray(look[v].values, np.float32))
+                for c, v in zip(("east", "north", "up"), vector)},
+             **{k: (("y", "x"), np.asarray(look[k].values, np.float32)) for k in extra},
+             "height": (("y", "x"), np.asarray(look["height"].values, np.float32)),
+             "variance": (("y", "x"), np.asarray(geo[var].values, np.float32)),
+             "snr": (("y", "x"), np.asarray(geo["snr"].values, np.float32)),
+             "correlationSurfacePeak": (("y", "x"),
+                                        np.asarray(geo["correlationSurfacePeak"].values, np.float32))},
+            coords={"pair": [0], "y": y, "x": x})
+        out = out.rio.write_crs(f"EPSG:{int(epsg)}")
+        out.attrs.update(attrs, kind="range_offset" if name == "range" else "along_track_offset",
+                         convention=("-slantRangeOffset: + toward the sensor" if name == "range"
+                                     else "+alongTrackOffset: + along the flight direction"))
+        stacks[name] = LOSStack(out)
+    return stacks

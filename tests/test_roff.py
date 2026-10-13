@@ -104,3 +104,37 @@ def test_dense_offsets_return_the_shift(pair):
     sub = dense_offsets(pair[0], pair[1], _FlatDEM(), layers=LAYERS, margin=24, skip_azimuth=24,
                         skip_range=24, rows=slice(2, 5), cols=slice(1, 4), workers=1, geometry_step=16)
     np.testing.assert_array_equal(sub.down.values[0], down[2:5, 1:4])
+
+
+def test_offset_stacks_carry_the_offsets_on_their_own_unit_vectors(gslc_factory):
+    """``offset_los_stacks``: range as -slantRangeOffset on the LOS, along-track as itself."""
+    import xarray as xr
+    from nisar_tools import geometry as G
+    from nisar_tools.roff import offset_los_stacks
+
+    p = gslc_factory(ny=40, nx=40, epsg=32611, write_geometry=True)
+    cube = G.read_geometry_cube(p, along_track=True)
+    x = np.linspace(cube.x.values[1], cube.x.values[-2], 12)
+    y = np.linspace(cube.y.values[-2], cube.y.values[1], 9)
+    rng = np.random.default_rng(0)
+    fields = {k: rng.normal(size=(1, y.size, x.size)).astype(np.float32)
+              for k in ("alongTrackOffset", "slantRangeOffset")}
+    fields.update({k: np.full((1, y.size, x.size), v, np.float32) for k, v in
+                   (("alongTrackOffsetVariance", 0.09), ("slantRangeOffsetVariance", 0.04),
+                    ("snr", 12.0), ("correlationSurfacePeak", 0.4))})
+    geo = xr.Dataset({k: (("layer", "y", "x"), v) for k, v in fields.items()},
+                     coords={"layer": ["layer1"], "y": y, "x": x})
+    roff = xr.Dataset(attrs={"reference": "ref.h5", "secondary": "sec.h5"})
+    st = offset_los_stacks(roff, p, None, None, x, y, 32611, geocoded=geo)
+    r, a = st["range"].ds, st["along"].ds
+    np.testing.assert_array_equal(r["los"].values, -fields["slantRangeOffset"])
+    np.testing.assert_array_equal(a["los"].values, fields["alongTrackOffset"])
+    look = G.sample_look_geometry(cube, x, y, 32611)
+    for c in ("east", "north", "up"):
+        np.testing.assert_array_equal(r[f"los_{c}"].values, look[f"los_{c}"].values)
+        np.testing.assert_array_equal(a[f"los_{c}"].values, look[f"along_{c}"].values)
+    np.testing.assert_allclose(r["variance"].values, 0.04)
+    np.testing.assert_allclose(a["variance"].values, 0.09)
+    assert r.attrs["kind"] == "range_offset" and a.attrs["kind"] == "along_track_offset"
+    assert r.attrs["secondary"] == "sec.h5" and int(a.attrs["epsg"]) == 32611
+    assert r["los"].dims == ("pair", "y", "x")

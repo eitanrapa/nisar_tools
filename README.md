@@ -633,6 +633,29 @@ same offset. Throughput at the current defaults is **6900 locations/s** on a rea
 A061 crop (8856 locations in 1.3 s), the narrower 96 px patch being 7× less
 transform than the 256 px one the GMTSAR defaults ask for.
 
+### NISAR's ROFF, and offsets as inversion data
+
+`roff.dense_offsets(reference_rslc, secondary_rslc, dem, rows=, cols=)` is NISAR's
+ROFF ported from ISCE3 v0.25.16 (its offsets workflow, with PyCuAmpcor in numpy).
+On the same inputs it reproduces the urgent-response ROFF: 99.7–99.9% of windows
+identical. `geocode_offsets` maps it the way GOFF does.
+
+`roff.offset_los_stacks(roff, reference_gslc, reference_rslc, dem, x, y, epsg)`
+turns it into two `LOSStack`s that a slip inversion reads like interferograms:
+
+- `"range"`: `-slantRangeOffset` on the LOS unit vector, + toward the sensor. That
+  is the interferogram's own quantity, without its 2π ambiguity.
+- `"along"`: `alongTrackOffset` on the along-track unit vector, which is horizontal
+  and + along the flight direction. It comes from the GSLC geometry cube
+  (`geometry.read_geometry_cube(along_track=True)`).
+
+Each stack also carries the correlator's `variance` (m²), `snr` and
+`correlationSurfacePeak`. Per-window σ is ~0.2 m in range and ~0.3 m along-track
+(D141 Panama, 64-pixel windows), about ten times an interferogram's, so weight the
+offsets by their noise in an inversion. Along-track offsets can also carry L-band
+ionospheric streaks: Venezuela D054_083, a post-sunset pass, shows ±2 m oblique
+bands.
+
 ### Exporting to GMT `.grd`
 
 `to_grd(outdir)` is on every product stage (`GSLCStack`, `InterferogramStack`,
