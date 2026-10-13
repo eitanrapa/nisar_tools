@@ -29,7 +29,7 @@ from . import download
 from . import ionosphere
 from .download import download_dem, download_gslcs, download_tec, login, search_tec
 from .gslc import GSLC
-from .gslc_geocode import default_gslc_name, geocode_rslc, product_bounds
+from .gslc_geocode import RegistrationField, default_gslc_name, geocode_rslc, product_bounds
 from .rslc import RSLC
 from .stack import GSLCStack
 from .interferogram import InterferogramStack, make_pairs
@@ -47,6 +47,7 @@ __all__ = [
     "LOSStack",
     "PixelOffsetStack",
     "RSLC",
+    "RegistrationField",
     "UnwrappedStack",
     "Workspace",
     "WorkspaceError",
