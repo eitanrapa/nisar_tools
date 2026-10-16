@@ -88,9 +88,14 @@ class UnwrappedStack(RasterStackMixin):
         cls, igrams, workspace, name="unwrapped", nproc=1, res_az=8, res_rg=3,
         overwrite=False, ntiles=None, tile_overlap=None,
         max_tile_pixels=_kernels.DEFAULT_MAX_TILE_PIXELS, min_region_size=100,
-        tile_cost_thresh=500, single_tile_reoptimize=True, pairs_in_flight=1,
+        tile_cost_thresh=500, single_tile_reoptimize=True, pairs_in_flight=1, cost="smooth",
     ):
         """Unwrap every pair with SNAPHU into a region-written, resumable store.
+
+        ``cost`` is SNAPHU's statistical cost mode: ``"smooth"`` (default) or ``"defo"`` (deformation: phase
+        discontinuities are cheap where coherence is low -- for a pair across a coseismic step). An interferogram
+        formed with a ``phase_model`` carries it as ``phase_model``; it is added back to each pair's unwrapped
+        phase here, so the store holds the full phase.
 
         **Tiling is a function of the raster, not of ``nproc``.** SNAPHU's tile
         grid decides where the 2*pi seams fall, so it is part of the answer, not a
@@ -136,11 +141,14 @@ class UnwrappedStack(RasterStackMixin):
             (ny, nx), ntiles, overlap, min_region_size=min_region_size
         )
 
+        if cost not in ("smooth", "defo"):
+            raise ValueError(f"cost must be 'smooth' or 'defo', not {cost!r}")
         snaphu_kwargs = dict(
             nlooks=nlooks, ntiles=ntiles, tile_overlap=overlap, nproc=nproc,
             min_region_size=min_region_size, tile_cost_thresh=tile_cost_thresh,
-            single_tile_reoptimize=single_tile_reoptimize,
+            single_tile_reoptimize=single_tile_reoptimize, cost=cost,
         )
+        model = (np.asarray(ds["phase_model"].values, np.float32) if "phase_model" in ds else None)
 
         params = {
             "stage": name,
@@ -159,6 +167,11 @@ class UnwrappedStack(RasterStackMixin):
             "tile_cost_thresh": int(tile_cost_thresh),
             "single_tile_reoptimize": bool(single_tile_reoptimize),
         }
+        # only when not the defaults, so every existing store keeps its hash
+        if cost != "smooth":
+            params["cost"] = cost
+        if model is not None:
+            params["phase_model"] = ds.attrs.get("phase_model", "phase model")
 
         # Metadata-only store so each pair can be written by region.
         template = _template(ds, npair, ny, nx)
@@ -183,6 +196,8 @@ class UnwrappedStack(RasterStackMixin):
 
         def _unwrap_and_write(i, igram, corr):
             unw, conncomp = _unwrap_pair(igram, corr, pair=i, **snaphu_kwargs)
+            if model is not None:
+                unw = unw + model                         # NaN stays NaN
             pair_ds = xr.Dataset(
                 {
                     "unw": (("pair", "y", "x"), unw[None]),

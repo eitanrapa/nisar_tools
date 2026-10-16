@@ -277,9 +277,12 @@ class GSLCStack(RasterStackMixin):
     def form_interferograms(
         self, pairs="sequential", looks=5, downsample=True,
         convolution="Uniform", nan_aware=True, min_valid_fraction=0.5,
-        align_looks=True, sigma=None,
+        align_looks=True, sigma=None, phase_model=None,
     ):
         """Form an :class:`InterferogramStack` from pairs of acquisitions.
+
+        ``phase_model``: a phase taken out of every pair before multilooking and added back after unwrapping (see
+        :meth:`InterferogramStack.from_slc_stack`).
 
         ``sigma`` (Gaussian only) is the filter's sigma in input samples; the
         default ``None`` is ``looks``. ``sigma=looks/2`` keeps steep near-fault
@@ -308,6 +311,7 @@ class GSLCStack(RasterStackMixin):
             min_valid_fraction=min_valid_fraction,
             align_looks=align_looks,
             sigma=sigma,
+            phase_model=phase_model,
         )
 
     def pixel_offsets(self, pairs="sequential", **kwargs):
