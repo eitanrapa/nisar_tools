@@ -139,6 +139,43 @@ def test_overwrite_is_allowed_when_nothing_reads_the_target(tmp_path):
     assert ws.stored_params_hash("slc_stack") == hash_params({"v": 4})
 
 
+def test_an_interrupted_store_is_recomputed_not_reused(tmp_path):
+    """A store with chunk files missing -- a write killed midway, before the fix -- matches on its
+    params hash but must not be handed back: its missing chunks read as junk (A004, 2026-10-14)."""
+    ws = Workspace(tmp_path)
+    ds = _complex_ds()
+    ws.store("igrams", ds, {"v": 1})
+    chunk = next(p for p in (tmp_path / "igrams.zarr" / "slc").iterdir() if not p.name.startswith("."))
+    chunk.unlink()
+    assert ws.stored_params_hash("igrams") == hash_params({"v": 1})
+    assert not ws.has("igrams", {"v": 1})
+
+    with pytest.warns(UserWarning, match="incomplete"):
+        out = ws.store("igrams", ds, {"v": 1})
+    np.testing.assert_array_equal(out["slc"].compute().values, ds["slc"].compute().values)
+    assert ws.has("igrams", {"v": 1})
+
+
+def test_a_write_that_dies_leaves_no_stage(tmp_path):
+    """The store appears under its name only once complete, so a rerun cannot pick up half of it."""
+    ws = Workspace(tmp_path)
+
+    def dies_on_the_second_chunk(block, block_info=None):
+        if block_info[0]["chunk-location"][0] == 1:
+            raise RuntimeError("killed")
+        return block
+
+    ds = _complex_ds()
+    ds["slc"] = ds["slc"].copy(data=ds["slc"].data.map_blocks(dies_on_the_second_chunk, dtype=np.complex64))
+    with pytest.raises(RuntimeError, match="killed"):
+        ws.store("igrams", ds, {"v": 1})
+    assert not ws.exists("igrams")
+
+    out = ws.store("igrams", _complex_ds(), {"v": 1})          # over the abandoned .partial
+    np.testing.assert_array_equal(out["slc"].compute().values, _complex_ds()["slc"].compute().values)
+    assert not (tmp_path / "igrams.zarr.partial").exists()
+
+
 def test_init_store_refuses_to_delete_its_own_source(tmp_path):
     """Region-written stores take the same path (e.g. unwrapping into igrams)."""
     ws = Workspace(tmp_path)
