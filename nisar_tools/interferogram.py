@@ -41,6 +41,43 @@ def make_pairs(spec, n):
     return pairs
 
 
+
+def _phase_model_rotation(model, x, y, like):
+    """``(rotation, description, at)`` for ``from_slc_stack(phase_model=)``: ``exp(i model)`` at the native pixels
+    ``x``/``y`` as a dask array chunked like ``like``'s trailing (y, x) axes (complex64), a description carrying a hash of
+    the model (for the stage's params), and ``at(x, y)`` -> the model on any grid (float32)."""
+    import hashlib
+
+    import dask.array as da
+    from scipy.interpolate import RegularGridInterpolator
+
+    mx = np.asarray(model["x"].values, float)
+    my = np.asarray(model["y"].values, float)
+    mv = np.asarray(model.values, float)
+    if mv.ndim != 2:
+        raise ValueError("phase_model must be a (y, x) DataArray")
+    if my[0] > my[-1]:
+        my, mv = my[::-1], mv[::-1]
+    mv = np.where(np.isfinite(mv), mv, 0.0)
+    f = RegularGridInterpolator((my, mx), mv, bounds_error=False, fill_value=0.0)
+
+    def at(xx, yy):
+        Y, X = np.meshgrid(np.asarray(yy, float), np.asarray(xx, float), indexing="ij")
+        return f(np.column_stack([Y.ravel(), X.ravel()])).reshape(Y.shape).astype(np.float32)
+
+    ychunks, xchunks = like.chunks[-2], like.chunks[-1]
+    zero = da.zeros((len(y), len(x)), chunks=(ychunks, xchunks), dtype=np.float32)
+
+    def block(z, block_info=None):
+        (r0, r1), (c0, c1) = block_info[0]["array-location"]
+        return np.exp(1j * at(x[c0:c1], y[r0:r1])).astype(np.complex64)
+
+    rot = da.map_blocks(block, zero, dtype=np.complex64)
+    digest = hashlib.sha256(np.ascontiguousarray(mv, dtype=np.float32).tobytes()).hexdigest()[:16]
+    desc = str(model.attrs.get("description", "phase model")) + f" [sha256 {digest}, {mv.shape[0]} x {mv.shape[1]}]"
+    return rot, desc, at
+
+
 class InterferogramStack(RasterStackMixin):
     """A stack of multilooked interferograms with coherence."""
 
@@ -57,8 +94,15 @@ class InterferogramStack(RasterStackMixin):
     def from_slc_stack(
         cls, stack, pairs="sequential", looks=5, downsample=True,
         convolution="Uniform", nan_aware=True, min_valid_fraction=0.5,
-        align_looks=True, sigma=None,
+        align_looks=True, sigma=None, phase_model=None,
     ):
+        """``phase_model`` (optional): a ``(y, x)`` DataArray of phase (rad, this band) on a regular map grid in
+        the stack's CRS -- e.g. a near-fault LOS model from pixel offsets. It is taken out of every pair at full
+        resolution, ``ref * conj(sec) * exp(-i model)``, BEFORE multilooking, so steep coseismic fringes do not
+        cancel inside the looks, and is kept on the multilooked grid as ``phase_model`` for
+        :meth:`~nisar_tools.unwrap.UnwrappedStack.from_interferograms` to add back after unwrapping. Bilinear
+        at each pixel; 0 outside the model's grid and where it is NaN.
+        """
         if convolution not in _kernels.VALID_CONVOLUTIONS:
             raise ValueError("convolution must be Uniform or Gaussian")
         if sigma is not None and convolution != "Gaussian":
@@ -102,8 +146,13 @@ class InterferogramStack(RasterStackMixin):
 
         # The kernel batches over the leading (pair) axis and multilooks the
         # trailing spatial axes, so 3D dask arrays go straight through.
+        sec_data = sec.data
+        model_desc = None
+        if phase_model is not None:
+            rot, model_desc, model_at = _phase_model_rotation(phase_model, np.asarray(x), np.asarray(y), sec.data)
+            sec_data = sec_data * rot[None]                 # conj(sec * e^{i m}) = conj(sec) e^{-i m}
         igram, coherence = _kernels.igram_coherence(
-            ref.data, sec.data, max_x, max_y, looks, downsample, convolution,
+            ref.data, sec_data, max_x, max_y, looks, downsample, convolution,
             nan_aware=nan_aware, min_valid_fraction=min_valid_fraction, sigma=sigma,
         )
 
@@ -143,6 +192,9 @@ class InterferogramStack(RasterStackMixin):
         )
         if sigma is not None:
             ds.attrs["sigma"] = float(sigma)
+        if phase_model is not None:
+            ds["phase_model"] = (("y", "x"), model_at(np.asarray(new_x, float), np.asarray(new_y, float)))
+            ds.attrs["phase_model"] = model_desc
         # Which sub-band this is, carried so the dual-frequency ionosphere
         # correction can read both carriers off the stacks instead of being told
         # them. Not in the persist hash: it is provenance, not a parameter, and
@@ -472,6 +524,8 @@ class InterferogramStack(RasterStackMixin):
             full["unconnected_removed"] = self.ds.attrs["unconnected_removed"]
         if self.ds.attrs.get("ionosphere") is not None:
             full["ionosphere"] = self.ds.attrs["ionosphere"]
+        if self.ds.attrs.get("phase_model") is not None:
+            full["phase_model"] = self.ds.attrs["phase_model"]
         reopened = workspace.store(name, ds, full, overwrite=overwrite)
         return InterferogramStack(reopened)
 
