@@ -104,14 +104,21 @@ def cell_lattice(x, y, cell):
 
 
 def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", bounds=None,
-               strip_cells=8):
+               strip_cells=8, subswath_mask=False, near_range_m=11000.0, near_range_side=None):
     """One band's interferogram summed over map cells, from two GSLCs on one grid.
 
     ``reference``/``secondary`` are GSLC paths whose ``frequency`` grids coincide (a pair made
     with ``geocode_rslc(like=)``). ``bounds = (x_min, y_min, x_max, y_max)`` limits the cells.
     Returns an :class:`xarray.Dataset` on cell centres ``(y, x)``: the complex sum ``ifg`` of
     ``ref * conj(sec)``, the powers ``p1``/``p2``, the valid-pixel count ``n``, and the
-    ``coherence``. Pixels that are zero or non-finite in either date do not count.
+    ``coherence``. Pixels that are zero or non-finite in either date do not count, nor (``subswath_mask``)
+    pixels the products' own ``mask`` layer marks partially focused (0) or outside the acquisition (255) in
+    either date. NISAR's band A is partially focused over ~10 km at near range and band B over ~1 km
+    (A004, 2026-10-14): finite there, and the split spectrum turns their phase error into a screen strip.
+    ``subswath_mask="near_range"`` drops the 255s, and the 0s only within ``near_range_m`` of each row's near-range
+    footprint edge: a datatake's partially focused start or end is kept (A004's rupture lies in one; dropping it
+    extrapolated the screen 20-40 km). ``near_range_side`` ("east"/"west") defaults to :func:`near_range_side_of`
+    the reference.
     """
     import h5py
 
@@ -138,8 +145,21 @@ def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", b
     p2 = np.zeros(shape)
     n = np.zeros(shape, np.int64)
     path = GSLC_GRID.format(f=frequency) + "/" + polarization
+    mpath = GSLC_GRID.format(f=frequency) + "/mask"
     with h5py.File(reference, "r") as h1, h5py.File(secondary, "r") as h2:
         R1, R2 = DirectChunkReader(h1[path]), DirectChunkReader(h2[path])
+        masks = []
+        if subswath_mask not in (False, True, "near_range"):
+            raise ValueError(f"gslc_cells: subswath_mask must be False, True or 'near_range', not {subswath_mask!r}")
+        near = subswath_mask == "near_range"
+        if near:
+            near_range_side = near_range_side or near_range_side_of(reference)
+            if near_range_side not in ("east", "west"):
+                raise ValueError(f"gslc_cells: near_range_side must be 'east' or 'west', not {near_range_side!r}")
+        if subswath_mask:
+            masks = [h[mpath] for h in (h1, h2) if mpath in h]
+            if not masks:
+                raise ValueError(f"gslc_cells: subswath_mask={subswath_mask!r} but neither GSLC has {mpath}")
         for a in range(r0, r1, strip_cells):
             b = min(a + strip_cells, r1)
             ys = slice(oy + a * ky, oy + b * ky)
@@ -147,6 +167,17 @@ def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", b
             g1 = np.asarray(R1[ys, xs], np.complex64)
             g2 = np.asarray(R2[ys, xs], np.complex64)
             ok = np.isfinite(g1) & np.isfinite(g2) & (g1 != 0) & (g2 != 0)
+            for M in masks:
+                if near:                                 # on to the grid's near-range end: the edge may lie past bounds
+                    ext = slice(xs.start, x.size) if near_range_side == "east" else slice(0, xs.stop)
+                    mf = np.asarray(M[ys, ext])
+                    cols = slice(xs.start - ext.start, xs.stop - ext.start)
+                    m = mf[:, cols]
+                    strip = _near_range_strip(mf, x[ext], cols, near_range_side, near_range_m)
+                    ok &= (m != 255) & ((m != 0) | ~strip)
+                else:
+                    m = np.asarray(M[ys, xs])
+                    ok &= (m >= 1) & (m < 255)
             g1 = np.where(ok, g1, 0)
             g2 = np.where(ok, g2, 0)
             sh = (b - a, ky, c1 - c0, kx)
@@ -163,7 +194,35 @@ def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", b
         coords={"y": yc[r0:r1], "x": xc[c0:c1]},
         attrs={"frequency": frequency, "center_frequency": f_c, "cell": float(cell),
                "pixels_per_cell": kx * ky, "reference": str(reference),
-               "secondary": str(secondary), "polarization": polarization})
+               "secondary": str(secondary), "polarization": polarization,
+               "subswath_mask": subswath_mask if near else bool(subswath_mask),
+               **({"near_range_m": float(near_range_m), "near_range_side": near_range_side} if near else {})})
+
+
+def near_range_side_of(path):
+    """"east" or "west": the map side of a product's near-range swath edge, from its ``lookDirection`` and
+    ``orbitPassDirection`` (left-looking and ascending: the swath lies west of the ground track, near range east)."""
+    import h5py
+
+    with h5py.File(path, "r") as h:
+        idn = h["science/LSAR/identification"]
+        look, orbit = (idn[k][()] for k in ("lookDirection", "orbitPassDirection"))
+    look, orbit = ((v.decode() if isinstance(v, bytes) else str(v)).strip().lower() for v in (look, orbit))
+    if look not in ("left", "right") or orbit not in ("ascending", "descending"):
+        raise ValueError(f"near_range_side_of: lookDirection {look!r}, orbitPassDirection {orbit!r}")
+    return "east" if (look == "left") == (orbit == "ascending") else "west"
+
+
+def _near_range_strip(mask_rows, x, cols, side, width_m):
+    """``(rows, columns cols)`` of ``mask_rows`` (columns at ``x``, reaching the near-range end of the grid): within
+    ``width_m`` of each row's near-range footprint edge (``mask != 255``)."""
+    fp = mask_rows != 255
+    has = fp.any(axis=1)
+    if side == "east":
+        edge = mask_rows.shape[1] - 1 - np.argmax(fp[:, ::-1], axis=1)
+    else:
+        edge = np.argmax(fp, axis=1)
+    return has[:, None] & (np.abs(x[cols][None, :] - x[edge][:, None]) <= width_m)
 
 
 def merge_cells(*cells):
@@ -294,9 +353,57 @@ def _fill_nearest(a):
     return a[tuple(idx)]
 
 
+def _plane_guide(x, sigma):
+    """``_guide`` with a local plane in place of the Gaussian mean: nanmedian 3 x 3, then `_plane_fill`."""
+    from scipy.ndimage import generic_filter
+
+    med = generic_filter(x, np.nanmedian, size=3, mode="constant", cval=np.nan)
+    return _plane_fill(med, np.isfinite(med).astype(float), sigma)
+
+
+def _plane_fill(data, weight, sigma):
+    """Local-plane estimate of ``data`` at every cell (first-order normalized convolution): at each cell, the plane
+    through the cells with ``weight`` > 0, weighted by ``weight`` x a Gaussian of ``sigma`` cells (cut at 3 sigma).
+    Exact for a linear field, at a one-sided edge and across a gap too, where the zero-order (weighted-mean) guide lags
+    the gradient by ~ the gradient x the distance to its kernel's centroid of valid cells. NaN where the 3 x 3 system
+    is degenerate (no data in reach, or data on a line)."""
+    r = int(np.ceil(3.0 * sigma))
+    t = np.arange(-r, r + 1, dtype=float)
+    g = np.exp(-0.5 * (t / sigma) ** 2)
+    k = {p: g * t ** p for p in (0, 1, 2)}
+
+    def corr(f, p, q):                    # sum_j g(dx) g(dy) dx^p dy^q f_j, dx = x_j - x_i in cells
+        return ndimage.correlate1d(ndimage.correlate1d(f, k[p], axis=1, mode="constant"), k[q], axis=0, mode="constant")
+
+    ok_in = np.isfinite(data) & np.isfinite(weight) & (weight > 0)
+    w = np.where(ok_in, weight, 0.0)
+    wd = w * np.where(ok_in, data, 0.0)
+    m00, m10, m01, m20, m11, m02 = (corr(w, p, q) for p, q in ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2)))
+    r00, r10, r01 = (corr(wd, p, q) for p, q in ((0, 0), (1, 0), (0, 1)))
+    M = np.stack([np.stack([m00, m10, m01], -1), np.stack([m10, m20, m11], -1), np.stack([m01, m11, m02], -1)], -2)
+    det = np.linalg.det(M)
+    ok = (m00 > 1e-6 * m00.max()) & (det > 1e-9 * np.maximum(m00, 1e-300) ** 3 * sigma ** 4)
+    out = np.full(np.shape(data), np.nan)
+    if ok.any():
+        rhs = np.stack([r00, r10, r01], -1)[ok][..., None]
+        out[ok] = np.linalg.solve(M[ok], rhs)[:, 0, 0]
+    return out
+
+
 def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m=None,
-                      truncate=(1.75, 1.49), outlier_threshold=3.5, mad_scale=1.4826):
+                      truncate=(1.75, 1.49), outlier_threshold=3.5, mad_scale=1.4826, fill="guide", fill_m=None,
+                      fill_reach_m=None):
     """``IonosphereFilter.low_pass_filter`` (one iteration) on a map-cell grid.
+
+    ``fill``: how masked cells are filled before the final Gaussian. ``"guide"`` is ISCE3's (the guide, a zero-order
+    weighted mean, nearest beyond its reach); ``"plane"`` a local plane through the cleaned cells (`_plane_fill`, at the
+    guide's sigma; the guide beyond its reach). At a one-sided data edge the guide lags the field's gradient: on
+    D126 (Venezuela, the coast along the trace plus the 2 km exclusion) a noise-free smooth field came out +25.7 mm
+    LOS high at the trace (2026-10-14). ``fill_m``: the plane's sigma in metres (default the guide's). The plane reaches
+    3 sigma, and beyond it the guide's constant takes over: a wider plane follows the gradient across a wide gap (an
+    excluded near-range strip, ~11 km on A004). ``fill_reach_m`` caps how far from the data the plane may extrapolate
+    (beyond it the guide, nearest beyond the guide's reach): near its 3-sigma limit a wide plane is poorly constrained
+    (A004's islands, 20-30 km offshore, came out 4-10 rad off at fill_m 10 km).
 
     ``data``/``sigma``/``mask`` are ``(y, x)`` cells of size ``cell`` m. ``sigma_m`` = Gaussian
     sigma ``(x, y)`` in metres -- ISCE3's 4 x 37 B-grid pixels are ~1.9-2.6 km of ground range
@@ -313,6 +420,7 @@ def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m
     """
     sx, sy = (s / float(cell) for s in sigma_m)
     sg = (max(sigma_m) if guide_m is None else float(guide_m)) / float(cell)
+    sf = sg if fill_m is None else float(fill_m) / float(cell)
     X = np.where(mask, np.asarray(data, float), np.nan)
     S = np.where(mask, np.asarray(sigma, float), np.nan)
     S = np.where(S > 0, S, np.nan)
@@ -320,7 +428,11 @@ def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m
     O = np.where(V, X, np.nan)
     S_O = np.where(V, S, np.nan)
     G = _guide(X, sg)
-    R = X - G
+    if fill == "plane":                 # judge outliers against a plane: the zero-order guide lags a gradient at an
+        G_t = _plane_guide(X, sg)        # edge, and at low noise the lag itself would be flagged
+    else:
+        G_t = G
+    R = X - G_t
     good = V & np.isfinite(R)
     if good.any():
         med = np.median(R[good])
@@ -331,7 +443,15 @@ def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m
                 X = np.where(out, np.nan, X)
                 S = np.where(out, np.nan, S)
                 G = _guide(X, sg)
-    Y = _fill_nearest(G)
+    if fill == "plane":
+        P = _plane_fill(np.where(V, X, np.nan), 1.0 / np.where(np.isfinite(S), S, np.inf) ** 2, sf)
+        if fill_reach_m is not None and V.any():
+            P = np.where(ndimage.distance_transform_edt(~V) * float(cell) > float(fill_reach_m), np.nan, P)
+        Y = _fill_nearest(np.where(np.isfinite(P), P, G))
+    elif fill == "guide":
+        Y = _fill_nearest(G)
+    else:
+        raise ValueError(f"fill must be 'guide' or 'plane', not {fill!r}")
     S_Y = _fill_nearest(S)
     Y = np.where(V, O, Y)
     S_Y = np.where(V, S_O, S_Y)
@@ -379,7 +499,8 @@ def fault_distance(cells, trace_x, trace_y):
 
 def split_spectrum_screen(cells_a, cells_b, phase_a, *, valid=None, exclude=None,
                           min_coherence=0.2, min_pixels_fraction=0.5, sigma_m=(2000.0, 2600.0),
-                          unwrap_sigma=3.0, resolution_a=(6.2, 5.3), resolution_b=(50.0, 5.3)):
+                          unwrap_sigma=3.0, resolution_a=(6.2, 5.3), resolution_b=(50.0, 5.3), fill="guide",
+                          fill_m=None, fill_reach_m=None):
     """The dispersive (ionospheric) phase at ``f_A``, filtered, on the cells.
 
     ``cells_a``/``cells_b`` are :func:`gslc_cells` of the same cells for the main (A) and side
@@ -394,7 +515,9 @@ def split_spectrum_screen(cells_a, cells_b, phase_a, *, valid=None, exclude=None
     Returns an :class:`xarray.Dataset` on the cells: ``screen`` (filtered dispersive phase at
     ``f_A``, rad -- subtract it from the A phase), ``sigma`` (ISCE3's output sigma), the raw
     ``dispersive`` estimate and ``nondispersive`` (= phi_A - dispersive) on the cells used,
-    ``mask``, and ``residual`` (r, wrapped).
+    ``mask``, and ``residual`` (r, wrapped). ``fill`` is :func:`ionosphere_filter`'s (``"plane"`` for an
+    unbiased fill at one-sided edges: a coast along a fault, an excluded fault zone, a swath edge), ``fill_m`` the
+    plane's sigma (m) and ``fill_reach_m`` how far from the data it may extrapolate.
     """
     f_a = float(cells_a.attrs["center_frequency"])
     f_b = float(cells_b.attrs["center_frequency"])
@@ -419,7 +542,8 @@ def split_spectrum_screen(cells_a, cells_b, phase_a, *, valid=None, exclude=None
     looks_a = np.maximum(na * cell * cell / (resolution_a[0] * resolution_a[1]), 1.0)
     looks_b = np.maximum(nb * cell * cell / (resolution_b[0] * resolution_b[1]), 1.0)
     sig = np.hypot(c_a * phase_sigma(ga, looks_a), c_b * phase_sigma(gb, looks_b))
-    screen, sig_out = ionosphere_filter(d, sig, use, cell, sigma_m=sigma_m)
+    screen, sig_out = ionosphere_filter(d, sig, use, cell, sigma_m=sigma_m, fill=fill, fill_m=fill_m,
+                                        fill_reach_m=fill_reach_m)
     dims = ("y", "x")
     return xr.Dataset(
         {"screen": (dims, screen), "sigma": (dims, sig_out),
@@ -429,7 +553,10 @@ def split_spectrum_screen(cells_a, cells_b, phase_a, *, valid=None, exclude=None
          "coherence_a": (dims, ga), "coherence_b": (dims, gb)},
         coords={"y": cells_a.y, "x": cells_a.x},
         attrs={"f_a": f_a, "f_b": f_b, "dispersive_factor": k, "cell": cell,
-               "sigma_m": tuple(sigma_m), "min_coherence": min_coherence,
+               "sigma_m": tuple(sigma_m), "min_coherence": min_coherence, "fill": fill,
+               "fill_m": float(max(sigma_m) if fill_m is None else fill_m),
+               "fill_reach_m": float(3.0 * (max(sigma_m) if fill_m is None else fill_m) if fill_reach_m is None
+                                     else fill_reach_m),
                "method": "main/side band, matched cells, dispersive-only unwrapping "
                          "(ISCE3 main_diff_ms_band estimator, re-ordered)",
                "convention": "screen is the ionospheric phase at f_A in the "
