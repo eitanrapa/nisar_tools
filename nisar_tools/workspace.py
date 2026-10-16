@@ -36,13 +36,39 @@ def _atomic_write_text(path, text):
 
 # zarr v2 format is required for complex64 (the v3 spec has no complex dtype).
 _ZARR_KWARGS = {}
+_ZARR_MAJOR = None
 try:  # zarr-python 3.x accepts zarr_format; 2.x does not need it.
     import zarr
 
-    if int(zarr.__version__.split(".")[0]) >= 3:
+    _ZARR_MAJOR = int(zarr.__version__.split(".")[0])
+    if _ZARR_MAJOR >= 3:
         _ZARR_KWARGS = {"zarr_format": 2}
 except Exception:  # pragma: no cover - zarr always present in practice
     pass
+
+
+def _missing_chunks(path):
+    """``{array: (missing, expected)}`` for the arrays of a store whose chunk files are absent.
+
+    zarr-python 2 writes every chunk, empty ones included, so an absent chunk is a write that never
+    got there -- and reads back as the fill value, or as junk where there is none (a complex64
+    ``igram`` read as 1.4e-45+0j, A004 2026-10-14). zarr-python 3 skips chunks equal to the fill
+    value, so there an absent chunk proves nothing and this returns ``{}``.
+    """
+    if _ZARR_MAJOR is None or _ZARR_MAJOR >= 3:
+        return {}
+    path = Path(path)
+    out = {}
+    for meta in path.rglob(".zarray"):
+        za = json.loads(meta.read_text())
+        expected = 1
+        for size, chunk in zip(za.get("shape") or [], za.get("chunks") or []):
+            expected *= -(-size // chunk)
+        files = meta.parent.rglob("*") if za.get("dimension_separator") == "/" else meta.parent.iterdir()
+        have = sum(1 for p in files if p.is_file() and not p.name.startswith("."))
+        if have < expected:
+            out[str(meta.parent.relative_to(path))] = (expected - have, expected)
+    return out
 
 
 def _default_compressor():
@@ -285,10 +311,12 @@ class Workspace:
             ds.close()
 
     def has(self, name, params):
-        """True if stage ``name`` exists and was built with ``params``."""
+        """True if stage ``name`` exists, was built with ``params`` and is complete."""
         if not self.exists(name):
             return False
-        return self.stored_params_hash(name) == hash_params(params)
+        if self.stored_params_hash(name) != hash_params(params):
+            return False
+        return not _missing_chunks(self.path(name))
 
     # -- whole-dataset store / load ---------------------------------------
     def store(self, name, ds, params, overwrite=False):
@@ -300,13 +328,21 @@ class Workspace:
         """
         target = self.path(name)
         if target.exists():
-            if not overwrite and self.stored_params_hash(name) == hash_params(params):
+            same = self.stored_params_hash(name) == hash_params(params)
+            missing = _missing_chunks(target) if same and not overwrite else {}
+            if same and not overwrite and not missing:
                 return self.load(name)
-            if not overwrite:
+            if not same and not overwrite:
                 raise WorkspaceError(
                     f"Stage '{name}' already exists with different parameters. "
                     f"Pass overwrite=True or use a fresh workspace."
                 )
+            if missing:
+                import warnings
+
+                gaps = "; ".join(f"{a}: {m} of {e} chunks" for a, (m, e) in missing.items())
+                warnings.warn(f"Stage '{name}' is incomplete, an interrupted write ({gaps} missing): "
+                              f"recomputing it.", stacklevel=2)
             _check_not_reading_target(ds, target, name)
             shutil.rmtree(target)
 
@@ -314,11 +350,18 @@ class Workspace:
         ds.attrs["params"] = json.dumps(params, default=_json_default)
         ds.attrs["params_hash"] = hash_params(params)
         encoding = _encoding_for(ds)
+        # Written beside the target and renamed into place once complete: to_zarr writes the
+        # metadata -- params_hash included -- before the chunks, so a write killed midway used to
+        # leave a store the next run took as finished. A leftover .partial is an abandoned write.
+        partial = target.with_name(target.name + ".partial")
+        if partial.exists():
+            shutil.rmtree(partial)
         ds.to_zarr(
-            target, mode="w", consolidated=True,
+            partial, mode="w", consolidated=True,
             **({} if encoding is None else {"encoding": encoding}),
             **_ZARR_KWARGS,
         )
+        os.replace(partial, target)
         return self.load(name)
 
     def load(self, name):
