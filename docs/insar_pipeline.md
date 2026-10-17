@@ -104,7 +104,9 @@ troposphere) and φ_io the ionosphere at f_A. What differs is how the bands are 
 - **The residual.** Band B is never unwrapped. It enters through
   `r = wrap(φ_B − (f_B/f_A) φ_A) = wrap(k φ_io − 0.044 · 2π n_A)`, with k = f_A/f_B − f_B/f_A = −0.0861.
   The non-dispersive term, deformation included, cancels exactly, so r is small and smooth. It is unwrapped
-  (`unwrap_smooth_phase`) and the screen is `d = r / k`.
+  (`unwrap_smooth_phase`) and the screen is `d = r / k`. The unwrapping low-passes exp(i r), fills gaps with wider
+  Gaussians, and runs SNAPHU twice: over the whole grid, and over the data's reach alone (~2 km past the cells). Each
+  connected piece of the reach takes the whole-grid solution's integer. The second run was added on 2026-10-17 (D040, below).
 - **Which cells.** Coherence above 0.2 in both bands, at least half the pixels valid, and not within 2 km of the trace.
 - **The filter.** ISCE3's `IonosphereFilter.low_pass_filter`, ported in metres: Gaussian σ = 2.0 × 2.6 km, a guide,
   outliers beyond 3.5 MAD, inverse-variance weights. **One change** (v6): masked cells are filled with a local plane
@@ -123,6 +125,13 @@ What this buys, and what it still depends on:
 - **It does depend on φ_A's integers**: a cycle of φ_A on a region moves the screen there by 0.511 × 2π = 3.21 rad
   (62 mm LOS). Confirmed 2026-10-14: where SNAPHU defo and smooth chose different integers, the raw screen moved by
   exactly 3.21 rad per cycle.
+- **And on r's integers**: one cycle of r is 2π/|k| = 73 rad of screen (1.4 m LOS). r is smooth, but a large gap's
+  fill averages data whose r differs by up to π and can leave a phase singularity in the gap. Over the whole grid,
+  SNAPHU must cut from it to the grid's edge and takes the shortest route. On D040 (2026-10-17) a singularity in Parita
+  Bay, 28 km from the nearest cell, cut across the 20 km neck joining the Azuero peninsula to the mainland: Azuero's
+  north block came out 1.3 m off the mainland in LOS. Unwrapping over the data's reach removes this within any
+  connected piece of data. Pieces further apart than the reach are still tied through the fill. D141, A004 and the
+  four Venezuela v6 screens had no singularity and are unchanged.
 
 **The GUNW's split spectrum** (ISCE3 `main_diff_ms_band`, `d = 0.511 φ_A + 11.61 (φ_A − φ_B)`):
 

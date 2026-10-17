@@ -39,6 +39,8 @@ Here, instead:
 The phase convention is the package's interferogram, ``reference * conj(secondary)``.
 """
 
+import warnings
+
 import numpy as np
 import xarray as xr
 from scipy import ndimage
@@ -291,20 +293,14 @@ def _nan_gauss(values, valid, sigma):
     return num, den
 
 
-def unwrap_smooth_phase(r, valid, sigma=3.0, coherence=None):
-    """Unwrap a wrapped field that is smooth at the scale ``sigma`` (cells), through gaps.
-
-    The complex field ``exp(i r)`` is low-passed (NaN-aware Gaussian; gaps filled by wider
-    ones), the low-passed phase is unwrapped by SNAPHU (it holds no residues worth the name),
-    and ``wrap(r - lowpass)`` is added back. Returns the unwrapped field (NaN where not
-    ``valid``) and the low-passed unwrapped phase everywhere.
-    """
-    import snaphu
-
-    valid = valid & np.isfinite(r)
+def _lowpass_filled(r, valid, sigma):
+    """The phase of ``exp(i r)`` low-passed (NaN-aware Gaussian of ``sigma`` cells, gaps filled by
+    ones twice as wide, and so on), and the first Gaussian's reach (``den >= 1e-3``: ~2 km past a
+    data edge at 240 m cells and sigma 3)."""
     z = np.where(valid, np.exp(1j * np.where(valid, r, 0.0)), 0.0)
     re, den = _nan_gauss(z.real, valid, sigma)
     im, _ = _nan_gauss(z.imag, valid, sigma)
+    reach = den >= 1e-3
     s = sigma
     while (den < 1e-3).any() and s < 4 * max(r.shape):
         s *= 2.0
@@ -312,10 +308,63 @@ def unwrap_smooth_phase(r, valid, sigma=3.0, coherence=None):
         im2, _ = _nan_gauss(z.imag, valid, s)
         gap = den < 1e-3
         re, im, den = np.where(gap, re2, re), np.where(gap, im2, im), np.where(gap, den2, den)
-    smooth = np.exp(1j * np.angle(re + 1j * im)).astype(np.complex64)
-    corr = np.full(r.shape, 0.95, np.float32)
-    unw, _ = snaphu.unwrap(smooth, corr, nlooks=50.0, cost="smooth", init="mcf")
-    unw = np.asarray(unw, float)
+    return np.angle(re + 1j * im), reach
+
+
+def _unwrap_guide(phase, reach, valid):
+    """SNAPHU on the low-passed ``phase``: over the whole grid, then over ``reach`` alone, each piece
+    of the reach holding ``valid`` cells shifted onto the whole-grid solution by its most common
+    whole-cycle difference there. Outside the reach, the whole-grid solution."""
+    import snaphu
+
+    smooth = np.exp(1j * phase).astype(np.complex64)
+    corr = np.full(phase.shape, 0.95, np.float32)
+    unw = np.asarray(snaphu.unwrap(smooth, corr, nlooks=50.0, cost="smooth", init="mcf")[0], float)
+    if reach.all():
+        return unw
+    local = np.asarray(snaphu.unwrap(smooth, corr, nlooks=50.0, cost="smooth", init="mcf", mask=reach)[0], float)
+    lab, n = ndimage.label(reach)
+    out = unw.copy()
+    moved = 0
+    for p in range(1, n + 1):
+        on = lab == p
+        sel = on & valid
+        if not sel.any():
+            continue
+        cyc = np.round((unw[sel] - local[sel]) / (2.0 * np.pi)).astype(int)
+        mode = int(np.bincount(cyc - cyc.min()).argmax() + cyc.min())
+        out[on] = local[on] + 2.0 * np.pi * mode
+        moved += int((cyc != mode).sum())
+    if moved:
+        warnings.warn(f"unwrap_smooth_phase: the whole-grid unwrapping cut across the data at {moved} of "
+                      f"{int(valid.sum())} cells (a phase singularity in a gap's fill): they take the unwrapping "
+                      "over the data's reach", RuntimeWarning, stacklevel=3)
+    return out
+
+
+def unwrap_smooth_phase(r, valid, sigma=3.0, coherence=None):
+    """Unwrap a wrapped field that is smooth at the scale ``sigma`` (cells), through gaps.
+
+    The complex field ``exp(i r)`` is low-passed (NaN-aware Gaussian; gaps filled by wider
+    ones), the low-passed phase is unwrapped by SNAPHU, and ``wrap(r - lowpass)`` is added back.
+    Returns the unwrapped field (NaN where not ``valid``) and the low-passed unwrapped phase
+    everywhere.
+
+    SNAPHU runs twice (2026-10-17). The wide Gaussians that fill a large gap (a bay, the sea past a
+    swath edge) average data whose phases differ by up to pi, and can leave a phase singularity
+    there, tens of km from any cell. Unwrapped over the whole grid, SNAPHU must cut from it to the
+    grid's edge, and it takes the shortest route, which may cross the data. On D040 (Panama) a
+    singularity in Parita Bay, 28 km from the nearest cell, put one cycle of ``r`` (73 rad of screen,
+    1.4 m of LOS) across the 20 km neck joining the Azuero peninsula to the mainland. So the
+    low-passed phase is also unwrapped over the first Gaussian's reach alone, which holds no such
+    singularity, and each piece of the reach takes the whole-grid solution's integer: pieces further
+    apart than the reach are still tied through the fill, as before, but within a piece the fill
+    cannot cut. Without a singularity the two runs agree, so the result is unchanged (checked on
+    D141, A004 and the four Venezuela tracks' v6 screens: identical).
+    """
+    valid = valid & np.isfinite(r)
+    lp, reach = _lowpass_filled(r, valid, sigma)
+    unw = _unwrap_guide(lp, reach, valid)
     out = np.where(valid, unw + wrap(r - unw), np.nan)
     return out, unw
 

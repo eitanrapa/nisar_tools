@@ -234,3 +234,32 @@ def test_a_wider_plane_fill_crosses_a_wide_edge_gap():
     s_cap, _ = ss.ionosphere_filter(data, sig, mask, cell, fill="plane", fill_m=6000.0, fill_reach_m=2400.0)
     assert np.median(np.abs((s_cap - truth)[far])) > 0.5
     assert np.allclose(s_cap[inner], s_plane[inner], atol=1e-9)
+
+
+def test_a_singularity_in_a_gap_fill_does_not_cut_across_the_data():
+    """D040 (Panama, 2026-10-17): the wide Gaussians filling Parita Bay left a phase singularity 28 km from any cell, and
+    SNAPHU over the whole grid cut from it to the nearest grid edge -- across the 20 km neck joining Azuero to the
+    mainland -- putting one cycle of r (73 rad of screen) between them. Planted here: land north and south of a bay,
+    joined by a neck on the west, and a singularity in the bay nearer the west edge than any other."""
+    import snaphu
+
+    ny, nx = 200, 220
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    north, south = (yy < 85) & (xx >= 20), (yy >= 115) & (xx >= 20)
+    neck = (yy >= 85) & (yy < 115) & (xx >= 20) & (xx < 32)
+    valid = north | south | neck
+    theta = np.arctan2(yy - 100.0, xx - 52.0)            # its branch cut runs west, through the neck
+    truth = 0.02 * yy + np.mod(theta, 2 * np.pi)          # continuous on the land: the cut is east, in the bay
+    phase = ss.wrap(truth)
+    _, reach = ss._lowpass_filled(phase, valid, 3.0)
+    assert not reach[100, 52] and reach[100, 25]           # the singularity lies beyond the data's reach
+    # the old way, SNAPHU over the whole grid, puts a cycle between north and south (the scene reproduces the failure)
+    old = np.asarray(snaphu.unwrap(np.exp(1j * phase).astype(np.complex64), np.full(phase.shape, 0.95, np.float32),
+                                   nlooks=50.0, cost="smooth", init="mcf")[0], float)
+    jump = np.median((old - truth)[north]) - np.median((old - truth)[south])
+    assert abs(abs(jump) - 2 * np.pi) < 1e-3
+    with pytest.warns(RuntimeWarning, match="cut across the data"):
+        new = ss._unwrap_guide(phase, reach, valid)
+    n = (new - truth)[valid] / (2 * np.pi)
+    assert np.ptp(np.round(n)) == 0                       # one integer over the whole land
+    assert np.max(np.abs(n - np.round(n))) < 1e-4
