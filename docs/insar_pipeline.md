@@ -85,6 +85,44 @@ What we do differently from the PR GUNW, and why:
   extrapolated to the trace, and the nearest integer is applied.
 - **This tie is uncertain by about ±1 cycle** (see Limitations), so in the slip inversion each region keeps its own
   offset whatever the tie.
+- **The side band ties the block itself** (`split_spectrum.block_cycles`, 2026-10-21).
+  - A block whose integer is off by e cycles moves its raw dispersive estimate by 3.21 e rad, and the ionosphere is
+    continuous across the gap. So the raw estimate's step across the gap reads e.
+  - Estimator: a quadratic over both blocks plus a step, in 20 km windows along the trace; the median over windows.
+  - On fake boundaries in 8 scenes, no tie read a wrong integer.
+  - It finds the offset ties of D141, D040 and A076 (v8) one cycle short: they should be 27, 21 and −22, not 26, 20
+    and −23.
+  - Details and caveats: `docs/ionosphere_paper/` (section 6, README).
+- **v9 (2026-10-21; D141, D040, A076; v8 untouched).** v8's cut unwrapping with the side band's ties, then the screen from
+  per-pixel cells (`panama_pipeline.py` stages unwrap9m, patch9, iono9, los9, compare9).
+  - The south blocks take +1 cycle (27, 21, −22). Read again on the v9 screens: D141 +0.23 (kriging −0.12), A076
+    +0.06 (+0.27), D040 +0.01 / +0.62 / +1.48 in its three windows west to east (kriging −0.48).
+    - D040's east window is not the tie but two patches north of the trace that its side band flags, beside the branch cuts.
+      With them left out, D040 reads +0.10 (kriging −0.07): 21 stands.
+    - x 541–545 km (11 km², 3–7 km north of the main): band A is wrong in BOTH tracks, the opposite ways.
+      - D040: side band −3.1 cycles, own range offsets −3.7, graded −1..−6 across the patch.
+      - A076: +1.4 / +1.7, graded 0..+4.
+      - Both tracks' offsets have the ground moving ~0.75 m east and ~0.73 m down against its surroundings: −1.0 m of D040's
+        LOS, and nearly nothing of A076's.
+      - No single integer corrects it; mask it in both.
+    - x 555–565 km: A076's phase is right there (side band 0.0, offsets 0.0) and sees −0.76 m of real LOS. D040's is
+      mostly right (72% of pixels exact, ~20% a cycle high). This is a real feature, not an unwrapping error.
+    - Every SNAPHU variant makes the same choice in both: ROFF-flattened, ROFF + 2 × screen-flattened, and a box without the
+      dead-end branch cuts (unwrap9m, unwrap9m2, unwrap9nb). Both are still in v9.
+  - Patch by patch, where another unwrapping of the pair disagrees by whole cycles, the side band reads which one is
+    right (`split_spectrum.cycle_patches` / `patch_cycles` / `patch_verdict`).
+    - Alternatives: v8's cut interferogram flattened by the registration ROFF before SNAPHU, and, on D141 only, the uncut
+      v5 / v5defo.
+    - One switch: D141, 26 km² centred 3 km north of the trace, a cycle high in v8 (read −0.81 ± 0.08 on 129 cells
+      against v5, confirmed against the flattened one). After it, D141's tie fraction fell from 0.19 to 0.03.
+    - On D040 the flattened alternative was wrong over 1,269 km² and the side band kept v8 there; its model fits
+      D040's unwrapping poorly (slope 0.1, the ionosphere dominating).
+    - Undecided: 115–146 km² per track, almost all within 2 km of the trace, where the cells are decorrelated or the
+      per-cell raw estimate is unusable. These cells are listed in `cycle_patches_v9.{csv,npz}`.
+  - v9 − v8 LOS (positive toward the satellite), beyond each block's constant (south −58 to −60 mm):
+    - north of the trace: +37–40 mm at 0–1 km, +23–32 mm at 2–4 km, +6–10 mm at 6–10 km;
+    - south of it: −17 to −18 mm at 0–1 km.
+    - On D141 the repaired patch's pixels moved by a whole cycle (121 mm): 7–14% of the north side within 6 km.
 - Venezuela's airport blocks are not tied: they had their own offset, and model 4d drops them.
 - **The GUNW** has no cut, so nothing to tie; its unwrapper chooses the integer across the rupture.
 
@@ -99,6 +137,11 @@ troposphere) and φ_io the ionosphere at f_A. What differs is how the bands are 
   **only in band A's near-range strip** (within 11 km of the near-range edge; 12 km on D141, measured from the masks:
   the strip is ≤ 10.1 km, ≤ 11.05 km on D141). The partially focused start of a datatake is kept: A004's rupture lies in
   one, and dropping it extrapolated the screen 20–40 km.
+  `gslc_cells(phase_model=)` (2026-10-21, not used by the pipelines) can also take our unwrapped band A out of every
+  pixel of both bands before the sums, each scaled to its frequency, so steep fringes inside a cell neither decorrelate
+  it nor weight the bands' cell phases differently. North of D141's trace it doubles the cells kept within 5 km
+  (5 → 20% at 0.5–1 km, 18 → 35% at 2–5 km). The multilook and Goldstein filter of the unwrapped band A reach the screen
+  only through its integers, in either form: the cells' values are the GSLC pixels.
 - **Band A from our unwrapping.** φ_A is our unwrapped band-A phase averaged onto the cells, from the main region (and a
   tied block) only: an island's arbitrary integer would shift its screen by 3.2 rad per cycle.
 - **The residual.** Band B is never unwrapped. It enters through
@@ -113,7 +156,12 @@ troposphere) and φ_io the ionosphere at f_A. What differs is how the bands are 
   (σ 10 km, at most 12 km from the data) instead of ISCE3's zero-order guide. The guide lags a gradient at a one-sided
   edge, such as a coast along the fault plus the 2 km exclusion (+25.7 mm LOS at D126's trace on a noise-free test).
   The plane width was chosen by withholding an 11 km band of A004's own data: 90th-percentile error 33 mm with the guide's
-  2.6 km plane, 7.4 mm at 10 km.
+  2.6 km plane, 7.4 mm at 10 km. Two options since 2026-10-21, neither used by the pipelines: a ladder of fill widths
+  (`fill_m=(2600, 5000, 10000)`: each filled cell takes the narrowest plane whose data lie around it) and a first-order
+  final step (`order=1`: a weighted local plane instead of ISCE3's weighted mean, which lags the ionosphere's gradient
+  where its weights change, as across a damage zone). On 34 fake gaps cut out of eight production screens the fills
+  differ by about a millimetre in 1–2 km zones (the ladder best, the 10 km plane 0.6–1.1 mm worse), and the first-order
+  step by ≤ 0.4 mm. Next to D141's rupture the narrower fills follow the main band's local cycle errors (below).
 - **Applied.** The screen is interpolated to the 50 m grid and subtracted from φ_A.
 
 What this buys, and what it still depends on:
@@ -183,14 +231,27 @@ The result is a sign-flipped copy of the deformation near ruptures. Within 10 km
 ## Limitations and open items
 
 - **Tie ambiguity.** The offset tie measures `π n + φ_io`, and so does the split-spectrum screen (adding twice the
-  screen to the tie leaves only 0.022 cycles per cycle of n), so neither can separate the integer from the ionosphere.
-  Only the assumption of a continuous ionosphere across the gap fixes it.
+  screen to the tie leaves only 0.022 cycles per cycle of n), so their combination cannot separate the integer from
+  the ionosphere. The screen's own continuity across the gap does: `split_spectrum.block_cycles` (2026-10-21) reads the
+  integer to about a tenth of a cycle, and finds three Panama offset ties a cycle short. Earlier numbers:
   - D141: 32.65 → k = 33, but 32.41–32.90 along strike (±1).
   - A004: −18.43, with −19.45..−17.41 along strike (a two-cycle spread).
   - Per wrong cycle: the block's corrected LOS is off by a constant 59 mm far from the trace, which its own offset
     absorbs. The screen filter also spreads the 3.21 rad step across the trace: on D141 that leaves a fake near-trace
-    step of about 5 cm (−40 mm at 0.25 km north, +14 mm just south, gone within 5–7 km).
+    step of about 5 cm (in phase-equivalent mm, −40 at 0.25 km north and +14 just south, gone within 5–7 km; the LOS,
+    positive toward the satellite, has the opposite signs).
     `D141_panama/scripts/tie_cycle_screen.py`.
+- **Near-trace integers.** Next to D141's rupture the cut (v3) and uncut (v5) band-A unwrappings disagree on 78 / 62 /
+  42 / 18% of the cells at 0–1 / 1–2 / 2–4 / 4–6 km north of the trace (≤ 3% beyond), each cycle 3.21 rad of raw
+  estimate. The production screen moves ≤ 2.4 mm when those cells take v5's integers (its 10 km fill averages them
+  away); narrower fills move 7–16 mm. So near a trace the screen is limited by band A's local integers, and the wide fill
+  plus the 2 km exclusion are the robust choice until they can be checked. Paper Section 7,
+  `docs/ionosphere_paper/experiments/run_d141_integers.py`. v9 (§5) checks them patch by patch where an alternative
+  unwrapping disagrees. It repaired one 26 km² patch on D141, but within ~2 km of the trace most disagreements stay
+  undecided.
+  - ⚠️ A north-side excess of cells +0.5 cycle above the screen in all three v8 screens was mostly an artefact of
+    summing steep fringes per cell. With per-pixel cells it drops from +26–34 to +6–8 points at 2–4 km. Only on D141 was
+    it shown to be cycles.
 - **Partially focused data.** A004's rupture area lies in the partially focused start of the datatake in both dates.
   It is kept, and no GUNW can check it there: the GUNW has no valid sample within 21 km of the trace.
 - **Coastal spots.** A004's screen has spots 1–3 km inland around an inlet (raw estimate 0.9–2.5 cycles off its

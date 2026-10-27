@@ -241,8 +241,10 @@ def compute_timing_corrections(radar_grid, orbit, center_frequency, dem=None,
     set_rg = None
     if solid_earth_tides:
         tt, rr = np.meshgrid(out.az_vec, out.rg_vec, indexing="ij")
+        # the box in the DEM's own CRS: a projected DEM (the polar EPSG:3031/3413 ones) would otherwise be read at
+        # the lon/lat numbers taken as metres (2026-10-26, Antarctica t094 f129)
         dem_fn = None if dem is None else dem.coarse_sampler(
-            radar.geo_bounding_box(scaled, orbit, 4326, margin=0.1))
+            radar.geo_bounding_box(scaled, orbit, dem.epsg, margin=0.1))
         llh, _ = radar.rdr2geo(tt.ravel(), rr.ravel(), orbit, height=0.0,
                                wavelength=scaled.wavelength, look_side=scaled.look_side,
                                threshold=1e-7, maxiter=25, extraiter=10, dem=dem_fn)
