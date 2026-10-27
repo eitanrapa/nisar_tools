@@ -1,0 +1,47 @@
+\section{Conclusions}
+\label{sec:conclusions}
+\begin{enumerate}
+  \item The split-spectrum screens of NISAR's PR GUNWs copy the coseismic deformation near the 2026 Panama and
+        Venezuela ruptures with the opposite sign. Within 10\,km of the trace, the screen's high-pass regresses on
+        the data's at $-0.02$ to $-0.12$ ($r$ down to $-0.82$). On Panama's D141 pair the screen also steps 0.43\,m
+        across the trace.
+  \item On identical cells, with an identical filter and main-band unwrapping, two mechanisms account for most of it.
+        \begin{itemize}
+          \item The whole-cycle corrections read the deformation's curvature as unwrapping errors, and copy
+                4.5--4.8\% of the high-passed deformation at any slip.
+          \item Unwrapping a field that carries deformation (the side band, or the double difference) fails across a
+                rupture that splits the scene: by one cycle of the double difference (1.4\,m of LOS) on D141.
+        \end{itemize}
+        On D141 the product's own main band, 25--32 cycles off across the rupture, carries most of its copy. On the
+        Venezuela tracks, the corrections on matched cells reproduce 25--52\% of the products' leak beyond ours, and
+        neither the main band nor the bands' footprint mismatch explains the rest.
+  \item Removing the scaled, unwrapped main band from the wrapped side band before anything is unwrapped gives the
+        same estimate as the reformulated split spectrum and the GUNW's, with nothing in the unwrapped field for an
+        unwrapper or a correction to mistake. On every synthetic its error near the rupture stays at its zero-slip
+        level. It needs the main band unwrapped correctly, as the deformation does, and a cut-off block's tie carries
+        into the screen at 3.21\,rad per cycle.
+  \item The same 3.21\,rad per cycle ties a block that a cut along the rupture isolates. The raw estimate's step across
+        the gap reads the block's integer wherever the ionosphere is smooth over 10--20\,km: the median over 20\,km
+        windows read no wrong integer on 565 fake boundaries in eight scenes, and 0.02 across a Venezuela rupture whose
+        integer is known. On three Panama pairs it finds the pipelines' range-offset ties a cycle short. Read with the same
+        estimator, the offsets agree with it: the pipelines' far-field planes were at fault, not the offsets. Ionospheric waves, and
+        local cycle errors in a third of the cells beside the gap, bias it by a few tenths of a cycle; two estimators
+        that fail differently, a polynomial and kriging, check each other.
+  \item What remains near the fault on the synthetics, the same with and without the rupture, is the cells' handling of
+        steep fringes, the fill's width and the lag of ISCE3's weighted mean across the damage zone. Taking the main
+        band out of every pixel, matching the fill to the gap and making the filter's final step a weighted local
+        plane bring it from 16 to 2\,mm within 2\,km of the trace. On real data these are millimetre corrections.
+        Next to the D141 rupture the screen is limited by the main band's local integers, which the narrower recipes
+        follow and the production screen's wide fill averages away.
+  \item On two Antarctic pairs the operational screen is ours plus whole cycles:
+        \begin{itemize}
+          \item the main band's split between its components, 9 and 8 cycles;
+          \item one cycle of the double difference over 12\,000\,km$^2$ beside a glacier's shear margins;
+          \item about two main-band cycles from the correction passes over a fast trunk.
+        \end{itemize}
+        Where the screens differ beyond those integers, the range offsets side with ours. They also tie the components as
+        the side band does across a 160\,rad step, where velocity maps read one to two cycles low.
+  \item For the operational processor the change is one line: multiply the double difference by
+        $\exp(i\,\Delta f\,\phiA/\fA)$ before unwrapping, and divide it out after. The rupture still needs a cut, and
+        the side band then ties the blocks.
+\end{enumerate}

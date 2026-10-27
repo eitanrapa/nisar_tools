@@ -1,0 +1,50 @@
+\section{The estimator}
+\label{sec:estimator}
+
+The reordered estimate \eqref{eq:ours} is implemented in \texttt{nisar\_tools}, module \texttt{split\_spectrum}.
+Everything around it is also there because a rupture needs it.
+
+\paragraph{Identical cells.} Both bands' interferograms are summed over the same map cells (240\,m) directly from
+the two dates' geocoded SLCs (GSLCs), with the second date geocoded onto the first's grids
+(Appendix~\ref{app:registration}). A cell's complex sum, powers and valid-pixel count give its phase $\psi_X$ and
+coherence $\gamma_X$. Summing both bands over identical cells removes the decimation offset and the footprint mismatch
+of Section~\ref{sec:colocation}. Given the caller's unwrapped main band, \texttt{gslc\_cells} can also take it out of
+every pixel of both bands before the sums (Section~\ref{sec:pixel}); the screens of Sections~\ref{sec:synthetic}--
+\ref{sec:sbtie} sum the bands as they are.
+
+\paragraph{Partially focused pixels.} NISAR's main band is partially focused over the last $\sim$10\,km at near
+range, where its GSLC mask is 0 while the data stay finite. A small band-A phase error there is amplified
+$|a|\approx 12$ times. On the A004 Panama pair it made a 7--10\,cm LOS strip in the screen. Pixels the mask marks
+partially focused are dropped from the cells within 11--12\,km of the near-range edge. Elsewhere they are kept: a
+datatake's partially focused start is wide, and on A004 it holds the rupture.
+
+\paragraph{The main band.} $\phiA$ is the caller's own unwrapping, averaged onto the cells, and the cells' $\psiA$ is
+re-wrapped onto it. Only the main region and any cut-off block tied to it are used, because an untied island's
+arbitrary integer would move its estimate by 3.21\,rad per cycle (Table~\ref{tab:integers}). For the ruptures here,
+the 50\,m main band is unwrapped with a cut along the mapped trace, so that the unwrapper never crosses the rupture.
+A block the cut isolates is tied by the range offsets, and the tie checked by the side band (Section~\ref{sec:sbtie}).
+
+\paragraph{The fault zone.} Cells within 2\,km of the trace are excluded and filled by the filter from both sides.
+$r$ has no deformation, but the two bands resolve a steep cell differently: the side band's range resolution is
+50\,m against the main band's 6\,m, so within-cell fringe decorrelation weights the cell's phases differently in
+the two bands. Section~\ref{sec:nearfield} measures what the exclusion costs and what it guards against.
+
+\paragraph{Unwrapping $r$.} $\exp(ir)$ is low-passed (a NaN-aware Gaussian of 3 cells), gaps are filled with
+Gaussians twice as wide, and so on, and SNAPHU unwraps the low-passed phase twice: over the whole grid, and over the
+data's reach alone ($\sim$2\,km past the cells). Each connected piece of the reach takes the whole-grid solution's
+integer. The second run guards against a phase singularity in a large gap's fill, which on one Panama pair
+(D040, a bay 28\,km from the nearest cell) made SNAPHU cut across a 20\,km neck of land: one cycle of $r$, or 1.4\,m
+of LOS. $\W(r - \text{low-pass})$ is added back.
+
+\paragraph{The filter.} The raw estimate $\U(r)/k$ is filtered as ISCE3 filters its own
+(\texttt{IonosphereFilter.\allowbreak low\_pass\_filter}), ported to metres: inverse-variance weights from each band's
+Cram\'er--Rao phase variance, a $3\times3$ median and Gaussian guide, outliers beyond 3.5 scaled MADs removed from the
+guide, masked cells filled, and a truncated Gaussian of $\sigma = 2.0\times2.6$\,km. One change: masked cells are
+filled with a local plane (first-order normalized convolution, $\sigma$ 10\,km, at most 12\,km from data) instead of
+ISCE3's zero-order guide. At a one-sided edge, such as a coastline along the fault plus the 2\,km exclusion, the guide
+lags the field's gradient. On a noise-free truth on the cells of Venezuela's D126 it made the screen 25.7\,mm of LOS
+too high at the trace; the plane keeps the error within $\pm$1.1\,mm. Section~\ref{sec:nearfield} tests narrower
+fills matched to each gap, and a final step that is a weighted local plane instead of a weighted mean.
+
+\paragraph{No cycle corrections.} No cycle is moved against a smoothed field. $r$ holds no deformation, and the
+main band's integers are the caller's.

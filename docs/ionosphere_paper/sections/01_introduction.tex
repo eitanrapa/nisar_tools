@@ -1,0 +1,61 @@
+\section{Introduction}
+\label{sec:intro}
+
+L-band interferograms are the ones that stay coherent across large earthquakes in vegetated terrain. They are also the
+ones the ionosphere distorts most: the dispersive phase scales as $1/f$, and at 1.2\,GHz a modest change in total
+electron content makes metre-scale phase ramps and tens of centimetres of curvature across a scene
+\citep{meyer2006potential,meyer2011performance}. The split-spectrum method separates the two by their frequency
+dependence. The phase of two sub-bands, or of two separate bands, is combined so that the non-dispersive part
+(deformation, topography, troposphere) cancels and the dispersive part remains
+\citep{rosen2010measurement,brcic2010estimation,gomba2016toward}. It has become the operational correction for
+ALOS-2 \citep{liang2018insar,furuya2017midlatitude,nagaoka2025improved}, Sentinel-1 \citep{gomba2017tops,
+liang2019ionospheric}, time series \citep{fattahi2017insar,mao2023reformulating,piromthong2026ionospheric} and ice
+\citep{liao2018ionospheric}; \citet{mao2025review} review it. NISAR, launched in July 2025, was designed for it.
+Its L-band radar transmits a 20, 40 or 77\,MHz main band and a separate 5\,MHz side band 50--70\,MHz above it
+\citep{nisar2018handbook}, and the Geocoded Unwrapped Interferogram (GUNW) product carries a split-spectrum
+ionospheric phase screen as a layer, to be subtracted by the user \citep{isce3}.
+
+Near a surface rupture the method meets conditions it was not built for. The deformation is steep, discontinuous at
+the trace, and often decorrelated over kilometres beside it; large ruptures run to a coast or to the edge of a swath,
+cutting the scene into blocks that the unwrapper cannot connect. In principle none of this matters, because the
+dispersive combination contains no deformation. In practice, every implementation unwraps something that does:
+the two bands separately, or their difference, and then corrects ``unwrapping errors'' against smoothed estimates
+\citep{gomba2016toward,fattahi2017insar,isce3}. \citet[Sec.~III-C]{gomba2016toward} already note that their
+common-error correction is not robust, because inaccurate estimates are misread as unwrapping errors. At a rupture,
+the deformation is exactly such an inaccuracy.
+
+We found the consequence in the NISAR PR GUNWs of two 2026 strike-slip earthquakes: the 24 June events on the San
+Sebastián fault in north-central Venezuela, and the 9 October $M_w$\,7.7 earthquake on the Azuero--Son\'a fault zone
+in western Panama. Within 10\,km of the ruptures, the GUNW ionospheric screens contain a scaled, sign-flipped copy
+of their own track's coseismic deformation. On the four Venezuela tracks the high-passed screen regresses on the high-passed data at $-0.02$ to $-0.12$
+($r$ from $-0.19$ to $-0.82$). On the Panama pair it does so at $-0.10$ ($r=-0.81$), and the screen steps by 0.43\,m
+of LOS across the trace. Subtracting such a screen adds a few percent of the
+deformation back with the opposite sign, which is centimetres of LOS within kilometres of the trace, where slip
+inversions read the shallow slip.
+
+This paper does five things.
+\begin{enumerate}
+  \item It locates where the deformation enters. An ablation runs the two-band, reformulated and reordered
+        estimators, with and without ISCE3's correction passes, on identical cells, with an identical filter and
+        an identical main-band unwrapping. It uses synthetic ruptures with known truth
+        (Section~\ref{sec:synthetic}) and the five NISAR tracks (Section~\ref{sec:nisar}). Two further tests on the
+        NISAR tracks feed in the products' own main band and their side-band footprint.
+  \item It describes a reordering of the reformulated split-spectrum estimate of \citet{wegmuller2018reformulating}.
+        The scaled, unwrapped main band is removed from the wrapped side band \emph{before} anything is unwrapped,
+        so the only field that is unwrapped holds no deformation, and no cycle corrections are needed
+        (Section~\ref{sec:theory}). The estimate is algebraically the same as the reformulated one, and as the one
+        ISCE3 computes; only the order of operations is new.
+  \item It shows that the side band ties a block that a cut along the rupture isolates. A wrong main-band integer
+        on the block moves the reordered estimate by exactly 3.21\,rad per cycle, and the ionosphere is continuous
+        across the gap, so the estimate's step there reads the integer (Section~\ref{sec:sbtie}). On three of the four
+        Panama pairs it finds the pipelines' range-offset ties a cycle short. Read the same way, the offsets agree with it.
+  \item It states the reordered estimator's remaining error budget near the trace (Section~\ref{sec:nearfield}). On
+        synthetics, the cells' handling of steep fringes, the fill's width and the lag of the weighted mean can each
+        be removed: by taking the main band out of every pixel, by a fill matched to the gap, and by a weighted local
+        plane as the filter's final step. On real data these are millimetre corrections, and next to the D141 rupture
+        the main band's local integers set the screen.
+  \item It tests the diagnosis on ice (Section~\ref{sec:antarctica}). \citet{joughin2026nisarerrors} found the PR screen
+        of two Antarctic pairs offset across a glacier's shear margin. That screen is ours plus whole cycles of the kinds
+        above, and where the two differ, the range offsets side with ours. The same boundary is the strong control the
+        side-band tie lacked: across a 160\,rad step it ties the cut-off component as the range offsets do.
+\end{enumerate}

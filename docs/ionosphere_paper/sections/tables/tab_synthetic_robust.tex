@@ -1,0 +1,24 @@
+\begin{tabular}{llrrrrrr}
+\toprule
+case & estimator & 0--2\,km & 2--5\,km & 5--10\,km & $>$20\,km & leak & step \\
+ & & \multicolumn{4}{c}{error rms (mm LOS)} & & (mm) \\
+\midrule
+coherence 0.35 & reordered (ours) & 16.6 & 8.2 & 2.0 & 2.3 & -0.002 & 5.6 \\
+ & reformulated, same unwrapper & 222.7 & 547.1 & 698.1 & 703.1 & 0.451 & -996.9 \\
+ & reformulated (SNAPHU) & 16.6 & 8.2 & 2.0 & 2.3 & -0.002 & 5.6 \\
+ & reformulated + ISCE3 corrections & 45.6 & 60.6 & 20.7 & 2.3 & -0.046 & 125.8 \\
+ & two-band (SNAPHU) & 3590.6 & 9127.6 & 1.2e4 & 1.2e4 & 7.522 & -1.6e4 \\
+\midrule
+coast & reordered (ours) & 20.2 & 8.1 & 2.2 & 2.1 & -0.004 & 3.2 \\
+ & reformulated, same unwrapper & 524.8 & 722.2 & 815.9 & 799.7 & 0.315 & -1049.0 \\
+ & reformulated (SNAPHU) & 20.2 & 8.1 & 2.2 & 2.1 & -0.004 & 3.2 \\
+ & reformulated + ISCE3 corrections & 41.6 & 52.5 & 18.0 & 2.1 & -0.031 & 103.8 \\
+ & two-band (SNAPHU) & 7620.0 & 1.0e4 & 1.2e4 & 1.2e4 & 4.568 & -1.5e4 \\
+\midrule
+patchy decorrelation & reordered (ours) & 20.3 & 11.3 & 4.9 & 1.9 & -0.003 & 7.9 \\
+ & reformulated, same unwrapper & 192.9 & 486.0 & 657.7 & 703.0 & 0.394 & -868.6 \\
+ & reformulated (SNAPHU) & 20.3 & 11.3 & 4.9 & 1.9 & -0.003 & 7.9 \\
+ & reformulated + ISCE3 corrections & 42.1 & 50.2 & 18.5 & 1.9 & -0.037 & 99.7 \\
+ & two-band (SNAPHU) & 3120.1 & 7784.2 & 1.1e4 & 1.1e4 & 6.324 & -1.4e4 \\
+\bottomrule
+\end{tabular}

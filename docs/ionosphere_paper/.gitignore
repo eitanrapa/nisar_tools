@@ -1,0 +1,14 @@
+# large or regenerated: the scripts rebuild them (see README.md)
+results/*.npz
+results/log_*.txt
+results/queue_*.sh
+*.zip
+# LaTeX build files (main.pdf is kept)
+*.aux
+*.log
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.out
+*.synctex.gz

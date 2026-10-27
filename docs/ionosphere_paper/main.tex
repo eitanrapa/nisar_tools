@@ -1,0 +1,70 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{xcolor}
+\usepackage[section]{placeins}   % floats stay in their own section
+\setlength{\belowcaptionskip}{6pt}  % room between a caption and the table below it
+
+% every \_ here is in a code identifier: let long ones break after an underscore
+\DeclareRobustCommand{\_}{\textunderscore\allowbreak}
+
+% markup for drafts: \authnote{} notes to the authors, \tbd{} numbers still to be filled in
+\newcommand{\authnote}[1]{\textcolor{orange}{[\textbf{Note:} #1]}}
+\newcommand{\tbd}[1]{\textcolor{red}{[#1]}}
+
+\newcommand{\phiA}{\phi_A}
+\newcommand{\phiB}{\phi_B}
+\newcommand{\psiA}{\psi_A}
+\newcommand{\psiB}{\psi_B}
+\newcommand{\W}{\mathcal{W}}
+\newcommand{\U}{\mathcal{U}}
+\newcommand{\fA}{f_A}
+\newcommand{\fB}{f_B}
+
+\title{Split-spectrum ionosphere estimation near surface ruptures:\\
+where operational screens pick up the deformation, and an ordering that keeps it out}
+\author{\tbd{authors}}
+\date{Draft, \today}
+
+\begin{document}
+\maketitle
+
+\input{sections/00_abstract}
+\input{sections/01_introduction}
+\input{sections/02_theory}
+\input{sections/03_estimator}
+\input{sections/04_synthetic}
+\input{sections/05_nisar}
+\input{sections/06_tie}
+\input{sections/07_nearfield}
+\input{sections/08_antarctica}
+\input{sections/09_discussion}
+\input{sections/10_conclusions}
+
+\section*{Code and data availability}
+The estimator is \texttt{nisar\_tools.split\_spectrum}, the side-band tie its \texttt{block\_cycles}, and the
+near-trace options of Section~\ref{sec:nearfield} the \texttt{phase\_model} of its \texttt{gslc\_cells} and the
+\texttt{fill\_m} ladder and \texttt{order} of its \texttt{ionosphere\_filter}; the
+experiments of this paper, the synthetic generator and the
+scripts that make every figure and table are in \texttt{docs/\allowbreak ionosphere\_paper/\allowbreak experiments/} of the
+same repository.
+The Antarctic pipeline of Section~\ref{sec:antarctica} (\texttt{ant\_pipeline.py}, \texttt{tie\_check.py},
+\texttt{ant\_roff.py}) is beside its data, as the Panama and Venezuela pipelines are; \texttt{run\_antarctica.py} reads
+it. The NISAR PR GSLC, RSLC and GUNW products are distributed by the Alaska Satellite Facility, and the ITS\_LIVE
+velocity mosaics by the NSIDC DAAC.
+
+\bibliographystyle{abbrvnat}
+\bibliography{references}
+
+\appendix
+\input{sections/11_appendix}
+
+\end{document}

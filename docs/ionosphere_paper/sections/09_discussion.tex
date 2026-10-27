@@ -1,0 +1,98 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Where the deformation enters}
+Three mechanisms put deformation into a split-spectrum screen, and the experiments separate them.
+\begin{enumerate}
+  \item \emph{Cycle corrections.} Rounding an unwrapped field against its own low-pass, or against the filtered
+        first-pass estimates, reads the deformation's curvature as unwrapping errors. Each false cycle of the main
+        band is 3.21\,rad of screen, and the false cycles follow the deformation. The result is a fixed fraction of
+        it, $-0.045$ to $-0.048$ on our synthetics and $-0.06$ without an exclusion, whatever the slip or the
+        geometry. This is the sign-flipped copy the GUNW screens show. It needs no unwrapping error at all: the passes
+        create the errors they correct. They also act at data edges, where their one-sided low-pass lags any steep
+        gradient (Appendix~\ref{app:isce3}).
+  \item \emph{Unwrapping a field that carries deformation across a rupture that splits the scene.} The side band
+        carries all of the step and the double difference 4.4\% of it. Once that share exceeds about $\pi$, the
+        cross-fault integer is a guess. The guess is wrong by one cycle of $\Delta$ (73\,rad, 1.4\,m of LOS) on D141,
+        whose 3.8\,m step puts 1.38 cycles into $\Delta$, and on our synthetics from 4--6\,m of slip on. Where the
+        unwrapper can go around the rupture's ends, this does not happen.
+  \item \emph{Band co-location.} A side band sampled $\delta$ down range adds $12.1\,\delta$ times the deformation's
+        range gradient. For strike-slip ruptures that a polar-orbiting SAR sees, the gradient mostly runs along
+        azimuth, and ISCE3's 9\,m offset is worth well under a millimetre beyond 2\,km. Close to the trace, or for a
+        rupture whose gradient points down range, it is centimetres.
+\end{enumerate}
+The reordered estimator removes the first two by construction, because its unwrapped field carries no deformation,
+and the third by summing both bands over identical cells. The Antarctic pairs (Section~\ref{sec:antarctica}) show the
+first two, and the products' main-band integers below, without an earthquake. Across a glacier's shear margins their
+screen is ours plus:
+\begin{itemize}
+  \item one cycle of $\Delta$ over a 12\,000\,km$^2$ block;
+  \item the main band's split between its components;
+  \item about two main-band cycles that the passes moved over a fast trunk.
+\end{itemize} What its screen still contains near a rupture is the
+filter's (next subsection), and that is the same with and without the rupture.
+
+The products add a fourth, which no split-spectrum form avoids: the main band's own integers. On D141 the PR GUNW's
+main band is 25 cycles off on the cut-off block and 3--9 cycles off north of the trace. Those integers alone make our
+estimate leak $-0.061$. On the Venezuela tracks the products' main band agrees with ours, and the recipe on our cells
+accounts for 25--52\% of the products' leak beyond ours. Matching the products' side-band footprint changes that by
+at most 0.004. The rest is in steps our matched cells do not reproduce.
+
+\subsection{What the reordering does not remove}
+\label{sec:tie}
+\paragraph{The main band's integers.} The reordered estimate needs $\phiA$ unwrapped correctly, and so does the
+deformation it serves. A cycle of $\phiA$ moves the raw estimate by $2\pi c_0 = 3.21$\,rad, about 62\,mm of LOS,
+exactly as in the reformulated form. On the D141 pair, where SNAPHU's default and ``defo'' costs chose different
+integers in a few patches, the raw estimate moved by exactly 3.21\,rad per cycle. A block that the cut isolates needs
+its own integer. The range offsets give one: $m = (4\pi/\lambda)\,\rho_\mathrm{off} - \phiA$ holds no deformation, only
+the block's cycles plus twice the ionosphere, because offsets see the ionosphere as a delay and phase as an advance.
+Combining $m$ with the screen does not help: $m + 2\hat\phi_{io}$ moves only 0.022 cycles per cycle of the tie
+\citep[Sec.~III-D makes the same point about phase--group-delay differences]{gomba2016toward}, and the bands' absolute
+(``delta-$k$'') phase \citep{bovenga2013mca} is as much ionosphere as integer. The screen's own continuity across the
+gap does settle it, to about a tenth of a cycle, and finds the pipelines' offset ties a cycle short on three of the
+four Panama pairs (Section~\ref{sec:sbtie}). The offsets were not wrong; the pipelines' reading of them was. They
+compared separate planes, fitted 6--12\,km from the trace on each side, at the trace. Read with the side band's
+estimator, the same offsets agree with it to a third of a cycle. Across an Antarctic shear margin the non-dispersive phase steps by 74--188\,rad. There
+the side band and the range offsets agree to 0.05 cycles, and both find the operational velocity-map fix one or two
+cycles short (Section~\ref{sec:antarctica}). Far from the trace a wrong tie shifts the block's corrected LOS by a constant
+59\,mm, which a per-block offset in the inversion absorbs. Near the trace the filter fills the excluded zone from both
+sides and mixes them, leaving a fake step of 5--6\,cm per cycle that decays over $\sim$8\,km
+(Fig.~\ref{fig:tie}d). Filtering each block separately would remove the mixing at the cost of the north side's sparse
+near-trace cells.
+
+\paragraph{The cells, the fill and the filter.} Near a rupture three parts of the estimator add error that has nothing
+to do with the slip (Section~\ref{sec:nearfield}). The cells sum steep fringes differently in the two bands; the fill
+of the excluded zone is a plane wider than the zone; and ISCE3's weighted mean lags the ionosphere's gradient where
+the damage zone lowers the weights. On the synthetics each can be removed, by taking the main band out of every pixel,
+by a fill matched to the gap and by a weighted local plane as the final step, and together they bring the error within
+2\,km of the trace from 16 to 2\,mm. On real data they matter less. Real ionosphere is smoother at 2--10\,km than our
+synthetics, and the fills differ by about a millimetre in a 2\,km fault zone. On D141 the plane moves the screen by at
+most 3\,mm.
+
+\paragraph{The main band's local integers.} What does matter on D141 is the main band near the trace. Its cut and uncut
+unwrappings disagree on 18--78\% of the cells within 6\,km north of the trace, at 3.21\,rad of raw estimate per cycle.
+Every recipe that follows the near-trace cells more closely takes those disagreements into the screen: up to 16\,mm
+for the narrow fills, against 2.4\,mm or less for the production screen, whose 10\,km fill averages them away. The
+production recipe's wide fill and its 2\,km exclusion are therefore the robust choice until the integers near a trace
+can be checked. The side band could check them patch by patch, as it ties a cut-off block.
+
+\paragraph{Strong ionosphere.} $r = k\,\phi_{io}$ wraps once $\phi_{io}$ changes by $2\pi/|k| = 73$\,rad. Unwrapping it
+fails only if it changes by $\pi$ between neighbouring cells, about 36\,rad of ionosphere per 240\,m cell, or six cycles
+of $\phiA$ per cell. The main band fails long before that. On the steepest of our screens (D126), $r$ spans about
+10\,rad over the scene.
+
+\paragraph{What it does not address.} Azimuth streaks from ionospheric scintillation, the registration errors that
+ionospheric azimuth shifts cause \citep{wegmuller2024palsar3}, and the higher-order terms some sporadic-E cases need
+\citep{furuya2017midlatitude} are beyond this paper. The reordering changes only what is unwrapped. It is compatible
+with any filter, with the Bayesian combination of \citet{gomba2017bayesian}, and with time-series estimation
+\citep{fattahi2017insar,piromthong2026ionospheric}.
+
+\subsection{A one-line change for the operational products}
+ISCE3 forms the double difference as the main-band interferogram times the conjugate of the side band's, and unwraps
+it. Multiplying that product by $\exp\!\left(i\,\frac{\Delta f}{\fA}\,\phiA\right)$, using the main band's unwrapped
+phase on the side band's grid, before unwrapping, and dividing it out afterwards, turns \eqref{eq:reform} into
+\eqref{eq:ours} with no other change. With that, the correction passes have nothing left to correct near a rupture
+and can be switched off there. The main band's own unwrapping across the rupture still matters, at 3.21\,rad of
+raw estimate per cycle. The PR GUNW's unwrapped phase is 32 cycles off across the D141 rupture, because SNAPHU went
+around its end, so a product that adopted the reordering would still need the rupture cut, or another way of
+fixing that integer.

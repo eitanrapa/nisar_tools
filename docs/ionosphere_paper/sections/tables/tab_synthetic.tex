@@ -1,0 +1,33 @@
+\begin{tabular}{llrrrrrr}
+\toprule
+case & estimator & 0--2\,km & 2--5\,km & 5--10\,km & $>$20\,km & leak & step \\
+ & & \multicolumn{4}{c}{error rms (mm LOS)} & & (mm) \\
+\midrule
+finite rupture & reordered (ours) & 18.5 & 8.8 & 1.9 & 1.9 & -0.004 & 8.2 \\
+ & reformulated, same unwrapper & 18.5 & 8.8 & 1.9 & 1.9 & -0.004 & 8.2 \\
+ & reformulated (SNAPHU) & 18.5 & 8.8 & 1.9 & 1.9 & -0.004 & 8.2 \\
+ & reformulated, wrapped & 18.5 & 8.8 & 1.9 & 1.9 & -0.004 & 8.2 \\
+ & reformulated + ISCE3 corrections & 41.4 & 46.5 & 14.2 & 1.9 & -0.047 & 96.6 \\
+ & two-band (SNAPHU) & 18.5 & 8.8 & 1.9 & 1.9 & -0.004 & 8.2 \\
+ & two-band + ISCE2 correction & 18.5 & 8.8 & 1.9 & 1.9 & -0.004 & 8.2 \\
+ & two-band + ISCE3 corrections & 39.9 & 47.1 & 14.7 & 1.9 & -0.048 & 98.1 \\
+\midrule
+through-going & reordered (ours) & 16.9 & 8.3 & 1.8 & 2.0 & -0.003 & 8.3 \\
+ & reformulated, same unwrapper & 213.8 & 539.8 & 698.1 & 703.1 & 0.444 & -975.4 \\
+ & reformulated (SNAPHU) & 16.9 & 8.3 & 1.8 & 2.0 & -0.003 & 8.3 \\
+ & reformulated, wrapped & 17.5 & 8.5 & 1.8 & 2.0 & -0.002 & 7.5 \\
+ & reformulated + ISCE3 corrections & 44.8 & 57.4 & 19.7 & 2.0 & -0.043 & 119.4 \\
+ & two-band (SNAPHU) & 3477.2 & 9032.0 & 1.2e4 & 1.2e4 & 7.431 & -1.6e4 \\
+ & two-band + ISCE2 correction & 1083.0 & 1977.9 & 3318.5 & 1.3e4 & 0.391 & -3168.5 \\
+ & two-band + ISCE3 corrections & 2893.0 & 8127.5 & 1.2e4 & 1.2e4 & 6.726 & -1.4e4 \\
+\midrule
+through-going, no exclusion & reordered (ours) & 8.6 & 7.1 & 1.8 & 2.0 & -0.005 & 14.4 \\
+ & reformulated, same unwrapper & 333.6 & 630.9 & 701.4 & 703.1 & 0.512 & -1211.9 \\
+ & reformulated (SNAPHU) & 8.6 & 7.1 & 1.8 & 2.0 & -0.005 & 14.4 \\
+ & reformulated, wrapped & 35.3 & 22.3 & 3.6 & 2.0 & 0.002 & 3.6 \\
+ & reformulated + ISCE3 corrections & 100.6 & 89.5 & 21.1 & 2.0 & -0.062 & 184.7 \\
+ & two-band (SNAPHU) & 6467.0 & 1.2e4 & 1.3e4 & 1.3e4 & 9.794 & -2.3e4 \\
+ & two-band + ISCE2 correction & 1367.3 & 2321.7 & 3672.5 & 1.4e4 & 0.553 & -3970.5 \\
+ & two-band + ISCE3 corrections & 5742.0 & 1.1e4 & 1.3e4 & 1.3e4 & 9.207 & -2.1e4 \\
+\bottomrule
+\end{tabular}

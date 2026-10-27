@@ -1,0 +1,56 @@
+\begin{abstract}
+NISAR's dual-band L-band interferograms come with a split-spectrum ionospheric phase screen, which studies of large
+earthquakes subtract. Near the surface ruptures of the 2026 Venezuela and Panama earthquakes, the screens in NISAR's
+PR GUNW products contain a scaled, sign-flipped copy of the coseismic deformation. Within 10\,km of the trace their
+15\,km high-pass regresses on the data's at $-0.02$ to $-0.12$ ($r$ down to $-0.82$).
+
+We locate where the deformation enters by running the two-band, the reformulated and a reordered split-spectrum
+estimate, with and without ISCE3's whole-cycle corrections. All run on identical cells, with an identical filter and
+an identical main-band unwrapping, on synthetic ruptures with known truth and on five NISAR tracks. Three mechanisms
+appear.
+\begin{itemize}
+  \item The correction passes read the deformation's curvature as unwrapping errors. On synthetics they copy
+        4.5--4.8\% of the high-passed deformation at every slip, 6\% without a fault-zone exclusion.
+  \item Unwrapping a field that carries deformation fails once the rupture splits the scene and the field's share of
+        the step exceeds about $\pi$. That field is the side band, or the double difference with its 4.4\% share. On the
+        Panama pair it puts the cut-off block one cycle of the double difference, 1.4\,m of LOS, off.
+  \item The product's own main-band unwrapping, 25--32 cycles off across the Panama rupture, accounts for most of
+        that product's copy.
+\end{itemize}
+On the Venezuela tracks the corrections, run on matched cells, reproduce 25--52\% of the products' leak beyond our
+own; the rest is not attributed here.
+
+The reordered estimate removes the scaled, unwrapped main band from the wrapped side band before anything is
+unwrapped. It is algebraically identical to the reformulated estimate of Wegm\"uller et al.\ (2018) and to the one
+ISCE3 computes. But the only field it unwraps holds no deformation, so it needs no cycle corrections. On every
+synthetic, its error 2--5\,km from the trace stays at its zero-slip level of 8--12\,mm of LOS, which is the filter's.
+The GUNW recipe's error is 47\,mm at 4\,m of slip, and the forms that unwrap deformation fail by metres where the
+rupture splits the scene. The reordered estimate still needs the main band unwrapped correctly, at 3.21\,rad of
+screen per cycle.
+
+That same 3.21\,rad makes the side band a tie for a block that a cut along the rupture isolates: the ionosphere is
+continuous across the gap, so the raw estimate's step there reads the block's integer. On fake boundaries in eight
+NISAR scenes, no tie, the median over a boundary's 20\,km windows, reads a wrong integer; across a Venezuela rupture
+whose integer is known, it reads 0.02. On three of the four Panama pairs it finds the pipelines' range-offset ties
+one cycle short, which had left a 5--6\,cm fake step in their screens within 8\,km of the trace. The offsets themselves,
+read the same way, agree with it; comparing two far-field planes at the trace was what had moved the ties.
+
+On the synthetics, three parts of the estimator set its zero-slip error near the trace. The cells sum steep fringes
+differently in the two bands, the excluded zone is filled with a plane wider than the zone, and the filter's
+inverse-variance weighted mean lags the ionosphere's gradient across the damage zone. Taking the main band out of every
+pixel, a fill matched to the gap and a weighted local plane as the final step bring that error from 16 to 2\,mm within
+2\,km of the trace. On real data they are millimetre corrections. On 34 fake gaps in eight NISAR screens the fills
+differ by about a millimetre. Next to the D141 rupture the screen is limited instead by the main band's local integers:
+two unwrappings disagree on 18--78\% of the cells within 6\,km north of the trace, and the narrower recipes follow
+those cells where the production screen's wide fill averages them away.
+
+Over ice the same failures appear without an earthquake. On two Antarctic pairs whose PR screen Joughin (2026) found
+offset across a glacier's shear margin, that screen is ours plus whole cycles:
+\begin{itemize}
+  \item the main band's split between its components, 9 and 8 cycles at 3.21\,rad each;
+  \item one cycle of the double difference over a 12\,000\,km$^2$ block;
+  \item about two main-band cycles that the correction passes moved over a fast tributary.
+\end{itemize}
+Where the screens differ beyond those integers, the range offsets side with ours. Across a 160\,rad step the side band
+and the range offsets tie the components alike, to 0.05 cycles, where velocity maps read one or two cycles low.
+\end{abstract}

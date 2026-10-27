@@ -1,0 +1,45 @@
+\begin{tabular}{lrr}
+\toprule
+ & pair 1 & pair 2 \\
+ & 19--31 Aug & 31 Aug--12 Sep \\
+\midrule
+\multicolumn{3}{l}{\emph{The product's screen minus ours}} \\
+component 1, in main-band cycles & 9.013 & 8.004 \\
+the block, in double-difference cycles & 1.0006 & 0.9995 \\
+\quad its area (km$^2$) & 11\,980 & 11\,304 \\
+left after the integers: robust sd (rad) & 0.13 & 0.13 \\
+\quad area beyond 3\,rad (km$^2$) & 5\,400 & 5\,078 \\
+\addlinespace
+\multicolumn{3}{l}{\emph{The split of component 1, in main-band cycles}} \\
+side band (median of 17 windows) & 8.95 & 7.97 \\
+range offsets, $\phi_A - k\rho_\mathrm{off}$: the GUNW's & 8.90 & 7.96 \\
+\quad ours, a gross-outlier cull only & 9.06 & 8.15 \\
+ITS\_LIVE, slow ice within 20\,km & 8.01 & -- \\
+GrIMP's fix \citep{joughin2026nisarerrors} & 7 & 7 \\
+non-dispersive step across the gap (rad) & 74--188 & 80--188 \\
+\addlinespace
+\multicolumn{3}{l}{\emph{Over the tributary's trunk, 5--20\,km outside the block}} \\
+product $-$ ours $-$ integers (rad) & 6.50 & 5.44 \\
+\quad in main-band cycles & 2.03 & 1.70 \\
+ISCE3's passes on our cells (rad) & 3.60 & 3.52 \\
+leak away from the integer steps: product & -0.066 (-0.65) & -0.066 (-0.67) \\
+\quad ours & 0.002 (0.09) & 0.001 (0.03) \\
+\addlinespace
+\multicolumn{3}{l}{\emph{The offsets' ionosphere minus each screen (rad)}} \\
+product above ours by $>$3\,rad: minus ours / minus product & -0.28 / -5.60 & -0.32 / -4.91 \\
+product below ours by $>$3\,rad: minus ours / minus product & +0.34 / +3.47 & +0.27 / +3.01 \\
+over the frame, rms (6\,km): product / repaired / ours & 18.85 / 1.29 / 0.63 & 18.85 / 1.21 / 0.68 \\
+\addlinespace
+\multicolumn{3}{l}{\emph{Phase minus an ITS\_LIVE synthetic, slow ice: $\sigma$ / robust $\sigma$ (rad)}} \\
+uncorrected & 3.50 / 3.15 & 2.09 / 1.69 \\
+the product's screen & 15.19 / 14.24 & 15.05 / 14.08 \\
+the product's, integers repaired & 4.04 / 1.36 & 3.97 / 1.44 \\
+ours & 1.84 / 1.22 & 1.84 / 1.21 \\
+\addlinespace
+\multicolumn{3}{l}{\emph{Pair 1 minus pair 2, a median and plane out: $\sigma$ / robust $\sigma$ (rad)}} \\
+uncorrected & \multicolumn{2}{c}{3.94 / 4.13} \\
+the product's screen & \multicolumn{2}{c}{1.30 / 0.99} \\
+the product's, integers repaired & \multicolumn{2}{c}{2.70 / 0.86} \\
+ours & \multicolumn{2}{c}{1.02 / 0.81} \\
+\bottomrule
+\end{tabular}

@@ -1,0 +1,145 @@
+integers,recipe,lo_km,hi_km,mm
+as cut,production,-10,-6,0.0
+as cut,production,-6,-4,0.0
+as cut,production,-4,-3,0.0
+as cut,production,-3,-2,0.0
+as cut,production,-2,-1,0.0
+as cut,production,-1,0,0.0
+as cut,production,0,1,0.0
+as cut,production,1,2,0.0
+as cut,production,2,3,0.0
+as cut,production,3,4,0.0
+as cut,production,4,6,0.0
+as cut,production,6,10,0.0
+as cut,"production, first order",-10,-6,-0.7803336852400773
+as cut,"production, first order",-6,-4,-0.9439034086362488
+as cut,"production, first order",-4,-3,-1.648740673699535
+as cut,"production, first order",-3,-2,-2.4686086770147826
+as cut,"production, first order",-2,-1,-2.756807198852983
+as cut,"production, first order",-1,0,-2.121872573757592
+as cut,"production, first order",0,1,-1.1412916952339363
+as cut,"production, first order",1,2,-1.014433994306692
+as cut,"production, first order",2,3,-0.6094320925373861
+as cut,"production, first order",3,4,-0.23767650303570478
+as cut,"production, first order",4,6,0.2821231980824979
+as cut,"production, first order",6,10,0.286271973337457
+as cut,plane 2.6,-10,-6,0.3325401674863245
+as cut,plane 2.6,-6,-4,1.5222874582404111
+as cut,plane 2.6,-4,-3,3.4176142800794524
+as cut,plane 2.6,-3,-2,5.664022504969722
+as cut,plane 2.6,-2,-1,8.04189053294526
+as cut,plane 2.6,-1,0,9.948208167561523
+as cut,plane 2.6,0,1,10.21382089463998
+as cut,plane 2.6,1,2,10.689064977064206
+as cut,plane 2.6,2,3,10.258227267140429
+as cut,plane 2.6,3,4,7.754880553005774
+as cut,plane 2.6,4,6,5.1134706386660485
+as cut,plane 2.6,6,10,0.7734585167747767
+as cut,ladder 1.5,-10,-6,0.34211858835214404
+as cut,ladder 1.5,-6,-4,1.3483879166816812
+as cut,ladder 1.5,-4,-3,3.498470352861105
+as cut,ladder 1.5,-3,-2,6.117708096923488
+as cut,ladder 1.5,-2,-1,8.834065537147625
+as cut,ladder 1.5,-1,0,10.779210303215839
+as cut,ladder 1.5,0,1,13.650621018587612
+as cut,ladder 1.5,1,2,15.737438093977046
+as cut,ladder 1.5,2,3,15.782021846224422
+as cut,ladder 1.5,3,4,11.871641873375873
+as cut,ladder 1.5,4,6,6.26624398914586
+as cut,ladder 1.5,6,10,0.8184111762425003
+as cut,"ladder 1.5, first order",-10,-6,-0.5450170031785754
+as cut,"ladder 1.5, first order",-6,-4,0.9978417615480628
+as cut,"ladder 1.5, first order",-4,-3,3.0714297830436372
+as cut,"ladder 1.5, first order",-3,-2,5.22468320163405
+as cut,"ladder 1.5, first order",-2,-1,8.808939931001541
+as cut,"ladder 1.5, first order",-1,0,9.883099138409827
+as cut,"ladder 1.5, first order",0,1,12.412470649170068
+as cut,"ladder 1.5, first order",1,2,13.774784494998919
+as cut,"ladder 1.5, first order",2,3,11.64736721894761
+as cut,"ladder 1.5, first order",3,4,10.485103927840631
+as cut,"ladder 1.5, first order",4,6,9.556888044439827
+as cut,"ladder 1.5, first order",6,10,1.8231454474127575
+as cut,"ladder 2.6, first order",-10,-6,-0.482432620144614
+as cut,"ladder 2.6, first order",-6,-4,1.0807641822758445
+as cut,"ladder 2.6, first order",-4,-3,3.1712151787615857
+as cut,"ladder 2.6, first order",-3,-2,5.089195460450919
+as cut,"ladder 2.6, first order",-2,-1,7.432571323546129
+as cut,"ladder 2.6, first order",-1,0,10.152967226184597
+as cut,"ladder 2.6, first order",0,1,10.402754110632525
+as cut,"ladder 2.6, first order",1,2,9.946712054861685
+as cut,"ladder 2.6, first order",2,3,9.644260226652172
+as cut,"ladder 2.6, first order",3,4,8.141549693543816
+as cut,"ladder 2.6, first order",4,6,7.434935221403138
+as cut,"ladder 2.6, first order",6,10,1.7383921787363503
+repaired,production,-10,-6,-0.017762070225343297
+repaired,production,-6,-4,-0.00482542748657312
+repaired,production,-4,-3,-0.09073337724468063
+repaired,production,-3,-2,-0.1937207903682275
+repaired,production,-2,-1,-0.46713891066146346
+repaired,production,-1,0,-1.1240403949914428
+repaired,production,0,1,-1.8715725513444987
+repaired,production,1,2,-2.126214063812986
+repaired,production,2,3,-2.4056636276295866
+repaired,production,3,4,-2.1540742983425556
+repaired,production,4,6,-1.4349979562261959
+repaired,production,6,10,-0.323547019406085
+repaired,"production, first order",-10,-6,-1.038840692542203
+repaired,"production, first order",-6,-4,-1.3660301990835915
+repaired,"production, first order",-4,-3,-2.2352377509364896
+repaired,"production, first order",-3,-2,-3.1794712549109527
+repaired,"production, first order",-2,-1,-3.759245182032115
+repaired,"production, first order",-1,0,-4.0146719854761965
+repaired,"production, first order",0,1,-4.1843555721740255
+repaired,"production, first order",1,2,-3.840728024966772
+repaired,"production, first order",2,3,-3.3790964843655673
+repaired,"production, first order",3,4,-2.4830277577327977
+repaired,"production, first order",4,6,-1.2128420264434838
+repaired,"production, first order",6,10,0.09222655959682424
+repaired,plane 2.6,-10,-6,0.1597244606737938
+repaired,plane 2.6,-6,-4,0.5279799402987736
+repaired,plane 2.6,-4,-3,1.5195748866623597
+repaired,plane 2.6,-3,-2,2.457063968221285
+repaired,plane 2.6,-2,-1,3.5556578927370275
+repaired,plane 2.6,-1,0,4.654624321591089
+repaired,plane 2.6,0,1,4.048128264047444
+repaired,plane 2.6,1,2,2.720914977891465
+repaired,plane 2.6,2,3,1.4456064756484328
+repaired,plane 2.6,3,4,0.7109063306083832
+repaired,plane 2.6,4,6,0.4302309141678268
+repaired,plane 2.6,6,10,0.21223256616343175
+repaired,ladder 1.5,-10,-6,0.17503077011047313
+repaired,ladder 1.5,-6,-4,0.6545232427267924
+repaired,ladder 1.5,-4,-3,1.743682583374034
+repaired,ladder 1.5,-3,-2,2.602619130783539
+repaired,ladder 1.5,-2,-1,3.864511355409189
+repaired,ladder 1.5,-1,0,4.831078380579844
+repaired,ladder 1.5,0,1,4.485255365996035
+repaired,ladder 1.5,1,2,4.104184578013428
+repaired,ladder 1.5,2,3,3.348760648043274
+repaired,ladder 1.5,3,4,2.5615045633651317
+repaired,ladder 1.5,4,6,1.0345825712567593
+repaired,ladder 1.5,6,10,0.21411342627112495
+repaired,"ladder 1.5, first order",-10,-6,-0.3964821545998526
+repaired,"ladder 1.5, first order",-6,-4,-0.2911113244714905
+repaired,"ladder 1.5, first order",-4,-3,0.42800888003662685
+repaired,"ladder 1.5, first order",-3,-2,1.6139874869213027
+repaired,"ladder 1.5, first order",-2,-1,3.037849898008869
+repaired,"ladder 1.5, first order",-1,0,4.0734686500830595
+repaired,"ladder 1.5, first order",0,1,3.5250563703933047
+repaired,"ladder 1.5, first order",1,2,3.2948007882215173
+repaired,"ladder 1.5, first order",2,3,2.962950715124759
+repaired,"ladder 1.5, first order",3,4,3.0126063981359255
+repaired,"ladder 1.5, first order",4,6,2.588493578578138
+repaired,"ladder 1.5, first order",6,10,1.1309608414472723
+repaired,"ladder 2.6, first order",-10,-6,-0.47866788227315527
+repaired,"ladder 2.6, first order",-6,-4,-0.6896528698604593
+repaired,"ladder 2.6, first order",-4,-3,-0.13015166787669702
+repaired,"ladder 2.6, first order",-3,-2,0.7086664897829907
+repaired,"ladder 2.6, first order",-2,-1,1.571952580992325
+repaired,"ladder 2.6, first order",-1,0,2.6479849102193604
+repaired,"ladder 2.6, first order",0,1,2.856048164779603
+repaired,"ladder 2.6, first order",1,2,1.8141625486897492
+repaired,"ladder 2.6, first order",2,3,1.0624654662071729
+repaired,"ladder 2.6, first order",3,4,1.1811083109907181
+repaired,"ladder 2.6, first order",4,6,1.899575540332616
+repaired,"ladder 2.6, first order",6,10,0.9263859040648705

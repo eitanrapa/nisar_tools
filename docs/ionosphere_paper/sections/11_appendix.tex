@@ -1,0 +1,64 @@
+\section{Registration of the GSLC pairs}
+\label{app:registration}
+The PR GSLCs of the two dates are each geocoded with their own ionospheric (TEC) and solid-earth-tide geolocation
+corrections. Those corrections differ between dates by about a resolution cell (2.5--3.2\,m on the Panama D141 pair),
+so an interferogram formed directly from two GSLCs loses about half its coherence. We keep the first date's GSLC and
+geocode the second date's RSLC onto its grids. That geocoding drops the second date's own corrections and adds a
+registration field: the first date's correction shift plus the offsets measured between the two dates (our port of
+ISCE3's ROFF correlator). The side band is geocoded with the same field in its own pixels; the TEC part of the shift
+scales by $(\fA/\fB)^2$. Both bands of both dates then lie on common grids, and the cells of
+Section~\ref{sec:estimator} are sums over identical pixels.
+
+\section{ISCE3's correction passes, as ported}
+\label{app:isce3}
+With $\mathcal{G}$ a NaN-aware truncated Gaussian ($\sigma$ 2.0\,km by 2.6\,km, truncated at 1.75 and 1.49 $\sigma$:
+ISCE3's 14 by 110 taps for $\sigma$ 4 by 37 side-band pixels), the first pass
+(\texttt{unwrapping\_correction\_with\_filter}, one iteration) replaces every unwrapped field $u$ ($\phiA$ and
+$\Delta$, or $\phiA$ and $\phiB$) by
+\begin{equation}
+  u \leftarrow u - 2\pi \left\lfloor \frac{u - \mathcal{G}u}{2\pi} \right\rceil .
+\end{equation}
+The second pass (\texttt{compute\_unwrapp\_error\_main\_diff\_ms\_band}) forms the first estimates
+$\hat d = c_0\phiA + c_1\Delta$ and $\hat n = \phiA - \hat d$, filters both with the dispersive filter ($F$), and
+corrects
+\begin{equation}
+  \phiA \leftarrow \phiA - 2\pi\left\lfloor\frac{\phiA - F\hat n - F\hat d}{2\pi}\right\rceil,\qquad
+  \Delta \leftarrow \Delta - 2\pi\left\lfloor\frac{\Delta + \frac{\Delta f}{\fA}F\hat n - \frac{\Delta f}{\fB}F\hat d}
+  {2\pi}\right\rceil ,
+\end{equation}
+before the final estimate and filter. The two-band version
+(\texttt{compute\_unwrapp\_error\_main\_side\_band}) rounds the differential integer
+$\lfloor[(1-\fB/\fA)F\hat n + (1-\fA/\fB)F\hat d + \phiB - \phiA]/2\pi\rceil$ and the common one from the sum, as in
+\citet[eqs.~28--29]{gomba2016toward}. ISCE2's ALOS-2 processor instead rounds $\phiA-\phiB$ against a weighted
+quadratic of itself \citep{liang2018insar}. These are the \texttt{diff\_isce3}, \texttt{side\_isce3} and
+\texttt{side\_isce2} estimators of the experiments.
+
+\section{The synthetic generator}
+\label{app:synthetic}
+The scene is 96 by 96\,km of 40\,m pixels. The truth is a vertical left-lateral rupture striking N105$^\circ$E,
+built from Okada rectangles \citep{okada1985surface}: 10 segments along strike by two in depth (0--10 and 10--15\,km;
+the lower layer carries 0.6 of the slip), with slip tapered along strike as $\sqrt{\sin}$. It is 50\,km long and ends
+inside the scene (``finite''), or 160\,km long and runs through it (``through''). The LOS is a left-looking
+descending pass at 37$^\circ$ incidence, D141's geometry. The ionosphere, at $\fA$, is a 0.6\,rad/km gradient plus a
+Gaussian-correlated field (rms 4\,rad, correlation length 15\,km), about 80\,rad across the scene.
+
+Each band's coherence is a far-field value (0.6, or 0.35) times a damage zone, $q + (1-q)(1-e^{-(d/w)^2})$ with
+$q\gamma_0 = 0.12$ and $w=2$\,km north of the trace and $q\gamma_0=0.25$, $w=0.8$\,km south (close to D141's
+measured coherence), times the fringe-rate loss $|\mathrm{sinc}|$ of the band's own phase gradient \citep{zebker1992decorrelation}. That loss is
+taken over the band's resolution cell (6.2\,m of ground range for the main band, 50\,m for the side band, 5.3\,m
+along track) and over the 40\,m pixel.
+
+Each pixel's interferometric sum of $L$ looks (48 for the main band, 6 for the side band) is drawn from the complex
+Wishart distribution with that coherence and phase, by the Bartlett decomposition \citep{lee1994intensity}. With
+$g_1\sim\Gamma(L)$, $g_2\sim\Gamma(L-1)$ and $a\sim\mathcal{CN}(0,1)$,
+\begin{equation}
+  \begin{aligned}
+  W_{12} &= g_1\gamma e^{i\phi} + \sqrt{g_1}\,\bar a\,\sqrt{1-\gamma^2}, \qquad W_{11} = g_1,\\
+  W_{22} &= \gamma^2 g_1 + 2\,\mathrm{Re}\!\left(\gamma e^{-i\phi}\sqrt{g_1}\,\bar a\sqrt{1-\gamma^2}\right)
+  + (1-\gamma^2)(|a|^2+g_2).
+  \end{aligned}
+\end{equation}
+The pixels are summed over 240\,m cells exactly as GSLC pixels are, which gives 1728 and 216 looks per cell
+(\texttt{split\_spectrum}'s own estimate for NISAR's 40\,+\,5\,MHz mode: 1753 and 217). The main band's unwrapping is
+the oracle: the cell mean of the true phase, with the noisy cell phase re-wrapped onto it. All estimators therefore
+see the same, correct $\phiA$, and differ only in how they use the side band.

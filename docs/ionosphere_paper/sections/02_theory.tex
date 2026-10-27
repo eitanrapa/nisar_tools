@@ -1,0 +1,141 @@
+\section{Three ways to write one estimator}
+\label{sec:theory}
+
+\subsection{Phase model}
+Following \citet{gomba2016toward} (see \citet{rosen2000synthetic} for interferometry in general), the interferometric phase of band $X$ at centre frequency $f_X$, referenced to the
+main band $A$, is
+\begin{equation}
+  \phi_X = \frac{f_X}{\fA}\,\phi_{nd} + \frac{\fA}{f_X}\,\phi_{io} + 2\pi n_X ,
+  \label{eq:model}
+\end{equation}
+where $\phi_{nd}$ holds everything proportional to frequency (deformation, topography, troposphere), $\phi_{io}$ is the
+ionospheric (dispersive) phase at $\fA$, and $n_X$ is the integer an unwrapping assigns. The wrapped phase
+is $\psi_X = \W(\phi_X)$, with $\W$ the wrap to $[-\pi,\pi)$. NISAR's 40\,+\,5\,MHz mode has $\fA=1239$\,MHz and
+$\fB=1293.5$\,MHz, so $\Delta f/\fA = (\fB-\fA)/\fA = 0.0440$ \citep{nisar2018handbook}.
+
+\subsection{The two-band, reformulated and reordered forms}
+Eliminating $\phi_{nd}$ between the two bands gives three forms of the same estimate, which differ only in the order
+of subtraction and wrapping.
+
+\paragraph{Two-band.} Both bands are unwrapped and combined,
+\begin{equation}
+  \hat\phi_{io} = a\,\phiA + b\,\phiB, \qquad a = \frac{\fB^2}{\fB^2-\fA^2} = 12.12,\quad
+  b = -\frac{\fA\fB}{\fB^2-\fA^2} = -11.61 .
+  \label{eq:twoband}
+\end{equation}
+This is the classic split-spectrum estimate
+\citep{rosen2010measurement,brcic2010estimation,gomba2016toward,fattahi2017insar,liang2019ionospheric} and ISCE3's
+\texttt{main\_side\_band} \citep{isce3}.
+
+\paragraph{Reformulated.} \citet{wegmuller2018reformulating} rewrote it in terms of the full-band phase and the
+double difference $\Delta = \phiA - \phiB$:
+\begin{equation}
+  \hat\phi_{io} = c_0\,\phiA + c_1\,\Delta, \qquad c_0 = \frac{\fB}{\fA+\fB} = 0.511,\quad
+  c_1 = \frac{\fA\fB}{\fB^2-\fA^2} = 11.61 .
+  \label{eq:reform}
+\end{equation}
+The unwrapped phase is scaled by only $\approx 0.5$, and $\Delta$ is small, so that ``unwrapping can be done to the
+lowest ambiguity'' \citep{wegmuller2018reformulating}; \citet{wegmuller2024palsar3} extended it to NISAR's and
+PALSAR-3's separate main and side bands. ISCE3's \texttt{main\_diff\_ms\_band}, which makes the ionospheric layer of
+the NISAR GUNW product, is this form: it forms $\W(\psiA-\psiB)$, unwraps it with SNAPHU
+\citep{chen2001snaphu,chen2002snaphu}, and combines it with the unwrapped main band \citep{isce3}. But $\Delta$
+is not free of deformation. From \eqref{eq:model},
+\begin{equation}
+  \Delta = -\frac{\Delta f}{\fA}\,\phi_{nd} + \frac{\Delta f}{\fB}\,\phi_{io} + 2\pi(n_A - n_B),
+  \label{eq:delta}
+\end{equation}
+so it carries 4.4\% of the deformation, with the deformation's steps and gradients. That content is real enough that \citet{ozawa2022dsi} use the difference of split-band interferograms to measure large coseismic deformation next to the 2016 Kumamoto ruptures, where the full-band phase cannot be unwrapped.
+
+\paragraph{Reordered (ours).} Unwrap the main band only, and remove its scaled phase from the \emph{wrapped} side band
+before anything else is unwrapped:
+\begin{equation}
+  \begin{gathered}
+  r = \W\!\left(\psiB - \frac{\fB}{\fA}\,\phiA\right) = \W\!\left(k\,\phi_{io} - 2\pi\,\frac{\Delta f}{\fA}\,n_A\right),\\
+  k = \frac{\fA}{\fB} - \frac{\fB}{\fA} = -0.0861, \qquad \hat\phi_{io} = \U(r)/k .
+  \end{gathered}
+  \label{eq:ours}
+\end{equation}
+The non-dispersive phase cancels exactly, deformation included, whatever its size or steepness; $\psiB$ enters only
+wrapped, so the side band's integer never appears. $r$ is $0.086$ times the ionosphere, smooth and continuous across
+the rupture, and it is the only field that is unwrapped. Since $c_0 = c_1\,\Delta f/\fA$ and $c_1 = -1/k$, the
+reordered estimate equals \eqref{eq:reform} identically,
+\begin{equation}
+  \frac{r}{k} = \frac{1}{k}\left(\psiB - \phiA - \frac{\Delta f}{\fA}\phiA\right) = c_0\,\phiA + c_1\,\Delta
+  \pmod{2\pi/|k|},
+\end{equation}
+whenever both unwrappings are right. The three forms are therefore one estimator. They differ in what the unwrapper
+is asked to see: $\phiB$ carries all of the deformation, $\Delta$ 4.4\% of it, $r$ none.
+
+\subsection{What an integer error costs}
+Table~\ref{tab:integers} lists the raw estimate's response to one wrong cycle in each unwrapped quantity. The
+reformulated and reordered forms have identical sensitivities. A cycle of the main band costs $2\pi c_0 =
+3.21$\,rad in both, the common-error term $\pi m$ of \citet[their eq.~25]{gomba2016toward}. A cycle of the
+second unwrapped field ($\Delta$ or $r$) costs $2\pi/|k| = 73$\,rad in both, or 1.4\,m of LOS. What differs is how
+likely that cycle is: $\Delta$ must be unwrapped through the deformation, $r$ need not be. In the two-band form a
+main-band cycle that the side band does not share is a \emph{differential} error worth $2\pi a = 76$\,rad.
+
+\begin{table}[t]
+\centering
+\caption{The raw dispersive estimate's change for one cycle of error in each unwrapped field, at NISAR's
+1239/1293.5\,MHz. LOS equivalents are $\lambda_A/4\pi = 19.3$\,mm per radian.}
+\label{tab:integers}
+\begin{tabular}{lccc}
+\toprule
+error & two-band \eqref{eq:twoband} & reformulated \eqref{eq:reform} & reordered \eqref{eq:ours} \\
+\midrule
+main band $n_A$ only            & $2\pi a$ = 76.2\,rad & $2\pi c_0$ = 3.21\,rad & $2\pi c_0$ = 3.21\,rad \\
+side band $n_B$ only            & $2\pi b$ = 72.9\,rad & --- (enters wrapped)   & --- (enters wrapped)   \\
+both bands, $n_A=n_B$           & $2\pi(a+b)$ = 3.21\,rad & ---                 & ---                    \\
+double difference $\Delta$      & ---                  & $2\pi c_1$ = 72.9\,rad & ---                    \\
+residual $r$                    & ---                  & ---                    & $2\pi/|k|$ = 72.9\,rad \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Why the double difference is hard to unwrap at a rupture}
+Equation~\eqref{eq:delta} puts $-0.044\,\phi_{nd}$ into $\Delta$. A 4\,m strike-slip rupture seen at $\sim$0.6 of
+its horizontal motion makes a LOS step of $\sim$2.4\,m, about 125\,rad at L band, which becomes a 5.5\,rad step in
+$\Delta$, close to a cycle. Three things then fail.
+\begin{enumerate}
+  \item Taking $\Delta$ ``to the lowest ambiguity'' requires $|\Delta|<\pi$ about a reference
+        \citep{wegmuller2018reformulating}. Its deformation part alone reaches that at
+        $|\phi_{nd}| = \pi/0.044 = 71$\,rad, or 1.4\,m of LOS. The authors note that strong ionospheric gradients
+        break it too \citep{wegmuller2024palsar3}.
+  \item Across a fault zone that is decorrelated, or excluded from the estimate, nothing constrains $\Delta$'s integer.
+        An unwrapper that bridges the gap takes the shortest arc, and is a cycle off once the step exceeds $\pi$.
+        Where the rupture splits the scene (it runs to a coast or to the swath edge) there is no path around its
+        end, and the sides' relative integer is arbitrary.
+  \item Close to the trace the deformation's gradient is aliased in the cells. $\Delta$ inherits 4.4\% of it, and
+        its own unwrapping errors are each 73\,rad of screen.
+\end{enumerate}
+None of this touches $r$, because \eqref{eq:ours} removes the deformation at the resolution of the cells before
+wrapping. The integer it needs across the rupture is the main band's, which a deformation study must determine
+anyway (Section~\ref{sec:tie}).
+
+\subsection{The cycle-correction passes}
+\label{sec:corrections}
+Split-spectrum processors correct unwrapping errors after the fact. \citet[eqs.~28--29]{gomba2016toward} round the
+sub-band difference, and the sum, against the filtered first-pass estimates of $\phi_{nd}$ and $\phi_{io}$. They
+note that the common-error correction ``is not robust'': inaccurate estimates ``are misinterpreted as phase unwrapping
+errors''. ISCE3, which made the NISAR PR GUNWs with \texttt{unwrap\_correction: True} (the run configuration stored
+in each product), applies two passes. First, every unwrapped field (here $\phiA$ and $\Delta$) is rounded against
+its own truncated-Gaussian low-pass ($\sigma$ of 4 by 37 side-band pixels, about 2.0 by 2.6\,km). Second, $\phiA$ is
+rounded against the first pass's filtered $\hat\phi_{nd}+\hat\phi_{io}$, and $\Delta$ against its prediction from
+the two \citep{isce3}. Near a rupture the deformation departs from any 2\,km low-pass by more than $\pi$ wherever its
+curvature is large. Each such departure is read as a cycle error and removed, adding $\mp 3.21$\,rad to the raw
+estimate (Table~\ref{tab:integers}) with the sign of the deformation's curvature. The result is a scaled,
+sign-flipped copy of the high-passed deformation, which is what the GUNW screens show near the 2026 ruptures
+(Section~\ref{sec:nisar}). The reordered form needs no such pass: $r$ holds no deformation, so there is nothing for
+a correction to mistake.
+
+\subsection{Band co-location}
+\label{sec:colocation}
+The three forms assume that both bands sample the same ground. If the side band is sampled $\delta$ further down range
+than the main band, $\phiB$ picks up $\delta\,(\fB/\fA)\,\partial\phi_{nd}/\partial\rho$, and every form's estimate
+picks up
+\begin{equation}
+  \epsilon_\delta \approx b\,\frac{\fB}{\fA}\,\delta\,\frac{\partial\phi_{nd}}{\partial\rho}
+  = -12.1\,\delta\,\frac{\partial\phi_{nd}}{\partial\rho} .
+  \label{eq:offset}
+\end{equation}
+ISCE3 decimates the main band to the side band's range columns by stride. That leaves a constant offset of about 3 main-band pixels ($\delta\approx9$\,m) and footprints 8 times apart (40\,m against 325\,m of slant range). How much that matters depends on the deformation's gradient \emph{down range}. A strike-slip rupture that a polar-orbiting radar sees well strikes roughly east--west, nearly along the range direction, so its across-fault gradient barely enters. In our synthetic geometry (Section~\ref{sec:synthetic}) the range direction lies within 2$^\circ$ of the strike, and a 9\,m offset adds 0.3\,mm of LOS at 2--5\,km from the trace. A rupture whose LOS gradient points down range, such as a thrust striking north--south, would see the full across-fault gradient: 10\,rad/km and $\delta = 9$\,m give 1.1\,rad (21\,mm) by \eqref{eq:offset}. The reordered estimator sums both bands over identical map cells, so $\delta=0$ by construction. What remains is the bands' different resolution inside a cell, which the fault-zone exclusion handles (Section~\ref{sec:estimator}). (Sub-bands cut from one band have a wavenumber shift of their own, which matters for the same reason \citep{li2024wavenumber}.)
