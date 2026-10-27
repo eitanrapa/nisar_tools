@@ -130,6 +130,89 @@ def test_gslc_cells_sums_the_pairs(tmp_path):
     assert int(c.n.values[0, 0]) == 48 * 48
 
 
+def _steep_pair(tmp_path, gradient=10.0, seed=3):
+    """Band A (5 m) and band B (40 x 5 m) GSLC pairs over 10 x 10 cells of 240 m, perfectly coherent, with independent
+    speckle amplitudes in the two bands: the deformation ``gradient`` (rad/km at f_A, along x, plus curvature along y)
+    and a smooth ionosphere. Returns the paths and the analytic deformation and ionosphere as functions of (x, y)."""
+    rng = np.random.default_rng(seed)
+    y = 3000.0 - 2.5 - 5.0 * np.arange(552)
+    psi = lambda X, Y: gradient * 1e-3 * X + 3e-6 * (Y - 1800.0) ** 2            # noqa: E731
+    iono = lambda X, Y: 2.0 * np.sin(X / 5000.0) + 0.3 * Y / 1000.0               # noqa: E731
+    paths = {}
+    for band, x in (("A", 1000.0 + 2.5 + 5.0 * np.arange(552)), ("B", 1000.0 + 20.0 + 40.0 * np.arange(69))):
+        X, Y = np.meshgrid(x, y)
+        f = F_A if band == "A" else F_B
+        phase = f / F_A * psi(X, Y) + F_A / f * iono(X, Y)
+        amp = rng.rayleigh(1.0, X.shape)
+        g1 = amp * np.exp(1j * rng.uniform(-np.pi, np.pi, X.shape))
+        for date, g in (("1", g1), ("2", g1 * np.exp(-1j * phase))):
+            paths[band + date] = tmp_path / f"{band}{date}.h5"
+            _write_gslc(paths[band + date], x, y, g, band)
+    return paths, psi, iono
+
+
+def _model(fn_a, step=10.0):
+    x = np.arange(990.0, 3800.0, step)
+    y = np.arange(3010.0, 200.0, -step)
+    X, Y = np.meshgrid(x, y)
+    return xr.DataArray(fn_a(X, Y), coords={"y": y, "x": x}, dims=("y", "x"), attrs={"center_frequency": F_A})
+
+
+def test_gslc_cells_with_the_main_band_taken_out_pixel_by_pixel(tmp_path):
+    """Steep fringes inside a cell: the bands' cell phases are different weighted means of them (independent speckle,
+    the side band's pixels 8x wider), so r = phi_B - (f_B/f_A) phi_A per cell carries a deformation-made error that
+    the 11.6x of d = r / k amplifies. Taken out of each pixel first, r is k d to the interpolation's precision."""
+    paths, psi, iono = _steep_pair(tmp_path)
+    a = ss.gslc_cells(paths["A1"], paths["A2"], "A")
+    b = ss.gslc_cells(paths["B1"], paths["B2"], "B")
+    model = _model(lambda X, Y: psi(X, Y) + iono(X, Y))
+    am = ss.gslc_cells(paths["A1"], paths["A2"], "A", phase_model=model)
+    bm = ss.gslc_cells(paths["B1"], paths["B2"], "B", phase_model=model)
+    assert am.attrs["model_scale"] == 1.0 and bm.attrs["model_scale"] == pytest.approx(F_B / F_A)
+    assert am.attrs["phase_model"] == bm.attrs["phase_model"] and "sha256" in am.attrs["phase_model"]
+    X, Y = np.meshgrid(a.x.values, a.y.values)
+    k = ss.dispersive_factor(F_A, F_B)
+    truth = ss.wrap(k * iono(X, Y))
+    _, r_cell = ss.dispersive_residual(a, b, psi(X, Y) + iono(X, Y))
+    phi_a, r_pix = ss.dispersive_residual(am, bm)
+    err_cell = ss.wrap(r_cell - truth)
+    err_pix = ss.wrap(r_pix - truth)
+    assert np.sqrt(np.mean(err_cell ** 2)) > 0.02          # 0.03 rad of r: 0.35 rad of d
+    assert np.max(np.abs(err_pix)) < 2e-3                    # the ionosphere's own curvature in the cell, and float32
+    # the coherence the fringes cost the cells comes back
+    assert np.median(a.coherence.values) < 0.85 and np.min(am.coherence.values) > 0.999
+    # phi_A is the model's cell mean plus the cell's residual: the A phase on the model's integers
+    np.testing.assert_allclose(phi_a, psi(X, Y) + iono(X, Y), atol=0.1)
+    # a given phase_a only moves integers: one cycle on a block is (f_B/f_A) 2 pi of r, as without the model
+    moved = np.where(X > 2000.0, phi_a + 2 * np.pi, phi_a)
+    _, r_moved = ss.dispersive_residual(am, bm, moved)
+    np.testing.assert_allclose(ss.wrap(r_moved - r_pix), np.where(X > 2000.0, ss.wrap(-F_B / F_A * 2 * np.pi), 0.0),
+                               atol=1e-9)
+    with pytest.raises(ValueError):
+        ss.dispersive_residual(am, b)                        # one band with the model, the other without
+    with pytest.raises(ValueError):
+        ss.dispersive_residual(am, bm.assign_attrs(phase_model="another"))
+
+
+def test_gslc_cells_counts_only_pixels_with_a_model(tmp_path):
+    paths, psi, iono = _steep_pair(tmp_path, gradient=2.0)
+    model = _model(lambda X, Y: psi(X, Y) + iono(X, Y))
+    model = model.where(model.x < 2000.0)                    # no model east of x = 2000 (a cut, water, another region)
+    am = ss.gslc_cells(paths["A1"], paths["A2"], "A", phase_model=model)
+    plain = ss.gslc_cells(paths["A1"], paths["A2"], "A")
+    full = am.x.values + 120.0 < 1990.0                     # cells wholly west of the model's edge (and its neighbour)
+    none = am.x.values - 120.0 >= 2000.0
+    assert np.all(am.n.values[:, full] == plain.n.values[:, full])
+    assert np.all(am.n.values[:, none] == 0) and np.all(np.isnan(am.model.values[:, none]))
+    merged = ss.merge_cells(am, am)                          # a cell seen by two frames: sums, and the model's mean
+    np.testing.assert_allclose(merged.model.values, am.model.values, equal_nan=True)
+    assert np.all(merged.n.values == 2 * am.n.values)
+    with pytest.raises(ValueError):
+        ss.merge_cells(am, plain)
+    with pytest.raises(ValueError):
+        ss.gslc_cells(paths["A1"], paths["A2"], "A", phase_model=model.assign_attrs(center_frequency=None))
+
+
 def test_gslc_cells_can_drop_partially_focused_pixels(tmp_path):
     """The products' mask (0 = partially focused) keeps a near-range strip out of the cell sums (A004, 2026-10-14)."""
     rng = np.random.default_rng(0)
@@ -236,6 +319,68 @@ def test_a_wider_plane_fill_crosses_a_wide_edge_gap():
     assert np.allclose(s_cap[inner], s_plane[inner], atol=1e-9)
 
 
+def test_a_first_order_filter_does_not_lag_where_the_weights_change():
+    """ISCE3's final Gaussian is an inverse-variance weighted mean. Across a fault's damage zone the coherence, and with
+    it the weight, falls toward the trace, so the mean's centroid moves away from the trace on both sides and the screen
+    lags the ionosphere's gradient: oppositely on the two sides, a step. The weighted local plane does not."""
+    ny, nx, cell = 140, 160, 240.0
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    truth = 0.03 * yy + 0.01 * xx                                        # rad per cell: ~12 mm of LOS per km across
+    d = np.abs(yy - 70.0) * cell                                         # distance to a trace along row 70
+    sig = 0.3 / (0.15 + 0.85 * (1.0 - np.exp(-(d / 2000.0) ** 2)))       # 2 rad at the trace, 0.3 far away
+    mask = np.ones(truth.shape, bool)
+    s0, g0 = ss.ionosphere_filter(truth, sig, mask, cell)
+    s1, g1 = ss.ionosphere_filter(truth, sig, mask, cell, order=1)
+    inner = (xx > 30) & (xx < 130)
+    north, south = inner & (yy < 70) & (yy > 55), inner & (yy > 70) & (yy < 85)        # 0-3.6 km either side
+    assert np.median((s0 - truth)[north]) < -0.1 and np.median((s0 - truth)[south]) > 0.1   # 0.4 rad: ~8 mm each way
+    assert np.max(np.abs((s1 - truth)[inner & (yy > 20) & (yy < 120)])) < 1e-8
+    # uniform weights: the plane is the mean, away from the grid's edge; and so are their sigmas
+    flat = np.full(truth.shape, 0.3)
+    u0, h0 = ss.ionosphere_filter(truth, flat, mask, cell)
+    u1, h1 = ss.ionosphere_filter(truth, flat, mask, cell, order=1)
+    core = (xx > 20) & (xx < 140) & (yy > 20) & (yy < 120)
+    np.testing.assert_allclose(u1[core], u0[core], atol=1e-9)
+    np.testing.assert_allclose(h1[core], h0[core], rtol=1e-9)
+    assert np.all(g1[north] > g0[north])                                # the plane's own variance where it leans
+    with pytest.raises(ValueError):
+        ss.ionosphere_filter(truth, sig, mask, cell, order=2)
+
+
+def test_a_ladder_of_planes_fills_each_gap_with_the_plane_that_interpolates_it():
+    """A curved field: a wide plane misses it across a narrow gap with data on both sides (a fault zone), a narrow one
+    cannot reach deep into a one-sided strip (a swath edge). The ladder takes the narrow plane where its data lie
+    around the cell and the wider ones where it would extrapolate."""
+    ny, nx, cell = 160, 260, 240.0
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    truth = 2e-4 * (xx - 90.0) ** 2 + 1.5e-4 * (yy - 70.0) ** 2 + 0.01 * xx      # rad; curvature ~4 rad over 15 km
+    fault = np.abs(yy - 80) < 9                                          # a 4.3 km zone, data on both sides
+    edge = xx >= 210                                                     # the last 12 km: nothing beyond
+    mask = ~fault & ~edge
+    sig = np.full(truth.shape, 0.3)
+    data = np.where(mask, truth, np.nan)
+    ladder = (1500.0, 3000.0, 6000.0, 12000.0)
+    out = {f: ss.ionosphere_filter(data, sig, mask, cell, fill="plane", fill_m=f, fill_reach_m=12000.0)[0]
+           for f in (1500.0, 10000.0, ladder)}
+    err = {f: np.abs(o - truth) for f, o in out.items()}
+    zone = fault & (xx > 20) & (xx < 190)
+    deep = edge & (xx >= 245) & (yy > 20) & (yy < 140)                   # 8.4-12 km into the strip
+    assert np.median(err[ladder][zone]) < 0.5 * np.median(err[10000.0][zone])
+    assert np.median(err[ladder][zone]) < 1.2 * np.median(err[1500.0][zone])
+    assert np.median(err[ladder][deep]) < 0.5 * np.median(err[1500.0][deep])
+    # the blend's ends: cells whose narrow plane interpolates take it exactly, and where it would extrapolate far the
+    # next rung decides
+    W = np.where(mask, 1.0 / 0.09, 0.0)
+    p0, lev0 = ss._plane_fill(np.where(mask, data, np.nan), W, 1500.0 / cell, lever=True)
+    lad = ss._plane_ladder(np.where(mask, data, np.nan), W, [s / cell for s in ladder], (1.0, 2.0))
+    close = np.isfinite(lev0) & (lev0 <= 1.0)
+    np.testing.assert_allclose(lad[close], p0[close], rtol=0, atol=1e-9)
+    assert (~mask & close).sum() > 1000                                  # the whole fault zone, and the strip's first cells
+    p1 = ss._plane_ladder(np.where(mask, data, np.nan), W, [s / cell for s in ladder[1:]], (1.0, 2.0))
+    off = ~np.isfinite(lev0) | (lev0 >= 2.0)
+    np.testing.assert_allclose(lad[off & np.isfinite(p1)], p1[off & np.isfinite(p1)], rtol=0, atol=1e-9)
+
+
 def test_a_singularity_in_a_gap_fill_does_not_cut_across_the_data():
     """D040 (Panama, 2026-10-17): the wide Gaussians filling Parita Bay left a phase singularity 28 km from any cell, and
     SNAPHU over the whole grid cut from it to the nearest grid edge -- across the 20 km neck joining Azuero to the
@@ -263,3 +408,104 @@ def test_a_singularity_in_a_gap_fill_does_not_cut_across_the_data():
     n = (new - truth)[valid] / (2 * np.pi)
     assert np.ptp(np.round(n)) == 0                       # one integer over the whole land
     assert np.max(np.abs(n - np.round(n))) < 1e-4
+
+
+def _two_blocks(seed=0, n=400, cell=240.0, noise=0.7):
+    """A raw dispersive estimate on cells: a gradient plus a 15 km correlated field (rms 4 rad), white noise, and two
+    blocks north and south of y = 0 with the 2 km either side of it left out (a fault zone)."""
+    from scipy import ndimage
+
+    rng = np.random.default_rng(seed)
+    x = cell * (np.arange(n) + 0.5) - cell * n / 2
+    y = cell * (np.arange(n)[::-1] + 0.5) - cell * n / 2
+    X, Y = np.meshgrid(x, y)
+    f = ndimage.gaussian_filter(rng.standard_normal(X.shape), 15e3 / cell)
+    d = 0.6 * (0.5 * X + 0.87 * Y) / 1e3 + 4.0 * f / f.std() + noise * rng.standard_normal(X.shape)
+    use = np.abs(Y) > 2000.0
+    coh = np.full(X.shape, 0.6)
+    ds = xr.Dataset({"dispersive": (("y", "x"), np.where(use, d, np.nan)), "mask": (("y", "x"), use),
+                     "coherence_a": (("y", "x"), coh), "coherence_b": (("y", "x"), coh)},
+                    coords={"y": y, "x": x}, attrs={"f_a": F_A, "f_b": F_B, "cell": cell})
+    return ds, Y > 0, Y < 0, X, Y
+
+
+def test_block_cycles_reads_how_far_a_block_is_off():
+    c0, _ = ss.main_diff_coefficients(F_A, F_B)
+    for seed, e in ((0, 1), (1, -2), (2, 0)):
+        ds, north, south, X, Y = _two_blocks(seed)
+        ds["dispersive"] = ds["dispersive"].where(~south, ds["dispersive"] - 2 * np.pi * c0 * e)
+        out = ss.block_cycles(ds, south, north, along=X)
+        assert out["cycles"] == e and not out["ambiguous"]
+        assert abs(out["estimate"] - e) < 0.15 and len(out["windows"]) >= 4
+        assert ss.block_cycles(ds, north, south, along=X)["cycles"] == -e          # the other way round
+
+
+def test_block_cycles_ignores_patches_of_local_cycle_errors():
+    """The near field of a rupture unwraps in patches (D141's north side): a third of the reference's cells 2-6 km from
+    the gap one cycle up must not move the tie."""
+    from scipy import ndimage
+
+    c0, _ = ss.main_diff_coefficients(F_A, F_B)
+    ds, north, south, X, Y = _two_blocks(3)
+    near = north & (Y > 2000.0) & (Y < 6000.0)
+    f = ndimage.gaussian_filter(np.random.default_rng(9).standard_normal(X.shape), 1000.0 / 240.0)
+    patch = near & (f > np.quantile(f[near], 0.67))
+    ds["dispersive"] = ds["dispersive"] + np.where(patch, 2 * np.pi * c0, 0.0)
+    ds["dispersive"] = ds["dispersive"].where(~south, ds["dispersive"] - 2 * np.pi * c0)
+    out = ss.block_cycles(ds, south, north, along=X)
+    assert out["cycles"] == 1 and abs(out["estimate"] - 1) < 0.2
+
+
+def test_block_cycles_through_the_screen_with_a_rupture_between():
+    """The whole chain on `_scene`'s rupture (70 rad arctan plus a 10 rad step): the south block's main band one cycle
+    short reads +1, the right one 0 -- the deformation does not enter the step."""
+    x, y, X, Y, psi, d = _scene()
+    phi_a = psi + d
+    phi_b = F_B / F_A * psi + F_A / F_B * d
+    ca, cb = _cells(phi_a, 0.8, F_A, x, y), _cells(phi_b, 0.6, F_B, x, y, kx=6)
+    near = np.abs(Y) < 2000.0
+    for e in (0, 1):
+        wrong = np.where(Y < 0, phi_a - 2 * np.pi * e, phi_a)
+        out = ss.split_spectrum_screen(ca, cb, np.where(near, np.nan, wrong), exclude=near)
+        tie = ss.block_cycles(out, Y < 0, Y > 0, along=X, window_m=15000.0)
+        assert tie["cycles"] == e and abs(tie["estimate"] - e) < 0.05
+
+
+def test_the_side_band_picks_the_unwrapping_that_is_right_patch_by_patch():
+    """Two unwrappings of one pair disagree by a cycle in two patches: in one the base is wrong (the alternative right),
+    in the other the alternative is. Every cycle the main band is off moves the raw dispersive estimate by 3.21 rad
+    times the share of a cell it covers, so the side band tells the two apart (D141, 2026-10-21: a 26 km2 patch 3 km
+    north of the trace, a cycle off in the cut unwrapping and right in the uncut one, reads -0.8 +- 0.1)."""
+    rng = np.random.default_rng(5)
+    nc, k, cell = 100, 4, 240.0                         # 100 x 100 cells of 240 m, main band on 60 m pixels
+    xp = 60.0 * (np.arange(nc * k) + 0.5)
+    yp = 60.0 * (np.arange(nc * k)[::-1] + 0.5)
+    xc, yc = xp.reshape(nc, k).mean(1), yp.reshape(nc, k).mean(1)
+    XP, YP = np.meshgrid(xp, yp)
+    truth = 0.002 * XP + 3.0 * np.sin(YP / 7000.0)       # the main band (rad); blocks: all of it
+    wrong = (np.hypot(XP - 9000.0, YP - 15000.0) < 2300.0)                      # the base a cycle high: not on cells
+    alt_wrong = (np.abs(XP - 18000.0) < 1900.0) & (np.abs(YP - 6000.0) < 1500.0)  # the alternative a cycle high
+    base = truth + 2 * np.pi * wrong
+    alt = truth + 2 * np.pi * alt_wrong
+    labels, delta = ss.cycle_patches(base, alt, [np.ones(base.shape, bool)])
+    assert sorted(delta.tolist()) == [-1, 1]
+    # the raw estimate on the cells: a smooth ionosphere, noise, and 3.21 rad per cycle of the base, by share of cell
+    step = 2 * np.pi * F_B / (F_A + F_B)
+    share = wrong.reshape(nc, k, nc, k).mean(axis=(1, 3))
+    Xc, Yc = np.meshgrid(xc, yc)
+    iono = 5.0 * np.cos(Xc / 20000.0) + 0.0001 * Yc
+    sig = np.full(iono.shape, 0.7)
+    raw = iono + step * share + sig * rng.standard_normal(iono.shape)
+    scr = xr.Dataset({"dispersive": (("y", "x"), raw), "mask": (("y", "x"), np.ones(raw.shape, bool)),
+                      "sigma": (("y", "x"), sig), "screen": (("y", "x"), iono)},
+                     coords={"y": yc, "x": xc}, attrs={"f_a": F_A, "f_b": F_B, "cell": cell})
+    reads = {r["patch"]: r for r in ss.patch_cycles(scr, labels, xp, yp, np.ones(base.shape, bool))}
+    for p, r in reads.items():
+        verdict = ss.patch_verdict(r["cycles"], r["sigma"], int(delta[p - 1]), r["cells"])
+        if delta[p - 1] == -1:                          # the base's error: add -1 there, the alternative is right
+            assert r["cycles"] == pytest.approx(-1.0, abs=0.1) and verdict == "alternative"
+        else:                                           # the alternative's error: the base is right
+            assert r["cycles"] == pytest.approx(0.0, abs=0.1) and verdict == "base"
+    assert ss.patch_verdict(np.nan, np.nan, 1, 0) == "undecided"
+    assert ss.patch_verdict(0.5, 0.05, 1, 50) == "undecided"          # backs neither
+    assert ss.patch_verdict(-1.0, 0.05, 1, 50) == "undecided"         # a cycle the other way: neither unwrapping

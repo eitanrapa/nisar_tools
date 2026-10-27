@@ -24,7 +24,9 @@ north, still +0.13..+0.17 at 10-20 km. The footprint mismatch alone predicts a t
 Here, instead:
 
 1. both bands are summed over the **same map cells** (:func:`gslc_cells`: GSLC pairs on their own
-   grids, cells on a lattice both grids share);
+   grids, cells on a lattice both grids share) -- and, given the caller's unwrapped main band as a
+   ``phase_model``, with it taken out of **every pixel** of both bands first, so that steep fringes
+   inside a cell neither decorrelate it nor weight the two bands' cell phases differently;
 2. ``phi_A`` comes from the caller's own unwrapping (fault-aware, cut and tied), and only the
    **purely dispersive** residual is unwrapped::
 
@@ -34,7 +36,16 @@ Here, instead:
 3. no cycle is moved against a smoothed non-dispersive field; cells near the trace (or of low
    coherence in either band) are masked and filled by the filter, from both sides;
 4. the filter is ISCE3's ``IonosphereFilter.low_pass_filter`` (guide, outliers, fill, inverse-
-   variance-weighted truncated Gaussian), sized in metres instead of B-grid pixels.
+   variance-weighted truncated Gaussian), sized in metres instead of B-grid pixels; optionally
+   with each gap filled by the local plane that interpolates it (a ladder of widths), and with
+   its final Gaussian made first order -- a weighted local plane, which does not lag the
+   ionosphere's gradient where the weights change, as they do across a rupture's damage zone;
+5. a block the unwrapper saw on its own (cut off by a rupture, an island) is tied to the main
+   region by the side band itself (:func:`block_cycles`): its main-band integer moves its raw
+   estimate by 3.21 rad per cycle, and the ionosphere is continuous across the gap;
+6. so does a patch the unwrapper got a cycle wrong: where two unwrappings of the pair disagree
+   (:func:`cycle_patches`), the side band reads which one is right (:func:`patch_cycles`,
+   :func:`patch_verdict`) -- for the main band's own data too, at 2 pi a cycle.
 
 The phase convention is the package's interferogram, ``reference * conj(secondary)``.
 """
@@ -105,15 +116,64 @@ def cell_lattice(x, y, cell):
     return ox, oy, kx, ky, ncx, ncy, xc, yc
 
 
+def _model_reader(model):
+    """``at(xs, ys)`` -> a ``(y, x)`` DataArray ``model`` bilinear at the pixel centres ``ys`` x ``xs`` (1-D), NaN off its
+    grid or next to a NaN; and a description holding a hash of the values."""
+    import hashlib
+
+    mx = np.asarray(model["x"].values, float)
+    my = np.asarray(model["y"].values, float)
+    mv = np.asarray(model.values, float)
+    if mv.ndim != 2 or mx.size < 2 or my.size < 2:
+        raise ValueError("phase_model must be a (y, x) DataArray of at least 2 x 2")
+    if my[0] > my[-1]:
+        my, mv = my[::-1], mv[::-1]
+    if mx[0] > mx[-1]:
+        mx, mv = mx[::-1], mv[:, ::-1]
+    dx, dy = mx[1] - mx[0], my[1] - my[0]
+    if not (np.allclose(np.diff(mx), dx) and np.allclose(np.diff(my), dy)):
+        raise ValueError("phase_model must be on a regular grid")
+
+    def axis(t, t0, dt, n):
+        f = (np.asarray(t, float) - t0) / dt
+        i = np.clip(np.floor(f).astype(np.int64), 0, n - 2)
+        off = (f < -1e-9) | (f > n - 1 + 1e-9)
+        return i, np.where(off, np.nan, f - i)
+
+    def at(xs, ys):
+        ix, wx = axis(xs, mx[0], dx, mx.size)
+        iy, wy = axis(ys, my[0], dy, my.size)
+        wx, wy = wx.astype(np.float32), wy.astype(np.float32)
+        rows0, rows1 = mv[iy], mv[iy + 1]
+        return ((rows0[:, ix] * (1 - wx) + rows0[:, ix + 1] * wx) * (1 - wy)[:, None]
+                + (rows1[:, ix] * (1 - wx) + rows1[:, ix + 1] * wx) * wy[:, None])
+
+    digest = hashlib.sha256(np.ascontiguousarray(mv, dtype=np.float32).tobytes()).hexdigest()[:16]
+    desc = str(model.attrs.get("description", "phase model")) + f" [sha256 {digest}, {mv.shape[0]} x {mv.shape[1]}]"
+    mv = mv.astype(np.float32)          # a strip of band A is ~10^7 pixels: float32 halves it (1e-4 rad at 10^3 rad)
+    return at, desc
+
+
 def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", bounds=None,
-               strip_cells=8, subswath_mask=False, near_range_m=11000.0, near_range_side=None):
+               strip_cells=8, subswath_mask=False, near_range_m=11000.0, near_range_side=None,
+               phase_model=None, model_frequency=None):
     """One band's interferogram summed over map cells, from two GSLCs on one grid.
 
     ``reference``/``secondary`` are GSLC paths whose ``frequency`` grids coincide (a pair made
     with ``geocode_rslc(like=)``). ``bounds = (x_min, y_min, x_max, y_max)`` limits the cells.
     Returns an :class:`xarray.Dataset` on cell centres ``(y, x)``: the complex sum ``ifg`` of
     ``ref * conj(sec)``, the powers ``p1``/``p2``, the valid-pixel count ``n``, and the
-    ``coherence``. Pixels that are zero or non-finite in either date do not count, nor (``subswath_mask``)
+    ``coherence``.
+
+    ``phase_model`` (optional): the caller's unwrapped main-band phase (rad at ``model_frequency``, Hz; default its
+    ``center_frequency`` attribute), a ``(y, x)`` DataArray on a regular map grid in the GSLCs' CRS. Each pixel's
+    ``ref * conj(sec)`` is turned by ``exp(-i (f_c / model_frequency) model)``, bilinear at the pixel, before the sums,
+    so a cell holds the phase relative to the model, scaled to its band: the deformation's fringes neither decorrelate
+    a cell nor weight its two bands differently (the side band's pixels are 8 times wider in range, and its speckle is
+    not the main band's). Pixels where the model is NaN or off its grid do not count. The cells then also carry
+    ``model``, the model's mean over the counted pixels, and :func:`dispersive_residual` reads them as such.
+
+    Pixels that are zero or non-finite in either date do not count, nor (``subswath_mask``)
     pixels the products' own ``mask`` layer marks partially focused (0) or outside the acquisition (255) in
     either date. NISAR's band A is partially focused over ~10 km at near range and band B over ~1 km
     (A004, 2026-10-14): finite there, and the split spectrum turns their phase error into a screen strip.
@@ -127,6 +187,14 @@ def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", b
     from .gslc import DirectChunkReader
 
     x, y, f_c = _gslc_grid(reference, frequency)
+    model_at = scale = model_desc = None
+    if phase_model is not None:
+        model_frequency = model_frequency if model_frequency is not None else phase_model.attrs.get("center_frequency")
+        if model_frequency is None or f_c is None:
+            raise ValueError("gslc_cells: phase_model needs model_frequency (or a center_frequency attribute) and the "
+                             "GSLC's centerFrequency")
+        model_at, model_desc = _model_reader(phase_model)
+        scale = float(f_c) / float(model_frequency)
     x2, y2, _ = _gslc_grid(secondary, frequency)
     if x.shape != x2.shape or y.shape != y2.shape or not (np.allclose(x, x2) and np.allclose(y, y2)):
         raise ValueError("gslc_cells: the two GSLCs are not on the same grid")
@@ -146,6 +214,7 @@ def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", b
     p1 = np.zeros(shape)
     p2 = np.zeros(shape)
     n = np.zeros(shape, np.int64)
+    msum = np.zeros(shape) if model_at is not None else None
     path = GSLC_GRID.format(f=frequency) + "/" + polarization
     mpath = GSLC_GRID.format(f=frequency) + "/mask"
     with h5py.File(reference, "r") as h1, h5py.File(secondary, "r") as h2:
@@ -180,6 +249,11 @@ def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", b
                 else:
                     m = np.asarray(M[ys, xs])
                     ok &= (m >= 1) & (m < 255)
+            if model_at is not None:
+                mod = model_at(x[xs], y[ys])
+                ok &= np.isfinite(mod)
+                mod = np.where(ok, mod, 0.0)
+                g2 = g2 * np.exp(1j * scale * mod).astype(np.complex64)     # conj(sec e^{i s m}) = conj(sec) e^{-i s m}
             g1 = np.where(ok, g1, 0)
             g2 = np.where(ok, g2, 0)
             sh = (b - a, ky, c1 - c0, kx)
@@ -188,17 +262,26 @@ def gslc_cells(reference, secondary, frequency, cell=240.0, polarization="HH", b
             p1[sl] = (np.abs(g1) ** 2).reshape(sh).sum(axis=(1, 3), dtype=np.float64)
             p2[sl] = (np.abs(g2) ** 2).reshape(sh).sum(axis=(1, 3), dtype=np.float64)
             n[sl] = ok.reshape(sh).sum(axis=(1, 3))
+            if msum is not None:
+                msum[sl] = mod.reshape(sh).sum(axis=(1, 3), dtype=np.float64)
     with np.errstate(invalid="ignore", divide="ignore"):
         coh = np.abs(ifg) / np.sqrt(p1 * p2)
+    data = {"ifg": (("y", "x"), ifg), "p1": (("y", "x"), p1), "p2": (("y", "x"), p2),
+            "n": (("y", "x"), n), "coherence": (("y", "x"), coh)}
+    model_attrs = {}
+    if msum is not None:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            data["model"] = (("y", "x"), np.where(n > 0, msum / np.maximum(n, 1), np.nan))
+        model_attrs = {"phase_model": model_desc, "model_frequency": float(model_frequency), "model_scale": scale}
     return xr.Dataset(
-        {"ifg": (("y", "x"), ifg), "p1": (("y", "x"), p1), "p2": (("y", "x"), p2),
-         "n": (("y", "x"), n), "coherence": (("y", "x"), coh)},
+        data,
         coords={"y": yc[r0:r1], "x": xc[c0:c1]},
         attrs={"frequency": frequency, "center_frequency": f_c, "cell": float(cell),
                "pixels_per_cell": kx * ky, "reference": str(reference),
                "secondary": str(secondary), "polarization": polarization,
                "subswath_mask": subswath_mask if near else bool(subswath_mask),
-               **({"near_range_m": float(near_range_m), "near_range_side": near_range_side} if near else {})})
+               **({"near_range_m": float(near_range_m), "near_range_side": near_range_side} if near else {}),
+               **model_attrs})
 
 
 def near_range_side_of(path):
@@ -228,21 +311,30 @@ def _near_range_strip(mask_rows, x, cols, side, width_m):
 
 
 def merge_cells(*cells):
-    """Sum cell datasets of one band from several frames onto their union (cells coincide)."""
+    """Sum cell datasets of one band from several frames onto their union (cells coincide). Cells made with a
+    ``phase_model`` keep its mean over the merged pixels; they cannot be merged with cells made without it."""
     xs = np.unique(np.concatenate([c.x.values for c in cells]))
     ys = np.unique(np.concatenate([c.y.values for c in cells]))[::-1]
+    models = {c.attrs.get("phase_model") for c in cells}
+    if len(models) > 1:
+        raise ValueError(f"merge_cells: the cells were made with different phase models: {sorted(map(str, models))}")
+    has_model = models != {None}
     out = {v: np.zeros((ys.size, xs.size), dt) for v, dt in
            (("ifg", np.complex128), ("p1", float), ("p2", float), ("n", np.int64))}
+    msum = np.zeros((ys.size, xs.size)) if has_model else None
     for c in cells:
         iy = np.searchsorted(-ys, -c.y.values)
         ix = np.searchsorted(xs, c.x.values)
         for v in out:
             out[v][np.ix_(iy, ix)] += c[v].values
+        if has_model:
+            msum[np.ix_(iy, ix)] += np.where(c.n.values > 0, c.model.values * c.n.values, 0.0)
     with np.errstate(invalid="ignore", divide="ignore"):
         coh = np.abs(out["ifg"]) / np.sqrt(out["p1"] * out["p2"])
-    ds = xr.Dataset({**{v: (("y", "x"), a) for v, a in out.items()},
-                     "coherence": (("y", "x"), coh)}, coords={"y": ys, "x": xs},
-                    attrs=dict(cells[0].attrs))
+    data = {**{v: (("y", "x"), a) for v, a in out.items()}, "coherence": (("y", "x"), coh)}
+    if has_model:
+        data["model"] = (("y", "x"), np.where(out["n"] > 0, msum / np.maximum(out["n"], 1), np.nan))
+    ds = xr.Dataset(data, coords={"y": ys, "x": xs}, attrs=dict(cells[0].attrs))
     ds.attrs["merged_from"] = len(cells)
     return ds
 
@@ -276,11 +368,27 @@ def cell_average(field, x, y, cells, weights=None):
 # ---------------------------------------------------------------------------
 # 2-3. The dispersive residual, and its unwrapping
 # ---------------------------------------------------------------------------
-def dispersive_residual(cells_a, cells_b, phase_a):
+def dispersive_residual(cells_a, cells_b, phase_a=None):
     """``(phi_A, r)`` on the cells: ``phi_A`` re-wrapped onto the caller's unwrapped ``phase_a``
-    (same cells), ``r = wrap(phi_B - (f_B/f_A) phi_A)`` (= ``k d`` wrapped; no deformation)."""
+    (same cells), ``r = wrap(phi_B - (f_B/f_A) phi_A)`` (= ``k d`` wrapped; no deformation).
+
+    Cells made with a ``phase_model`` (:func:`gslc_cells`) hold each band's phase relative to the model, so
+    ``r = wrap(rho_B - (f_B/f_A) rho_A)`` with ``rho`` the cells' angles, taken pixel by pixel, and ``phi_A`` is the
+    model's mean plus ``rho_A``. ``phase_a`` is then optional: given, it only moves each cell's integer to the one
+    nearest it (a block re-tied at the cells), at ``(f_B/f_A) 2 pi`` of ``r`` per cycle as before."""
     f_a = float(cells_a.attrs["center_frequency"])
     f_b = float(cells_b.attrs["center_frequency"])
+    with_model = ("model" in cells_a, "model" in cells_b)
+    if any(with_model):
+        if not all(with_model) or cells_a.attrs.get("phase_model") != cells_b.attrs.get("phase_model"):
+            raise ValueError("dispersive_residual: both bands' cells must be made with the same phase_model")
+        rho_a, rho_b = np.angle(cells_a.ifg.values), np.angle(cells_b.ifg.values)
+        base = (f_a / float(cells_a.attrs["model_frequency"])) * cells_a.model.values + rho_a
+        phi_a = base if phase_a is None else np.asarray(phase_a, float) + wrap(base - np.asarray(phase_a, float))
+        r = wrap(rho_b - (f_b / f_a) * (rho_a + (phi_a - base)))
+        return phi_a, r
+    if phase_a is None:
+        raise ValueError("dispersive_residual: phase_a is needed unless the cells carry a phase_model")
     ref = np.asarray(phase_a, float)
     phi_a = ref + wrap(np.angle(cells_a.ifg.values) - ref)
     r = wrap(np.angle(cells_b.ifg.values) - (f_b / f_a) * phi_a)
@@ -410,12 +518,14 @@ def _plane_guide(x, sigma):
     return _plane_fill(med, np.isfinite(med).astype(float), sigma)
 
 
-def _plane_fill(data, weight, sigma):
+def _plane_fill(data, weight, sigma, lever=False):
     """Local-plane estimate of ``data`` at every cell (first-order normalized convolution): at each cell, the plane
     through the cells with ``weight`` > 0, weighted by ``weight`` x a Gaussian of ``sigma`` cells (cut at 3 sigma).
     Exact for a linear field, at a one-sided edge and across a gap too, where the zero-order (weighted-mean) guide lags
     the gradient by ~ the gradient x the distance to its kernel's centroid of valid cells. NaN where the 3 x 3 system
-    is degenerate (no data in reach, or data on a line)."""
+    is degenerate (no data in reach, or data on a line). ``lever``: also return how far that centroid lies from each
+    cell, in sigmas -- ~0 where the plane interpolates (data around the cell), ~d / sigma where it extrapolates d past
+    a one-sided edge."""
     r = int(np.ceil(3.0 * sigma))
     t = np.arange(-r, r + 1, dtype=float)
     g = np.exp(-0.5 * (t / sigma) ** 2)
@@ -436,12 +546,31 @@ def _plane_fill(data, weight, sigma):
     if ok.any():
         rhs = np.stack([r00, r10, r01], -1)[ok][..., None]
         out[ok] = np.linalg.solve(M[ok], rhs)[:, 0, 0]
+    if lever:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return out, np.where(ok, np.hypot(m10, m01) / m00 / sigma, np.nan)
+    return out
+
+
+def _plane_ladder(data, weight, sigmas, lever_band):
+    """`_plane_fill` at each of ``sigmas`` (cells, ascending), each cell taking the narrowest plane whose data lie
+    around it: rung i's weight is 1 where its data's centroid lies within ``lever_band[0]`` sigmas of the cell, 0 beyond
+    ``lever_band[1]``, linear between, the rest going to the wider rungs (the widest takes what is left)."""
+    out = None
+    for s in sorted(sigmas, reverse=True):
+        p, lev = _plane_fill(data, weight, s, lever=True)
+        if out is None:
+            out = p
+            continue
+        t = np.clip((lever_band[1] - lev) / (lever_band[1] - lever_band[0]), 0.0, 1.0)
+        t = np.where(np.isfinite(p) & np.isfinite(t), t, 0.0)
+        out = np.where(np.isfinite(out), t * np.where(np.isfinite(p), p, 0.0) + (1.0 - t) * out, p)
     return out
 
 
 def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m=None,
                       truncate=(1.75, 1.49), outlier_threshold=3.5, mad_scale=1.4826, fill="guide", fill_m=None,
-                      fill_reach_m=None):
+                      fill_reach_m=None, fill_lever=(1.5, 3.0), order=0):
     """``IonosphereFilter.low_pass_filter`` (one iteration) on a map-cell grid.
 
     ``fill``: how masked cells are filled before the final Gaussian. ``"guide"`` is ISCE3's (the guide, a zero-order
@@ -453,6 +582,31 @@ def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m
     excluded near-range strip, ~11 km on A004). ``fill_reach_m`` caps how far from the data the plane may extrapolate
     (beyond it the guide, nearest beyond the guide's reach): near its 3-sigma limit a wide plane is poorly constrained
     (A004's islands, 20-30 km offshore, came out 4-10 rad off at fill_m 10 km).
+
+    ``fill_m`` may also be a ladder of sigmas (metres), each filled cell taking the narrowest plane that interpolates
+    there -- whose data's weighted centroid lies within ``fill_lever`` sigmas of it (`_plane_ladder`; blended between
+    the two). A wide plane fits a curved ionosphere worse: across a 2 km fault zone the 10 km plane misses it by
+    14-16 mm of LOS rms on synthetics, a 1.5-2 km plane by 2-3 mm (8-12 rad at 8 km of roughness: 56-65 mm against
+    10-14). Only a one-sided gap -- an edge strip, which no plane fills well -- calls for a wider one, and the
+    centroid tells the two apart: it stays at a two-sided gap's cells and runs away from a one-sided one's. On
+    synthetic ionospheres the ladder (1.5, 3, 6, 12) km with ``fill_lever`` (1.5, 3) fills a 1-2 km fault zone with
+    the 1.5 km plane alone and comes within 10-40% of the best single width in wider gaps and edge strips. Real
+    ionosphere (34 fake gaps cut out of eight NISAR screens, 2026-10-21) is smoother at 2-10 km and its cells noisier,
+    and there the 1.5 km rung is too narrow: a ladder from the guide's own width, (2.6, 5, 10) km, is best or tied in
+    fault zones 1-4 km wide (1.1-3.6 mm of LOS rms; the 10 km plane 1.7-4.7) and close to the 10 km plane at a
+    one-sided edge. All of these differ by about a millimetre in a 2 km zone. But a narrow fill also follows the data
+    at a gap's edge more closely, local main-band cycle errors included: next to D141's rupture, where the cut
+    unwrapping is a cycle off in patches north of the trace, it took them up (+8-10 mm of screen), where the 10 km
+    plane moved by 2 mm or less when they were repaired.
+
+    ``order``: the final Gaussian's. ISCE3's (0) is an inverse-variance weighted mean, and where the weights change
+    -- across a fault's damage zone, whose coherence falls toward the trace -- its centroid leaves the cell and it lags
+    the ionosphere's gradient: on synthetic ruptures by 8-15 mm of LOS at 1-5 km from the trace, opposite on the two
+    sides. 1 fits a weighted plane through the same kernel instead (`_local_plane`, a weighted Savitzky-Golay step, as
+    Piromthong et al. 2026 filter for scene edges), exact for a linear field whatever the weights; where they are
+    symmetric about a cell it is the weighted mean. Its sigma is ISCE3's, with the plane's variance in place of the
+    mean's. How much it matters depends on the ionosphere's gradient across the weights' change: on real fake gaps
+    (no damage zone) at most 0.4 mm; next to D141's rupture 2-4 mm.
 
     ``data``/``sigma``/``mask`` are ``(y, x)`` cells of size ``cell`` m. ``sigma_m`` = Gaussian
     sigma ``(x, y)`` in metres -- ISCE3's 4 x 37 B-grid pixels are ~1.9-2.6 km of ground range
@@ -469,7 +623,7 @@ def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m
     """
     sx, sy = (s / float(cell) for s in sigma_m)
     sg = (max(sigma_m) if guide_m is None else float(guide_m)) / float(cell)
-    sf = sg if fill_m is None else float(fill_m) / float(cell)
+    sf = [sg] if fill_m is None else [float(f) / float(cell) for f in np.atleast_1d(fill_m)]
     X = np.where(mask, np.asarray(data, float), np.nan)
     S = np.where(mask, np.asarray(sigma, float), np.nan)
     S = np.where(S > 0, S, np.nan)
@@ -493,7 +647,11 @@ def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m
                 S = np.where(out, np.nan, S)
                 G = _guide(X, sg)
     if fill == "plane":
-        P = _plane_fill(np.where(V, X, np.nan), 1.0 / np.where(np.isfinite(S), S, np.inf) ** 2, sf)
+        W_in = 1.0 / np.where(np.isfinite(S), S, np.inf) ** 2
+        if len(sf) == 1:
+            P = _plane_fill(np.where(V, X, np.nan), W_in, sf[0])
+        else:
+            P = _plane_ladder(np.where(V, X, np.nan), W_in, sf, fill_lever)
         if fill_reach_m is not None and V.any():
             P = np.where(ndimage.distance_transform_edt(~V) * float(cell) > float(fill_reach_m), np.nan, P)
         Y = _fill_nearest(np.where(np.isfinite(P), P, G))
@@ -517,14 +675,51 @@ def ionosphere_filter(data, sigma, mask, cell, sigma_m=(2000.0, 2600.0), guide_m
 
     YW = np.where(np.isfinite(Y), Y, 0.0) * W
     W = np.where(np.isfinite(Y), W, 0.0)
+    norm = (kx.sum() * ky.sum()) ** 2 / ((kx * kx).sum() * (ky * ky).sum())
+    if order == 1:
+        screen, var = _local_plane(np.where(np.isfinite(Y), Y, 0.0), W, kx, ky)
+        with np.errstate(invalid="ignore"):
+            return screen, np.sqrt(var * norm)
+    if order != 0:
+        raise ValueError(f"order must be 0 or 1, not {order!r}")
     num = conv(YW, kx, ky)
     den = conv(W, kx, ky)
     den2 = conv(W, kx * kx, ky * ky)
     with np.errstate(invalid="ignore", divide="ignore"):
         screen = num / den
-        sigma_out = np.sqrt((den2 / (kx * kx).sum() / (ky * ky).sum())
-                            / (den / kx.sum() / ky.sum()) ** 2)
+        sigma_out = np.sqrt(den2 / den ** 2 * norm)
     return screen, sigma_out
+
+
+def _local_plane(Y, W, kx, ky):
+    """The final Gaussian made first order: at each cell, the plane through ``Y`` weighted by ``W`` x the separable
+    kernel ``kx`` x ``ky`` (centred, truncated), evaluated at the cell -- a weighted Savitzky-Golay step. And its variance
+    factor e0' M^-1 N M^-1 e0 (M the weighted moments, N the same with the squared kernel), which is ISCE3's
+    ``sum K^2 W / (sum K W)^2`` wherever the weights are symmetric about the cell. Cells beyond the grid weigh nothing."""
+    rx, ry = (kx.size - 1) // 2, (ky.size - 1) // 2
+    tx, ty = np.arange(-rx, rx + 1, dtype=float), np.arange(-ry, ry + 1, dtype=float)
+
+    def corr(a, gx, gy):                  # sum_j g(dx) g(dy) a_j, dx = x_j - x_i in cells
+        return ndimage.correlate1d(ndimage.correlate1d(a, gx, axis=1, mode="constant"), gy, axis=0, mode="constant")
+
+    pq = ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (0, 2))
+    m = {k: corr(W, kx * tx ** k[0], ky * ty ** k[1]) for k in pq}
+    n = {k: corr(W, kx * kx * tx ** k[0], ky * ky * ty ** k[1]) for k in pq}
+    r = [corr(W * Y, kx * tx ** k[0], ky * ty ** k[1]) for k in pq[:3]]
+
+    def sym(d):
+        return np.stack([np.stack([d[0, 0], d[1, 0], d[0, 1]], -1), np.stack([d[1, 0], d[2, 0], d[1, 1]], -1),
+                         np.stack([d[0, 1], d[1, 1], d[0, 2]], -1)], -2)
+
+    M, N = sym(m), sym(n)
+    ok = m[0, 0] > 0
+    screen = np.full(W.shape, np.nan)
+    var = np.full(W.shape, np.nan)
+    if ok.any():
+        Mi = np.linalg.inv(M[ok])
+        screen[ok] = np.einsum("nj,nj->n", Mi[:, 0, :], np.stack(r, -1)[ok])
+        var[ok] = np.einsum("ni,nij,nj->n", Mi[:, 0, :], N[ok], Mi[:, 0, :])
+    return screen, var
 
 
 # ---------------------------------------------------------------------------
@@ -546,15 +741,17 @@ def fault_distance(cells, trace_x, trace_y):
     return best.reshape(X.shape)
 
 
-def split_spectrum_screen(cells_a, cells_b, phase_a, *, valid=None, exclude=None,
+def split_spectrum_screen(cells_a, cells_b, phase_a=None, *, valid=None, exclude=None,
                           min_coherence=0.2, min_pixels_fraction=0.5, sigma_m=(2000.0, 2600.0),
                           unwrap_sigma=3.0, resolution_a=(6.2, 5.3), resolution_b=(50.0, 5.3), fill="guide",
-                          fill_m=None, fill_reach_m=None):
+                          fill_m=None, fill_reach_m=None, fill_lever=(1.5, 3.0), order=0):
     """The dispersive (ionospheric) phase at ``f_A``, filtered, on the cells.
 
     ``cells_a``/``cells_b`` are :func:`gslc_cells` of the same cells for the main (A) and side
     (B) band; ``phase_a`` the caller's unwrapped A phase averaged onto those cells
-    (:func:`cell_average`) -- this is where the fault-aware unwrapping enters. ``valid`` masks
+    (:func:`cell_average`) -- this is where the fault-aware unwrapping enters. Cells made with that phase as their
+    ``phase_model`` (pixel by pixel; the better way near a rupture) need no ``phase_a``: see
+    :func:`dispersive_residual`. ``valid`` masks
     cells to use (e.g. land, and where ``phase_a`` is trusted); ``exclude`` cells to drop
     (e.g. ``fault_distance(...) < 2000``). Cells also need coherence > ``min_coherence`` in
     both bands and at least ``min_pixels_fraction`` of their pixels valid in both.
@@ -566,7 +763,9 @@ def split_spectrum_screen(cells_a, cells_b, phase_a, *, valid=None, exclude=None
     ``dispersive`` estimate and ``nondispersive`` (= phi_A - dispersive) on the cells used,
     ``mask``, and ``residual`` (r, wrapped). ``fill`` is :func:`ionosphere_filter`'s (``"plane"`` for an
     unbiased fill at one-sided edges: a coast along a fault, an excluded fault zone, a swath edge), ``fill_m`` the
-    plane's sigma (m) and ``fill_reach_m`` how far from the data it may extrapolate.
+    plane's sigma (m, or a ladder of them, with ``fill_lever``) and ``fill_reach_m`` how far from the data it may
+    extrapolate; ``order`` the final step's (1: a weighted local plane, which does not lag a gradient where the weights
+    change).
     """
     f_a = float(cells_a.attrs["center_frequency"])
     f_b = float(cells_b.attrs["center_frequency"])
@@ -592,7 +791,7 @@ def split_spectrum_screen(cells_a, cells_b, phase_a, *, valid=None, exclude=None
     looks_b = np.maximum(nb * cell * cell / (resolution_b[0] * resolution_b[1]), 1.0)
     sig = np.hypot(c_a * phase_sigma(ga, looks_a), c_b * phase_sigma(gb, looks_b))
     screen, sig_out = ionosphere_filter(d, sig, use, cell, sigma_m=sigma_m, fill=fill, fill_m=fill_m,
-                                        fill_reach_m=fill_reach_m)
+                                        fill_reach_m=fill_reach_m, fill_lever=fill_lever, order=order)
     dims = ("y", "x")
     return xr.Dataset(
         {"screen": (dims, screen), "sigma": (dims, sig_out),
@@ -602,11 +801,266 @@ def split_spectrum_screen(cells_a, cells_b, phase_a, *, valid=None, exclude=None
          "coherence_a": (dims, ga), "coherence_b": (dims, gb)},
         coords={"y": cells_a.y, "x": cells_a.x},
         attrs={"f_a": f_a, "f_b": f_b, "dispersive_factor": k, "cell": cell,
-               "sigma_m": tuple(sigma_m), "min_coherence": min_coherence, "fill": fill,
-               "fill_m": float(max(sigma_m) if fill_m is None else fill_m),
-               "fill_reach_m": float(3.0 * (max(sigma_m) if fill_m is None else fill_m) if fill_reach_m is None
+               "sigma_m": tuple(sigma_m), "min_coherence": min_coherence, "fill": fill, "order": int(order),
+               "fill_m": (float(max(sigma_m)) if fill_m is None else float(fill_m) if np.ndim(fill_m) == 0
+                          else tuple(float(f) for f in fill_m)),
+               "fill_reach_m": float(3.0 * (max(sigma_m) if fill_m is None else np.max(fill_m)) if fill_reach_m is None
                                      else fill_reach_m),
                "method": "main/side band, matched cells, dispersive-only unwrapping "
                          "(ISCE3 main_diff_ms_band estimator, re-ordered)",
+               "main_band_removed": "per pixel" if "model" in cells_a else "per cell",
+               **({"phase_model": cells_a.attrs["phase_model"]} if "model" in cells_a else {}),
                "convention": "screen is the ionospheric phase at f_A in the "
                              "reference*conj(secondary) convention: subtract it"})
+
+
+# ---------------------------------------------------------------------------
+# 5. A block's main-band integer, from the side band
+# ---------------------------------------------------------------------------
+def _poly_columns(x, y, degree):
+    cols = [np.ones_like(x)]
+    for p in range(1, degree + 1):
+        for q in range(p + 1):
+            cols.append(x ** (p - q) * y ** q)
+    return np.stack(cols, axis=1)
+
+
+def _robust_lstsq(A, y, w0, iterations=30, k=4.685):
+    """Weighted least squares reweighted by Tukey's biweight on the weighted residuals (``k`` scaled MADs). Returns the
+    coefficients, the weights and the formal covariance scaled by the robust residual variance."""
+    s0 = np.sqrt(w0)
+    coef = np.linalg.lstsq(A * s0[:, None], y * s0, rcond=None)[0]
+    w = w0
+    for _ in range(iterations):
+        r = (y - A @ coef) * s0
+        mad = 1.4826 * np.median(np.abs(r - np.median(r)))
+        if not mad > 0:
+            break
+        u = r / (k * mad)
+        w = w0 * np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+        sw = np.sqrt(w)
+        new = np.linalg.lstsq(A * sw[:, None], y * sw, rcond=None)[0]
+        done = np.allclose(new, coef, atol=1e-7)
+        coef = new
+        if done:
+            break
+    keep = w > 0
+    r = (y - A @ coef) * np.sqrt(w)
+    s2 = float((r[keep] ** 2).sum() / max(int(keep.sum()) - A.shape[1], 1))
+    try:
+        cov = s2 * np.linalg.inv((A * w[:, None]).T @ A)
+    except np.linalg.LinAlgError:
+        cov = np.full((A.shape[1], A.shape[1]), np.nan)
+    return coef, w, cov
+
+
+def block_cycles(screen, block, reference, *, along=None, reach_m=12000.0, window_m=20000.0, degree=2,
+                 min_cells=60, min_gap_m=0.0):
+    """Whole cycles to add to ``block``'s main band so that its raw dispersive estimate continues ``reference``'s.
+
+    A region the unwrapper saw on its own -- the block a cut along a rupture isolates, an island -- carries an
+    arbitrary integer in phi_A. Taking the scaled main band out of the wrapped side band wraps away all of each such
+    cycle but ``f_B / (f_A + f_B)`` of it, so a block whose integer is off by ``eps`` carries ``2 pi eps f_B / (f_A +
+    f_B)`` (3.21 eps rad at NISAR's A/B) of extra raw estimate. The ionosphere is continuous across the gap between two
+    blocks, and nothing else in the raw estimate steps there (the deformation is not in it), so its step across the gap
+    measures ``eps``.
+
+    ``screen`` is :func:`split_spectrum_screen`'s output; ``block`` and ``reference`` are boolean ``(y, x)`` masks on
+    its cells holding every cell of each region, used or not (the boundary is measured from them: e.g.
+    ``cell_average`` of a label's indicator, > 0.5). Cells of each within ``reach_m`` of the other and at least
+    ``min_gap_m`` from it are tiled into windows of ``window_m`` along the boundary -- segments of ``along`` (m, on the
+    cells; e.g. the arc length of each cell's nearest trace point) if given, squares otherwise. Each window holding
+    ``min_cells`` of both is fitted with one polynomial of ``degree`` over both blocks plus a constant on ``block``,
+    weighted by each cell's Cramer-Rao variance (full cells assumed: the screen does not keep the pixel counts) and
+    reweighted by Tukey's biweight, because a patch with a local cycle error is 3.21 rad off and must not move the step.
+
+    Returns a dict: ``cycles`` (the median over the windows, rounded), ``estimate`` (that median), ``spread`` (the
+    windows' scaled MAD), ``ambiguous`` (the median more than 0.25 from ``cycles``, a spread over 0.25, or fewer than
+    two windows) and
+    ``windows`` (per window: centre ``x``/``y``, ``estimate``, formal ``sigma``, ``cells_block``/``cells_reference``,
+    the fraction of cells ``kept`` by the reweighting).
+
+    Measured (2026-10-21, ``docs/ionosphere_paper/``, section 6):
+
+    - On fake boundaries through one block of eight NISAR scenes, where the answer is 0, the windows read |e| 0.035 at
+      the median and 0.26 at the 95th percentile (0.15 without D054's ionospheric waves). The median over a boundary's
+      windows read no wrong integer on 565 boundaries.
+    - Most windows past 0.5 sit on real main-band errors: patches 1-3 cycles off, which the side band shows.
+    - Across a rupture whose main band runs around its end (Venezuela A162), it reads +0.02.
+    - On three Panama pairs it finds the range-offset ties one cycle short.
+    - It is biased by up to a few tenths when the ionosphere carries 10-20 km waves along the boundary, or when a third
+      of the cells beside the gap carry local cycle errors. A kriging estimate is a check.
+    """
+    f_a, f_b = float(screen.attrs["f_a"]), float(screen.attrs["f_b"])
+    cell = float(screen.attrs["cell"])
+    step = 2.0 * np.pi * f_b / (f_a + f_b)
+    d = np.asarray(screen["dispersive"].values, float)
+    use = np.asarray(screen["mask"].values, bool) & np.isfinite(d)
+    c_a = f_b * f_b / (f_b * f_b - f_a * f_a)
+    c_b = f_a * f_b / (f_b * f_b - f_a * f_a)
+    sig = np.hypot(c_a * phase_sigma(screen["coherence_a"].values, cell * cell / (6.2 * 5.3)),
+                   c_b * phase_sigma(screen["coherence_b"].values, cell * cell / (50.0 * 5.3)))
+    w0 = 1.0 / np.maximum(sig, 1e-3) ** 2
+    block, reference = np.asarray(block, bool), np.asarray(reference, bool)
+    to_block = ndimage.distance_transform_edt(~block, sampling=cell)
+    to_ref = ndimage.distance_transform_edt(~reference, sampling=cell)
+    in_b = use & block & (to_ref <= reach_m) & (to_ref >= min_gap_m)
+    in_r = use & reference & (to_block <= reach_m) & (to_block >= min_gap_m)
+    sel = in_b | in_r
+    X, Y = np.meshgrid(screen.x.values.astype(float), screen.y.values.astype(float))
+    if along is None:
+        key = (np.floor((X - X[sel].min()) / window_m) * 1e6 + np.floor((Y - Y[sel].min()) / window_m)) if sel.any() \
+            else np.zeros(X.shape)
+    else:
+        a = np.asarray(along, float)
+        sel &= np.isfinite(a)
+        key = np.floor((np.where(np.isfinite(a), a, 0.0) - (np.nanmin(a[sel]) if sel.any() else 0.0)) / window_m)
+    windows = []
+    for k in np.unique(key[sel]):
+        m = sel & (key == k)
+        nb, nr = int((m & in_b).sum()), int((m & in_r).sum())
+        if nb < min_cells or nr < min_cells:
+            continue
+        xc, yc = X[m].mean(), Y[m].mean()
+        A = np.column_stack([_poly_columns((X[m] - xc) / 1e4, (Y[m] - yc) / 1e4, degree), in_b[m].astype(float)])
+        coef, w, cov = _robust_lstsq(A, d[m], w0[m])
+        windows.append(dict(x=float(xc), y=float(yc), estimate=float(-coef[-1] / step),
+                            sigma=float(np.sqrt(cov[-1, -1]) / step), cells_block=nb, cells_reference=nr,
+                            kept=float(np.mean(w > 0))))
+    if not windows:
+        return dict(cycles=None, estimate=np.nan, spread=np.nan, ambiguous=True, windows=[])
+    e = np.array([w["estimate"] for w in windows])
+    med = float(np.median(e))
+    cyc = int(np.round(med))
+    spread = float(1.4826 * np.median(np.abs(e - med)))
+    return dict(cycles=cyc, estimate=med, spread=spread,
+                ambiguous=bool(abs(med - cyc) > 0.25 or spread > 0.25 or e.size < 2), windows=windows)
+
+
+
+# ---------------------------------------------------------------------------
+# 6. The main band's integers patch by patch, from the side band
+# ---------------------------------------------------------------------------
+def cycle_patches(base, alternative, blocks, min_block_pixels=1000):
+    """Patches where ``alternative`` -- another unwrapping of the same interferogram, on the same grid -- differs from
+    ``base`` by whole cycles, beyond each block's own modal difference.
+
+    ``blocks`` is a list of boolean masks (the regions of the base, e.g. the north block and the tied south block); in
+    each, the alternative's most common integer difference is its block offset (another reference or tie) and is taken
+    out, so only local disagreements are left. Returns ``(labels, delta)``: ``labels`` > 0 numbers the patches
+    (connected pixels of one difference), ``delta[p - 1]`` the alternative's cycles minus the base's in patch ``p``.
+    """
+    base = np.asarray(base, float)
+    k = np.round((np.asarray(alternative, float) - base) / (2.0 * np.pi))
+    D = np.zeros(base.shape, np.int32)
+    for blk in blocks:
+        m = np.asarray(blk, bool) & np.isfinite(k)
+        if m.sum() < min_block_pixels:
+            continue
+        kk = k[m].astype(np.int64)
+        mode = int(np.bincount(kk - kk.min()).argmax() + kk.min())
+        D[m] = kk - mode
+    labels = np.zeros(base.shape, np.int64)
+    delta = []
+    for v in np.unique(D[D != 0]):
+        lab, n = ndimage.label(D == v)
+        labels[lab > 0] = lab[lab > 0] + len(delta)
+        delta += [int(v)] * n
+    return labels, np.asarray(delta, np.int64)
+
+
+def patch_cycles(screen, patches, x, y, valid, *, reference=None, min_pixels=40, min_fraction=0.1, k=4.685):
+    """Whole cycles to add to the main band in each of ``patches``, read from the side band.
+
+    A patch whose main-band integer is off by ``n`` moves the raw dispersive estimate of every cell it covers by
+    ``-2 pi f_B / (f_A + f_B) n`` (3.21 rad per cycle at NISAR's A/B) times the share of the cell's main-band pixels it
+    holds. The ionosphere is smooth across it, so the raw estimate's departure from a smooth ``reference`` (default the
+    screen itself) over the patch's cells, regressed on those shares, reads ``n``: Cramer-Rao weights, Tukey's biweight.
+
+    ``screen`` is :func:`split_spectrum_screen`'s output, made without a fault-zone exclusion so that its raw estimate
+    covers the patches near a trace (its ``dispersive``, ``mask`` and coherences are used); ``reference`` a smooth screen
+    on the same cells, e.g. the production one, made with the exclusion. ``patches`` are integer labels (> 0) on the main
+    band's own grid ``y`` x ``x`` (pixel centres), e.g. from :func:`cycle_patches`; ``valid`` that grid's pixels the
+    cells' main-band phase was averaged over. Patches under ``min_pixels`` are skipped, and cells holding less than
+    ``min_fraction`` of a patch do not count. Returns one dict per patch read: ``patch``, ``pixels``, ``cells``,
+    ``cycles`` (the estimate, to add to the base) and ``sigma`` (its standard error), NaN where no cell is usable.
+    """
+    from scipy import sparse
+
+    f_a, f_b = float(screen.attrs["f_a"]), float(screen.attrs["f_b"])
+    step = 2.0 * np.pi * f_b / (f_a + f_b)
+    cell = float(screen.attrs["cell"])
+    xc, yc = screen.x.values, screen.y.values
+    raw = np.asarray(screen["dispersive"].values, float)
+    ref = screen["screen"] if reference is None else reference
+    ref = np.asarray(getattr(ref, "values", ref), float)
+    use = np.asarray(screen["mask"].values, bool) & np.isfinite(raw) & np.isfinite(ref)
+    e = raw - ref
+    if use.any():
+        e = e - np.median(e[use])
+    if "coherence_a" in screen and "coherence_b" in screen:     # each cell's Cramer-Rao sigma, full cells (as block_cycles)
+        c_a = f_b * f_b / (f_b * f_b - f_a * f_a)
+        c_b = f_a * f_b / (f_b * f_b - f_a * f_a)
+        sig = np.hypot(c_a * phase_sigma(screen["coherence_a"].values, cell * cell / (6.2 * 5.3)),
+                       c_b * phase_sigma(screen["coherence_b"].values, cell * cell / (50.0 * 5.3)))
+    else:
+        sig = np.asarray(screen["sigma"].values, float)
+    ix = np.floor((np.asarray(x, float) - (xc[0] - cell / 2)) / cell).astype(np.int64)
+    iy = np.floor(((yc[0] + cell / 2) - np.asarray(y, float)) / cell).astype(np.int64)
+    IX, IY = np.meshgrid(ix, iy)
+    inside = (IX >= 0) & (IX < xc.size) & (IY >= 0) & (IY < yc.size)
+    cidx = np.where(inside, IY * xc.size + IX, 0)
+    valid = np.asarray(valid, bool) & inside
+    nvalid = np.bincount(cidx[valid], minlength=xc.size * yc.size)
+    P = np.asarray(patches, np.int64)
+    sel = (P > 0) & valid
+    npatch = int(P.max()) if P.size else 0
+    sizes = np.bincount(P[sel], minlength=npatch + 1)
+    A = sparse.coo_matrix((np.ones(int(sel.sum())), (P[sel], cidx[sel])),
+                          shape=(npatch + 1, xc.size * yc.size)).tocsr()
+    ef, uf, sf = e.ravel(), use.ravel(), sig.ravel()
+    out = []
+    for p in np.flatnonzero(sizes >= min_pixels):
+        if p == 0:
+            continue
+        row = A.getrow(p)
+        c = row.indices
+        f = row.data / np.maximum(nvalid[c], 1)
+        ok = uf[c] & (f >= min_fraction)
+        rec = dict(patch=int(p), pixels=int(sizes[p]), cells=int(ok.sum()), cycles=np.nan, sigma=np.nan)
+        if ok.sum() >= 3:
+            f, ee = f[ok], ef[c][ok]
+            w0 = 1.0 / np.maximum(sf[c][ok], 0.3) ** 2
+            w = w0
+            n = -np.sum(w * f * ee) / (step * np.sum(w * f * f))
+            for _ in range(20):
+                r = ee + step * n * f
+                s = 1.4826 * np.median(np.abs(r)) + 1e-12
+                u = r / (k * s)
+                w = w0 * np.where(np.abs(u) < 1.0, (1.0 - u * u) ** 2, 0.0)
+                if not w.any():
+                    break
+                new = -np.sum(w * f * ee) / (step * np.sum(w * f * f))
+                done = abs(new - n) < 1e-4
+                n = new
+                if done:
+                    break
+            r = ee + step * n * f
+            s = 1.4826 * np.median(np.abs(r - np.median(r)))
+            rec.update(cycles=float(n), sigma=float(s / (step * np.sqrt(np.sum(f * f)))))
+        out.append(rec)
+    return out
+
+
+def patch_verdict(cycles, sigma, delta, cells, *, min_cells=5, max_sigma=0.2, tol=0.4, z=2.5):
+    """Which of two unwrappings the side band backs in a patch: ``"alternative"`` if the reading lies within ``tol`` of the
+    alternative's ``delta`` and ``z`` standard errors past the midpoint toward it, ``"base"`` the same toward 0, else
+    ``"undecided"`` (too few cells, too uncertain, or a reading that backs neither)."""
+    if not (np.isfinite(cycles) and np.isfinite(sigma)) or cells < min_cells or sigma > max_sigma or delta == 0:
+        return "undecided"
+    toward = (cycles - 0.5 * delta) * np.sign(delta)
+    if abs(cycles - delta) < tol and toward > z * sigma:
+        return "alternative"
+    if abs(cycles) < tol and -toward > z * sigma:
+        return "base"
+    return "undecided"
