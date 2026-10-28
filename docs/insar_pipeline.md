@@ -1,16 +1,16 @@
 # Our NISAR InSAR pipeline, end to end, and how it differs from the ISCE3 PR products
 
-*Written 2026-10-14. Covers the coseismic processing used for Panama (D141, A004) and the Venezuela rebuild (A061,
-A162, D054, D126). Numbers are from the measurements recorded in `CLAUDE.md` and the per-folder READMEs; where a step
-has a version number (v3, v6) it is the pipelines' stage name.*
+*Written 2026-10-14, updated 2026-10-28. Covers the coseismic processing used for Panama (D141, A004, D040, A076) and
+the Venezuela rebuild (A061, A162, D054, D126). Numbers are from the measurements recorded in `CLAUDE.md` and the
+per-folder READMEs; where a step has a version number (v3, v6, v9) it is the pipelines' stage name.*
 
 ## In short
 
 What we do differently from the PR GUNW, and why:
 
 1. **Registration.** We form each pair from ASF's date-1 GSLC and our own date-2 GSLC, geocoded onto the same grid with
-   a measured registration field. Two ASF GSLCs as downloaded are misregistered by about a resolution cell by their own
-   TEC corrections.
+   a registration field built from pixel offsets. Two ASF GSLCs as downloaded are misregistered by about a resolution
+   cell by their own TEC corrections.
 2. **The rupture.** We cut a ±200 m strip along the mapped trace before unwrapping, so the unwrapper never crosses the
    rupture. A block that the cut isolates is either tied by pixel offsets or given its own offset in the inversion.
 3. **The ionosphere.** We unwrap only band A. The side band enters through a residual that contains no deformation,
@@ -25,10 +25,13 @@ What we do differently from the PR GUNW, and why:
 
 - **ASF PR GSLCs** (L2, 5 m posting, frame grids): band A (40 MHz at f_A = 1239 MHz) and band B (5 MHz side band at
   f_B = 1293.5 MHz). Each carries a per-product TEC and solid-earth-tide (SET) geolocation correction.
-- **ASF PR RSLCs** of the second date, to geocode ourselves.
+- **ASF PR RSLCs** of both dates: the offsets are measured between them, and we geocode the second date's.
 - **The NISAR DEM**, staged per frame (`dem.stage_nisar_dem`).
-- **A mapped fault trace**: Panama, the main trace drawn in Google Earth on the slant-range offset step; Venezuela,
-  `Venezuela_fault_trace_2.kml`.
+- **A mapped fault trace**: Venezuela, `Venezuela_fault_trace_2.kml`. Panama, the user's drawings:
+  - `rupture_trace_D141_drawn.json`: the main trace, drawn in Google Earth on the slant-range offset step (A004's cut);
+  - `A076_panama/rupture_trace_20261020.json`: drawn on east and up from the A076 and D040 / D141 pixel offsets, the cut of
+    D141, D040 and A076 since v8. Its main, five lines where the tracks disagree and the Azuero strand's NW stub are cut,
+    and the East lens is kept as its own region.
 
 ## The pipeline, step by step
 
@@ -42,32 +45,56 @@ What we do differently from the PR GUNW, and why:
 - **What we do.** Keep ASF's date-1 GSLC. Geocode the date-2 RSLC with `geocode_rslc` (our port of ISCE3 v0.25.16's
   GSLC workflow; 99.80% / 99.87% of pixels bit-identical to ASF's own product in bands A / B), onto date 1's grid
   (`like=`), with `tec_file=None`, `solid_earth_tides=False` and a `RegistrationField`:
-  date 1's own TEC+SET shift plus the measured offsets.
-- **The offsets** come from `roff.py` + `ampcor.py`, our numpy port of ISCE3's ROFF (PyCuAmpcor is GPU-only): 99.7–99.9%
-  of windows bit-identical to the UR ROFF on the same inputs. For band B the same metres are converted to B's pixels,
-  with B's own TEC shift (TEC scales by (f_A/f_B)² = 0.917; SET does not).
+  date 1's own TEC+SET shift plus the offsets below.
+- **The offsets.** Our PR-pair ROFF (`roff.py` + `ampcor.py`, our numpy port of ISCE3's ROFF, since PyCuAmpcor is GPU-only;
+  99.7–99.9% of windows bit-identical to the UR ROFF on the same inputs) covers the rupture in every pair:
+  - A004, D040 and A076: the ROFF everywhere, on a coarse full-frame lattice (every 120 lines and samples) plus the PGE's
+    lattice within 13 km of the trace;
+  - D141: the ROFF over frame 085, which holds the rupture; frame 084 takes the pair's GUNW `pixelOffsets`;
+  - Venezuela: the ROFF within 10 km of the trace and the GUNW `pixelOffsets` beyond, joined by a 3 km cosine taper
+    (`frame_registration.py`).
+  - ⚠️ The GUNW `pixelOffsets` are not measured offsets. They are ISCE3's one quadratic per frame (below), so where they
+    are used the registration follows only that quadratic.
+  - For band B the same metres are converted to B's pixels, with B's own TEC shift (TEC scales by (f_A/f_B)² = 0.917;
+    SET does not).
 - **Mixing a corrected GSLC with an uncorrected one is safe**: the corrections only move where pixels are sampled. Both
   ISCE3 and our port flatten the phase with the uncorrected range.
-- **The ISCE3 GUNW** coregisters the two RSLCs in radar geometry (geometry, refined with dense offsets) and geocodes
-  the result, so it is not misregistered either. The difference is where the pair is made: ours on the 5 m GSLC grid.
+- **The carrier term.** Following an along-track shift resamples the Doppler carrier with it: `RegistrationField`
+  re-ramps it at the shifted position, and so does ISCE3's resampler. That is right for motion and geolocation.
+  - For the part of the shift the ionosphere causes, it leaves −2π f_dc s / V_g in the phase (s the shift on the ground;
+    ~0.9 rad, 17 mm of LOS per metre). This is Joughin's carrier error (nisarErrors).
+  - It scales with frequency, so no split-spectrum screen removes it.
+  - In our pairs it is 0.6–3.8 mm rms after the inversion's cubic ramps, on samples more than 15 km from the trace
+    (Venezuela model 4d, Panama pm3; 2026-10-26). Closer in it is untested.
+  - The screen's along-track gradient predicts it: on ice, `~/Documents/data/antarctica_t094_f129/README.md`, item 8.
+- **The ISCE3 GUNW** coregisters the two RSLCs in radar geometry and geocodes the result.
+  - A rubbersheet refines the geometry. Every Panama and Venezuela GUNW on disk takes ISCE3's polynomial branch
+    (`polyfitting: True`, degree 2): one quadratic per frame and offset component, fitted to dense offsets with outlier
+    removal.
+  - Their `pixelOffsets` layers are that quadratic: a cubic fits them to ≤ 3 mm.
+  - So a GUNW pair is registered at the frame's scale but cannot follow a coseismic offset step.
+  - The Antarctic GUNWs take the dense branch instead, a filtered offset field.
+  - The other difference is where the pair is made: ours on the 5 m GSLC grid.
 
 ### 2. Interferograms
 
 - `GSLCStack.form_interferograms(pairs="sequential", looks=10, convolution="Gaussian", sigma=...)`: reference ×
   conj(secondary) at full resolution, multilooked 10 × 10 onto a **50 m** lattice anchored to absolute coordinates, with
   Gaussian weights (σ = 5 pixels = 25 m for Panama; σ = 10 pixels for Venezuela). Coherence from the same looks.
-- **Frames are merged before forming** (Panama 084 + 085, A004 005 + 006, Venezuela's two frames per track). There is
-  one interferogram across the frame boundary, so one unwrapping and one integer.
+- **Frames are merged before forming** (D141 and D040 084 + 085, A004 and A076 005 + 006, Venezuela's two frames per
+  track). There is one interferogram across the frame boundary, so one unwrapping and one integer.
 - **The GUNW** posts at 80 m and processes each frame on its own. Each frame then carries its own integer and ramp
   (Venezuela's GUNW frames disagree by up to 4.6 cm).
 
 ### 3. Masks and regions
 
 - **Water**: `mask_water(resolution="f")` (full-resolution coastline). Nothing else is masked: **no coherence mask**.
-- **The fault cut** (coseismic pairs only): a ±200 m NaN strip along the trace. Panama cuts the whole drawn main trace
-  (not the secondary strands). Venezuela cuts only the airport stretch (arc 180–191 km of trace_2).
+- **The fault cut** (coseismic pairs only): a ±200 m NaN strip along the trace. Panama cuts the whole drawn main trace,
+  not the secondary strands; since v8 (D141, D040, A076) it also cuts the lines drawn as the main's branches. Venezuela
+  cuts only the airport stretch (arc 180–191 km of trace_2).
 - **Regions**: `remove_unconnected_regions` (regions under 10 km² go), then the region rule: keep the largest region,
-  the block(s) the fault cut isolates, and, in Panama, the big islands (Coiba, Cébaco). Every other region is dropped.
+  the block(s) the fault cut isolates, and, in Panama, the big islands (Coiba, Cébaco) and, since v8, the East lens
+  (cut off by its splay). Every other region is dropped.
 - **The GUNW** masks water, invalid and partially focused samples, and flags anomalies; it does not cut the rupture.
 
 ### 4. Filtering and unwrapping
@@ -79,7 +106,7 @@ What we do differently from the PR GUNW, and why:
 
 ### 5. Tying a cut-off block (Panama)
 
-- The block the cut isolates (D141's and A004's south blocks) is unwrapped on its own, with an arbitrary integer. We tie
+- The block the cut isolates (each Panama track's south block) is unwrapped on its own, with an arbitrary integer. We tie
   it with our ROFF slant-range offsets: `m = (4π/λ) · ROFF − φ` holds no deformation, only the block's whole cycles plus
   twice the ionosphere (the offsets see it with the opposite sign). Planes fitted to m at 6–12 km on each side are
   extrapolated to the trace, and the nearest integer is applied.
@@ -137,7 +164,7 @@ troposphere) and φ_io the ionosphere at f_A. What differs is how the bands are 
   **only in band A's near-range strip** (within 11 km of the near-range edge; 12 km on D141, measured from the masks:
   the strip is ≤ 10.1 km, ≤ 11.05 km on D141). The partially focused start of a datatake is kept: A004's rupture lies in
   one, and dropping it extrapolated the screen 20–40 km.
-  `gslc_cells(phase_model=)` (2026-10-21, not used by the pipelines) can also take our unwrapped band A out of every
+  `gslc_cells(phase_model=)` (2026-10-21; Panama's v9 screens use it, v6 does not) takes our unwrapped band A out of every
   pixel of both bands before the sums, each scaled to its frequency, so steep fringes inside a cell neither decorrelate
   it nor weight the bands' cell phases differently. North of D141's trace it doubles the cells kept within 5 km
   (5 → 20% at 0.5–1 km, 18 → 35% at 2–5 km). The multilook and Goldstein filter of the unwrapped band A reach the screen
@@ -184,9 +211,12 @@ What this buys, and what it still depends on:
 **The GUNW's split spectrum** (ISCE3 `main_diff_ms_band`, `d = 0.511 φ_A + 11.61 (φ_A − φ_B)`):
 
 1. both bands are unwrapped, and the band difference, which still carries 4.4% of the deformation, is unwrapped on
-   its own;
-2. a second pass corrects φ_A by whole cycles against a ~2 km low-pass of the non-dispersive field, which near a
-   rupture reads the deformation as cycle errors (3.2 rad of screen per false cycle);
+   its own. Both are bridged across gaps by the median difference at the nearest boundary pixels.
+2. two correction passes run (`unwrap_correction: True` in every product). Near a rupture they read the deformation's
+   curvature as cycle errors, 3.21 rad of screen per false main-band cycle:
+   - first, each unwrapped field is rounded by whole cycles against its own low-pass (σ ≈ 2.0 × 2.6 km);
+   - then φ_A is rounded against the first pass's filtered non-dispersive + dispersive estimate, and the band difference
+     against its prediction.
 3. band A is decimated to band B's columns by stride, a constant ~9 m range offset;
 4. the two bands have very different footprints (40 m vs 325 m);
 5. the filter fills gaps with ISCE3's zero-order guide.
@@ -206,14 +236,14 @@ The result is a sign-flipped copy of the deformation near ruptures. Within 10 km
 
 | | ISCE3 PR GUNW | Ours |
 |---|---|---|
-| Pair | RSLCs coregistered in radar geometry | ASF date-1 GSLC + our date-2 GSLC on its grid, registration field from measured offsets |
+| Pair | RSLCs coregistered in radar geometry: geometry + one quadratic per frame fitted to dense offsets | ASF date-1 GSLC + our date-2 GSLC on its grid; registration field from our ROFF (the GUNW's quadratic on D141's frame 084 and beyond 10 km of Venezuela's traces) |
 | Posting | 80 m | 50 m (10 × 10 looks on 5 m GSLC pixels, Gaussian) |
 | Frames | each on its own | merged before forming, one unwrapping |
 | Partially focused samples | dropped (near-range strip, datatake start) | kept in the data; dropped from the screen's cells only in band A's near-range strip |
 | Rupture | unwrapped across | ±200 m cut; isolated block tied by offsets or given its own offset |
 | Masks | water, validity, anomalies; coherence and components layers | water only |
 | Unwrapping | ISCE3, per frame | SNAPHU smooth on the Goldstein-filtered 50 m interferogram |
-| Ionosphere | both bands unwrapped, band difference unwrapped, pass-2 cycle corrections, decimated band A, zero-order fill | band A only; deformation-free residual on identical cells; no cycle corrections; 2 km fault zone filled; plane fill |
+| Ionosphere | both bands unwrapped, band difference unwrapped, both bridged, two cycle-correction passes, decimated band A, zero-order fill | band A only; deformation-free residual on identical cells; no cycle corrections; 2 km fault zone filled; plane fill |
 | Ionosphere in the phase | separate layer, not applied | subtracted |
 
 ## How well it works
@@ -259,6 +289,9 @@ The result is a sign-flipped copy of the deformation near ruptures. Within 10 km
   them too. The cause is not established.
 - **The filter's own uncertainty** (ISCE3's output sigma, 21–23 mm everywhere) exceeds every measured small-scale
   rms, so it cannot say whether a feature is noise.
+- **The carrier term** (§1) stays in our phase wherever the registration follows an ionospheric along-track shift. Beyond
+  15 km of the trace the inversion's cubic ramps leave 0.6–3.8 mm of it. Within 15 km, where the field follows the ROFF,
+  it is untested.
 
 ## Where things are
 
@@ -266,11 +299,26 @@ The result is a sign-flipped copy of the deformation near ruptures. Within 10 km
   (offsets), `stack.py` / `interferogram.py` (forming, Goldstein, masks, regions), `unwrap.py` (SNAPHU, `to_los`),
   `split_spectrum.py` (the screen), `los.py`.
 - **Pipelines**:
-  - Panama: `~/Documents/data/D141_panama/scripts/panama_pipeline.py` (`TRACK=D141|A004`). Stages `igrams clean3
-    unwrap3 tie3 iono6 los6` (and `keep6` for D141).
+  - Panama: `~/Documents/data/D141_panama/scripts/panama_pipeline.py` (`TRACK=D141|A004|D040|A076`).
+    - v6: stages `igrams clean3 unwrap3 tie3 iono6 los6` (and `keep6` for D141).
+    - v9, the current screens (`run_v9.sh TRACK`), for D141, D040 and A076: v8's cut
+      (`TRACE_FILE=…/rupture_trace_20261020.json V_CUT=v8`), then `unwrap9m patch9 iono9 los9 compare9` with `V_SCREEN=v9`.
+    - A004's v9 (`run_v9_a004.sh`) is the per-pixel screen on its v3 cut and offset tie: `V_CUT=v3`, stages
+      `patch9 iono9 los9`.
   - Venezuela: `~/Documents/data/Venezuela_reprocess/scripts/vz_pipeline.py T ...`. Stages `igrams clean3 unwrap3
     iono6 los_iono6` for the three airport tracks; D054, with no cut, screens its `reg` unwrapping.
-  - Registration: `frame_registration.py` (Venezuela), `A004_panama/scripts/a004_registration.py` and the D141
-    equivalents.
-- **Products** (screen version v6): Panama `workspace_reg/*_v6k_s5` (D141), `workspace_reg_005_006/*_v6_s5` (A004);
-  Venezuela `workspace/{unwrapped,los}_{T}_iono6`. Each screen's cells are `iono_split_spectrum_*.nc`.
+  - Registration:
+    - `frame_registration.py` (Venezuela): the ROFF band plus the GUNW far field.
+    - `a004_registration.py`, `d040_registration.py`, `a076_registration.py`: the ROFF only.
+    - D141's fields: `D141_panama/ancillary/registration_084*.npz` (from the GUNW) and `registration_085_roff*.npz` (the
+      ROFF).
+- **Products**:
+  - Panama v9, `*_v9_s5`: in `D141_panama/workspace_reg/`, `D040_panama/workspace_reg_084_085/` and
+    `{A004,A076}_panama/workspace_reg_005_006/`. Earlier versions are kept beside them; pm2 reads v8.
+  - Venezuela v6: `workspace/{unwrapped,los}_{T}_iono6`.
+  - Each screen's cells are `iono_split_spectrum_*.nc`.
+- **The Antarctic run** (`~/Documents/data/antarctica_t094_f129/`; its README is the reference) is the same recipe with
+  no fault, on Joughin's nisarErrors pairs.
+  - The registration field is the GUNW's own `pixelOffsets`. There these are the dense, filtered field ISCE3 applied.
+  - Band A's integers come from the GUNW's unwrapped phase, taken out per pixel (`phase_model=`).
+  - The side band ties the components (`block_cycles`).

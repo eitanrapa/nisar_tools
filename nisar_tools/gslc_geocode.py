@@ -166,10 +166,17 @@ class RegistrationField:
     coherence. Because NISAR keeps the ~950 Hz Doppler carrier in its SLCs,
     an along-track misregistration of ``dt`` also biases the interferogram's
     phase by ``-2 pi f_dc dt``, ~1.7 cm of LOS per metre at L-band. The GUNW
-    avoids both by resampling its secondary to measured dense offsets
-    ("rubbersheeting"); this is the same thing for a GSLC: geocode the
-    secondary at its geometric position plus the measured offsets, while the
-    phase is still flattened by the geometric range.
+    avoids both by resampling its secondary to offsets ("rubbersheeting": a
+    dense field, or, in the solid-earth PR products, one quadratic per frame
+    fitted to the dense offsets); this is the same thing for a GSLC: geocode
+    the secondary at its geometric position plus the measured offsets, while
+    the phase is still flattened by the geometric range.
+
+    The carrier is re-ramped at the shifted position. That avoids the bias for
+    geolocation, timing and motion, but not for the ionosphere's along-track
+    shift: the part of the field that follows it leaves ``-2 pi f_dc dt`` in
+    the phase, as it does in the GUNW (Joughin's "carrier error"). The term
+    scales with frequency, so no split-spectrum screen removes it.
     """
 
     def __init__(self, x, y, lines, samples, description=None):
