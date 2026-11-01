@@ -34,6 +34,7 @@ existing band-A stores makes the band-A half free.
 from __future__ import annotations
 
 import argparse
+import glob
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -115,7 +116,9 @@ def find_granules(track_id: str, root, frame=None, product: str = "GSLC"):
     }
 
     found = {}
-    for path in root.rglob("*.h5"):
+    # glob, not Path.rglob: the raw product folders are symlinks to the RAID
+    # (since 2026-10-29), and rglob does not descend into linked folders.
+    for path in map(Path, glob.glob(str(root / "**" / "*.h5"), recursive=True)):
         g = GranuleName.parse(path)
         if g is None or g.product != product:
             continue

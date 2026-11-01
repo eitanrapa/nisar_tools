@@ -13,3 +13,6 @@ workdir/
 # macOS
 .DS_Store
 docs/ionosphere_paper.zip
+
+# Claude Code local settings
+.claude/
