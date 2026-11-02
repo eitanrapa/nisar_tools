@@ -119,7 +119,7 @@ What we do differently from the PR GUNW, and why:
   - On fake boundaries in 8 scenes, no tie read a wrong integer.
   - It finds the offset ties of D141, D040 and A076 (v8) one cycle short: they should be 27, 21 and −22, not 26, 20
     and −23.
-  - Details and caveats: `docs/ionosphere_paper/` (section 6, README).
+  - Details and caveats: section 6 of the ionosphere paper draft (kept outside this repository).
 - **v9 (2026-10-21; D141, D040, A076; v8 untouched).** v8's cut unwrapping with the side band's ties, then the screen from
   per-pixel cells (`panama_pipeline.py` stages unwrap9m, patch9, iono9, los9, compare9).
   - The south blocks take +1 cycle (27, 21, −22). Read again on the v9 screens: D141 +0.23 (kriging −0.12), A076
@@ -275,10 +275,10 @@ The result is a sign-flipped copy of the deformation near ruptures. Within 10 km
   42 / 18% of the cells at 0–1 / 1–2 / 2–4 / 4–6 km north of the trace (≤ 3% beyond), each cycle 3.21 rad of raw
   estimate. The production screen moves ≤ 2.4 mm when those cells take v5's integers (its 10 km fill averages them
   away); narrower fills move 7–16 mm. So near a trace the screen is limited by band A's local integers, and the wide fill
-  plus the 2 km exclusion are the robust choice until they can be checked. Paper Section 7,
-  `docs/ionosphere_paper/experiments/run_d141_integers.py`. v9 (§5) checks them patch by patch where an alternative
-  unwrapping disagrees. It repaired one 26 km² patch on D141, but within ~2 km of the trace most disagreements stay
-  undecided.
+  plus the 2 km exclusion are the robust choice until they can be checked. Paper Section 7 and its experiment
+  `run_d141_integers.py` (the draft is kept outside this repository). v9 (§5) checks them patch by patch where an
+  alternative unwrapping disagrees. It repaired one 26 km² patch on D141, but within ~2 km of the trace most
+  disagreements stay undecided.
   - ⚠️ A north-side excess of cells +0.5 cycle above the screen in all three v8 screens was mostly an artefact of
     summing steep fringes per cell. With per-pixel cells it drops from +26–34 to +6–8 points at 2–4 km. Only on D141 was
     it shown to be cycles.

@@ -880,7 +880,7 @@ def block_cycles(screen, block, reference, *, along=None, reach_m=12000.0, windo
     ``windows`` (per window: centre ``x``/``y``, ``estimate``, formal ``sigma``, ``cells_block``/``cells_reference``,
     the fraction of cells ``kept`` by the reweighting).
 
-    Measured (2026-10-21, ``docs/ionosphere_paper/``, section 6):
+    Measured (2026-10-21; section 6 of the ionosphere paper draft, kept outside this repository):
 
     - On fake boundaries through one block of eight NISAR scenes, where the answer is 0, the windows read |e| 0.035 at
       the median and 0.26 at the 95th percentile (0.15 without D054's ionospheric waves). The median over a boundary's

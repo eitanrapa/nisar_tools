@@ -12,6 +12,10 @@ workdir/
 
 # macOS
 .DS_Store
+
+# The ionosphere paper draft (experiments, results, figures and the GRSL
+# letter) is kept local, out of the public repository.
+docs/ionosphere_paper/
 docs/ionosphere_paper.zip
 
 # Claude Code local settings
