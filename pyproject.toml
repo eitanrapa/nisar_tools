@@ -44,11 +44,15 @@ gslc = ["pysolid"]
 # fails, whereas conda-forge's does not -- environment.yml installs it there.
 # Only the GSLC writer imports osgeo (lazily); rasterio vendors its own GDAL.
 gdal = ["gdal"]
-# The slip inversion moved to its own package (slipsolve-python). Only
-# LOSStack.to_observations touches it, and only when called, so it is an
-# extra rather than a dependency.
-slip = ["slipsolve-python"]
+# Only LOSStack.to_observations uses slipsolve, and only when called, so it is
+# an extra rather than a dependency. It is not on PyPI: install it from GitHub.
+slip = ["slipsolve-python @ git+https://github.com/eitanrapa/SlipSolve-Python.git"]
 dev = ["pytest", "pytest-xdist", "dask[diagnostics]"]
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
+
+[project.urls]
+Documentation = "https://eitanrapa.github.io/nisar_tools/"
+Repository = "https://github.com/eitanrapa/nisar_tools"
 
 [tool.setuptools.packages.find]
 include = ["nisar_tools*"]

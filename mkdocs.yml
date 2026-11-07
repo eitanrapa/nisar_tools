@@ -1,0 +1,94 @@
+site_name: nisar_tools
+site_description: Out-of-core, object-oriented NISAR InSAR processing on lazy xarray and dask.
+site_url: https://eitanrapa.github.io/nisar_tools/
+repo_url: https://github.com/eitanrapa/nisar_tools
+repo_name: eitanrapa/nisar_tools
+edit_uri: edit/main/docs/
+
+validation:
+  anchors: warn
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: numpy
+            show_source: false
+            members_order: source
+            filters: ["!^_"]
+            show_if_no_docstring: true
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            show_root_heading: true
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Getting started: getting-started.md
+  - User guide:
+      - Conventions: guide/conventions.md
+      - Finding and reading products: guide/inputs.md
+      - Making GSLCs from RSLCs: guide/rslc-to-gslc.md
+      - Workspaces: guide/workspaces.md
+      - Interferograms: guide/interferograms.md
+      - Unwrapping and cleaning: guide/unwrapping.md
+      - Ionosphere: guide/ionosphere.md
+      - Pixel offsets: guide/offsets.md
+      - Line of sight and export: guide/los-and-export.md
+      - Merging frames: guide/merging.md
+  - The InSAR pipeline: insar_pipeline.md
+  - API reference:
+      - Overview: api/index.md
+      - Products and inputs: api/products.md
+      - Processing stages: api/stages.md
+      - Geocoding RSLCs: api/geocoding.md
+      - Offsets: api/offsets.md
+      - Ionosphere: api/ionosphere.md
+      - Utilities: api/utilities.md
+  - Development: development.md
