@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(not (RSLC_PATH and DEM_PATH),
 
 
 def _format_diff():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "gslc_format_diff.py"
+    path = Path(__file__).resolve().parent / "gslc_format_diff.py"
     spec = importlib.util.spec_from_file_location("gslc_format_diff", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -3,7 +3,7 @@
 
 Usage::
 
-    python scripts/gslc_format_diff.py REFERENCE.h5 CANDIDATE.h5 [--values]
+    python tests/gslc_format_diff.py REFERENCE.h5 CANDIDATE.h5 [--values]
 
 Walks both files and reports, per object: presence, dtype, rank, chunking,
 filter pipeline, fill value, and every attribute's name and type. Shapes are
