@@ -74,7 +74,7 @@ def test_hash_is_order_independent(tmp_path):
 
 # -- overwriting a store that is still an input -----------------------------
 #
-# ``store`` deletes the target before ``to_zarr`` computes, so a dataset that
+# `store` deletes the target before `to_zarr` computes, so a dataset that
 # still reads that store would race the delete. It does not fail loudly on its
 # own -- it writes a correctly-shaped array with a varying fraction of pixels
 # silently turned to NaN -- so it has to be refused up front.
@@ -94,7 +94,7 @@ def test_overwrite_from_the_store_itself_is_refused(tmp_path):
 
 
 def test_refusal_survives_a_rebuilt_dataset(tmp_path):
-    """``merge`` rebuilds the Dataset, which drops xarray's ``encoding``.
+    """`merge` rebuilds the Dataset, which drops xarray's `encoding`.
 
     The lazy data is what makes the write unsafe, so that is what is checked.
     """
@@ -110,7 +110,7 @@ def test_refusal_survives_a_rebuilt_dataset(tmp_path):
 
 
 def test_unchunked_lazy_read_is_also_refused(tmp_path):
-    """``chunks=None`` opens lazily without dask; it still reads on write."""
+    """`chunks=None` opens lazily without dask; it still reads on write."""
     ws = Workspace(tmp_path)
     ws.store("slc_stack", _complex_ds(), {"v": 1})
 
@@ -140,8 +140,8 @@ def test_overwrite_is_allowed_when_nothing_reads_the_target(tmp_path):
 
 
 def test_an_interrupted_store_is_recomputed_not_reused(tmp_path):
-    """A store with chunk files missing -- a write killed midway, before the fix -- matches on its
-    params hash but must not be handed back: its missing chunks read as junk (A004, 2026-10-14)."""
+    """A store with chunk files missing (a write killed midway, or a damaged store) matches on its
+    params hash but must not be handed back: its missing chunks read as junk."""
     ws = Workspace(tmp_path)
     ds = _complex_ds()
     ws.store("igrams", ds, {"v": 1})
@@ -221,7 +221,7 @@ def test_source_detection_is_cheap_on_a_large_graph(tmp_path):
 def test_reopened_stage_keeps_its_crs(tmp_path):
     """Zarr has no coord/variable distinction, so spatial_ref comes back wrong.
 
-    rioxarray then reports ``rio.crs is None`` on every field of a reopened
+    rioxarray then reports `rio.crs is None` on every field of a reopened
     stack, and anything that reprojects -- plotting, exporting to lon/lat --
     fails with "Provide a CRS-aware DataArray". Both persist() and from_zarr()
     have to restore it.

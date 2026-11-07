@@ -1,28 +1,27 @@
 """Radar-geometry primitives, ported from ISCE3 v0.25.16 and vectorized.
 
-Everything :mod:`nisar_tools.rslc` needs to turn range-Doppler coordinates into
-map coordinates and back: the WGS84 ellipsoid, orbit interpolation, ``geo2rdr``
-/ ``rdr2geo``, ISCE3's 2-D look-up tables and its "biquintic" spline. The NISAR
+Everything `nisar_tools.rslc` needs to turn range-Doppler coordinates into
+map coordinates and back: the WGS84 ellipsoid, orbit interpolation, `geo2rdr`
+/ `rdr2geo`, ISCE3's 2-D look-up tables and its "biquintic" spline. The NISAR
 GSLC products ASF distributes are made by ISCE3 0.25.16 (it is recorded in every
-product's ``processingInformation/algorithms/softwareVersion``), so each routine
+product's `processingInformation/algorithms/softwareVersion`), so each routine
 here is a line-for-line port of the one named in its docstring, operating on
 arrays instead of one pixel at a time. The C++ is the reference; where the port
 could have been "cleaner" but would then have disagreed with it, it follows the
 C++.
 
-Verified against ISCE3's own numbers, not against itself: the reference GSLC's
-``metadata/radarGrid`` cube stores float64 slant range and zero-Doppler time per
-``(x, y, height)`` node, computed by ISCE3 from the product's embedded orbit
-(see ``tests/test_radar.py`` and the gated real-data test).
+Tested against ISCE3's own numbers: a GSLC's `metadata/radarGrid` cube stores
+float64 slant range and zero-Doppler time per `(x, y, height)` node, computed by
+ISCE3 from the product's embedded orbit (`tests/test_radar.py`).
 
 Conventions carried over from ISCE3, all of which matter:
 
 - Angles are **radians**, heights metres above the WGS84 ellipsoid, times
   seconds since the orbit's reference epoch.
-- An :class:`Orbit`'s state vectors must be uniformly spaced; interpolation
-  outside their span returns NaN (``OrbitInterpBorderMode::FillNaN``).
-- ``geo2rdr`` returns the ``(t, r)`` of the iteration whose Newton step fell
-  below ``threshold`` -- the step is *not* applied afterwards -- so a returned
+- An `Orbit`'s state vectors must be uniformly spaced; interpolation
+  outside their span returns NaN (`OrbitInterpBorderMode::FillNaN`).
+- `geo2rdr` returns the `(t, r)` of the iteration whose Newton step fell
+  below `threshold` -- the step is *not* applied afterwards -- so a returned
   pair is always self-consistent.
 """
 
@@ -34,7 +33,7 @@ import numpy as np
 SPEED_OF_LIGHT = 299_792_458.0
 
 #: WGS84 semi-major axis and first eccentricity squared, exactly as ISCE3's
-#: ``Constants.h`` has them (e2 derived from 1/f = 298.257223563).
+#: `Constants.h` has them (e2 derived from 1/f = 298.257223563).
 WGS84_A = 6378137.0
 WGS84_E2 = 0.006694379990141317
 
@@ -43,7 +42,7 @@ WGS84_E2 = 0.006694379990141317
 # Time
 # ---------------------------------------------------------------------------
 def parse_epoch(units):
-    """``"seconds since 2026-06-22T00:00:00"`` -> ``numpy.datetime64[ns]``."""
+    """`"seconds since 2025-01-01T00:00:00"` -> `numpy.datetime64[ns]`."""
     if isinstance(units, bytes):
         units = units.decode()
     text = str(units).strip()
@@ -54,7 +53,7 @@ def parse_epoch(units):
 
 
 def epoch_units(epoch):
-    """The inverse of :func:`parse_epoch`, at whole-second precision.
+    """The inverse of `parse_epoch`, at whole-second precision.
 
     NISAR product specs require an integer-second epoch; ISCE3 writes it without
     a fractional part, which is what this reproduces.
@@ -64,7 +63,7 @@ def epoch_units(epoch):
 
 
 def seconds_since(epoch, when):
-    """Seconds from ``epoch`` to ``when`` (both datetime64-compatible)."""
+    """Seconds from `epoch` to `when` (both datetime64-compatible)."""
     delta = np.datetime64(when, "ns") - np.datetime64(epoch, "ns")
     return delta.astype("timedelta64[ns]").astype(np.int64) / 1e9
 
@@ -73,7 +72,7 @@ def seconds_since(epoch, when):
 # Ellipsoid (isce3::core::Ellipsoid)
 # ---------------------------------------------------------------------------
 def lonlat_to_xyz(lon, lat, h):
-    """Geodetic (rad, rad, m) -> ECEF metres. Returns an ``(..., 3)`` array."""
+    """Geodetic (rad, rad, m) -> ECEF metres. Returns an `(..., 3)` array."""
     lon, lat, h = np.broadcast_arrays(np.asarray(lon, float),
                                       np.asarray(lat, float),
                                       np.asarray(h, float))
@@ -86,7 +85,7 @@ def lonlat_to_xyz(lon, lat, h):
 
 
 def xyz_to_lonlat(xyz):
-    """ECEF metres -> geodetic ``(lon, lat, h)`` in (rad, rad, m).
+    """ECEF metres -> geodetic `(lon, lat, h)` in (rad, rad, m).
 
     Vermeille (2002), in ISCE3's exact operation order.
     """
@@ -111,9 +110,9 @@ def xyz_to_lonlat(xyz):
 
 
 def xyz_to_enu_matrix(lat, lon):
-    """Rotation ECEF -> local ENU at geodetic ``(lat, lon)``; ``(..., 3, 3)``.
+    """Rotation ECEF -> local ENU at geodetic `(lat, lon)`; `(..., 3, 3)`.
 
-    ``Mat3::xyzToEnu``: rows are the east, north and up unit vectors.
+    `Mat3::xyzToEnu`: rows are the east, north and up unit vectors.
     """
     lat = np.asarray(lat, float)
     lon = np.asarray(lon, float)
@@ -145,8 +144,8 @@ def _normalized(a):
 class Orbit:
     """Uniformly sampled ECEF state vectors with ISCE3's interpolators.
 
-    ``time`` is seconds since ``reference_epoch``. ISCE3 stores it as a
-    ``Linspace`` built from the first sample and the first spacing, and every
+    `time` is seconds since `reference_epoch`. ISCE3 stores it as a
+    `Linspace` built from the first sample and the first spacing, and every
     lookup uses *that* lattice, not the stored array -- so does this class.
     """
 
@@ -192,7 +191,7 @@ class Orbit:
         return 0.5 * (self.start_time + self.end_time)
 
     def _search(self, t):
-        """``Linspace::search``: index of the first sample strictly after ``t``."""
+        """`Linspace::search`: index of the first sample strictly after `t`."""
         idx = np.where(np.isfinite(t), (t - self.first) / self.spacing + 1, 0.0)
         idx = np.trunc(idx).astype(np.int64)
         idx = np.where(t < self.first, 0, idx)
@@ -200,9 +199,9 @@ class Orbit:
 
     # -- interpolation ------------------------------------------------------
     def interpolate(self, t):
-        """Position and velocity at ``t`` (any shape) -> two ``(..., 3)`` arrays.
+        """Position and velocity at `t` (any shape) -> two `(..., 3)` arrays.
 
-        Outside the orbit's span both come back NaN, as ISCE3's ``FillNaN``
+        Outside the orbit's span both come back NaN, as ISCE3's `FillNaN`
         border mode does.
         """
         t = np.asarray(t, float)
@@ -219,14 +218,14 @@ class Orbit:
         return pos.reshape(shape + (3,)), vel.reshape(shape + (3,))
 
     def _hermite(self, t):
-        """``interpolateOrbitHermite`` on the uniform lattice, as polynomials.
+        """`interpolateOrbitHermite` on the uniform lattice, as polynomials.
 
-        ISCE3 builds the 4-point Lagrange basis ``h_i`` and its derivative from
-        nested products of ``(t - T_j) / (T_i - T_j)``. On a uniform lattice
+        ISCE3 builds the 4-point Lagrange basis `h_i` and its derivative from
+        nested products of `(t - T_j) / (T_i - T_j)`. On a uniform lattice
         every weight multiplying a state vector is a fixed polynomial of degree
-        <= 7 in the window-centred time ``v``, so over one window the position
+        <= 7 in the window-centred time `v`, so over one window the position
         and velocity are themselves degree-7 polynomials with vector
-        coefficients (:meth:`_hermite_table`). Evaluating those takes one
+        coefficients (`_hermite_table`). Evaluating those takes one
         Vandermonde matrix and two small products instead of ~100 array
         passes; it agrees with the product form to ~1e-8 m.
         """
@@ -257,9 +256,9 @@ class Orbit:
         return pos, vel
 
     def _hermite_window(self, t):
-        """First state vector of the 4-point window for ``t`` (scalar or array).
+        """First state vector of the 4-point window for `t` (scalar or array).
 
-        ``clip(search(t) - 2, 0, size - 4)`` spelt with ``fmax``/``fmin`` so a
+        `clip(search(t) - 2, 0, size - 4)` spelt with `fmax`/`fmin` so a
         NaN lands in window 0 instead of becoming an undefined integer.
         """
         w = np.fmin(np.fmax(np.trunc((t - self.first) / self.spacing + 1.0) - 2.0, 0.0),
@@ -270,7 +269,7 @@ class Orbit:
         return self.first + self.spacing * (window + 1.5)
 
     def _hermite_table(self):
-        """Per-window ``(windows, 8, 3)`` power-basis coefficients, built once."""
+        """Per-window `(windows, 8, 3)` power-basis coefficients, built once."""
         table = self.__dict__.get("_hermite_tables")
         if table is None:
             C = _hermite_coefficients(self.spacing)
@@ -314,7 +313,7 @@ class Orbit:
     # -- construction / serialization --------------------------------------
     @classmethod
     def from_h5(cls, group):
-        """Read a NISAR ``metadata/orbit`` group."""
+        """Read a NISAR `metadata/orbit` group."""
         time_ds = group["time"]
         epoch = parse_epoch(time_ds.attrs["units"])
         method = _text(group["interpMethod"][()]) if "interpMethod" in group else "Hermite"
@@ -326,7 +325,7 @@ class Orbit:
     def from_xml(cls, path, reference_epoch=None):
         """Read a NISAR orbit-ephemeris XML (FOE/NOE/MOE/POE).
 
-        Port of ``nisar.products.readers.orbit.load_orbit_from_xml``; the
+        Port of `nisar.products.readers.orbit.load_orbit_from_xml`; the
         reference epoch defaults to the first state vector's time.
         """
         import xml.etree.ElementTree as ET
@@ -353,9 +352,9 @@ class Orbit:
                    orbit_type=kind.text.strip() if kind is not None else "Undefined")
 
     def crop(self, start, end, npad=7):
-        """``Orbit::crop``: state vectors spanning ``[start, end]`` plus ``npad``.
+        """`Orbit::crop`: state vectors spanning `[start, end]` plus `npad`.
 
-        ``start``/``end`` are seconds since this orbit's reference epoch.
+        `start`/`end` are seconds since this orbit's reference epoch.
         """
         for bound in (start, end):
             if not self.start_time <= bound <= self.end_time:
@@ -377,17 +376,17 @@ class Orbit:
 
 @lru_cache(maxsize=8)
 def _hermite_coefficients(spacing):
-    """``(8, 16)`` power-basis coefficients of the Hermite weights.
+    """`(8, 16)` power-basis coefficients of the Hermite weights.
 
-    The variable is ``v = (t - T_c) / spacing`` with ``T_c`` the centre of the
-    4-point window, so the nodes sit at -1.5, -0.5, 0.5, 1.5 and ``|v|`` stays
+    The variable is `v = (t - T_c) / spacing` with `T_c` the centre of the
+    4-point window, so the nodes sit at -1.5, -0.5, 0.5, 1.5 and `|v|` stays
     small enough for the degree-7 powers to be well conditioned. Columns 0-3
     weight the positions and 4-7 the velocities for the interpolated position;
     8-11 and 12-15 likewise for the velocity. Built from ISCE3's definitions:
-    ``h_i`` the cubic Lagrange basis, ``f0_i = 1 - 2 s_i (v - v_i)``,
-    ``hdot_i = h_i' / spacing``, ``g1_i = h_i + 2 hdot_i (t - T_i)``,
-    ``g0_i = 2 (f0_i hdot_i - s_i h_i / spacing)``, with
-    ``s_i = sum_{j != i} 1 / (v_i - v_j)``.
+    `h_i` the cubic Lagrange basis, `f0_i = 1 - 2 s_i (v - v_i)`,
+    `hdot_i = h_i' / spacing`, `g1_i = h_i + 2 hdot_i (t - T_i)`,
+    `g0_i = 2 (f0_i hdot_i - s_i h_i / spacing)`, with
+    `s_i = sum_{j != i} 1 / (v_i - v_j)`.
     """
     from numpy.polynomial import polynomial as poly
 
@@ -414,7 +413,7 @@ def _hermite_coefficients(spacing):
 
 
 def crop_external_orbit(external, internal, npad=7):
-    """``isce3.core.crop_external_orbit``: crop ``external`` to ``internal``'s span.
+    """`isce3.core.crop_external_orbit`: crop `external` to `internal`'s span.
 
     Both orbits must share a reference epoch (ISCE3 re-references the external
     file to the radar grid's epoch before calling this).
@@ -436,10 +435,10 @@ def _text(value):
 # 2-D interpolators (isce3::core::{Bilinear,NearestNeighbor,Spline2d}Interpolator)
 # ---------------------------------------------------------------------------
 def bilinear_interp(z, x, y):
-    """``BilinearInterpolator``: ``x`` is the column, ``y`` the row coordinate.
+    """`BilinearInterpolator`: `x` is the column, `y` the row coordinate.
 
     ISCE3 takes floor and ceil of each and special-cases integral coordinates
-    (where floor == ceil) rather than using the usual ``x - x1`` weight form,
+    (where floor == ceil) rather than using the usual `x - x1` weight form,
     which would divide by zero there.
     """
     x = np.asarray(x, float)
@@ -470,7 +469,7 @@ def bilinear_interp(z, x, y):
 
 
 def nearest_interp(z, x, y):
-    """``NearestNeighborInterpolator``: ``std::round`` (half away from zero)."""
+    """`NearestNeighborInterpolator`: `std::round` (half away from zero)."""
     row = _round_half_away(np.asarray(y, float))
     col = _round_half_away(np.asarray(x, float))
     return z[row, col]
@@ -481,7 +480,7 @@ def _round_half_away(v):
 
 
 def _spline1d_weights(dtype, n):
-    """The data-independent ``Q`` and ``p`` of ``_initSpline``, in ``dtype``."""
+    """The data-independent `Q` and `p` of `_initSpline`, in `dtype`."""
     one, half, two = dtype.type(1.0), dtype.type(0.5), dtype.type(2.0)
     Q = [dtype.type(0.0)]
     p = [None]
@@ -493,10 +492,10 @@ def _spline1d_weights(dtype, n):
 
 
 def _spline1d(x, Y, dtype):
-    """``_initSpline`` + ``_spline`` over the last axis of ``Y`` (length n).
+    """`_initSpline` + `_spline` over the last axis of `Y` (length n).
 
-    Natural cubic spline through ``n`` equally spaced samples, evaluated at the
-    1-based coordinate ``x``, in ISCE3's operation order and float type.
+    Natural cubic spline through `n` equally spaced samples, evaluated at the
+    1-based coordinate `x`, in ISCE3's operation order and float type.
     """
     n = Y.shape[-1]
     U = dtype.type
@@ -524,12 +523,12 @@ def _spline1d(x, Y, dtype):
 
 
 def spline2d_interp(z, x, y, order=6):
-    """``Spline2dInterpolator(order)`` -- what ISCE3 calls "biquintic".
+    """`Spline2dInterpolator(order)` -- what ISCE3 calls "biquintic".
 
-    It is a natural *cubic* spline through ``order`` samples per axis (6 for
+    It is a natural *cubic* spline through `order` samples per axis (6 for
     "biquintic"), fitted along each row of the window and then down the column
     of row results. The window is not centred: for even orders it spans
-    ``floor(v) - 1 ... floor(v) + 4``. Complex input is interpolated per part,
+    `floor(v) - 1 ... floor(v) + 4`. Complex input is interpolated per part,
     which is exact because every coefficient is real.
     """
     z = np.asarray(z)
@@ -552,7 +551,7 @@ def spline2d_interp(z, x, y, order=6):
 
 
 def _spline2d_pointwise(z, x, y, order, dtype):
-    """:func:`spline2d_interp`'s general path: a 6x6 window gathered per point."""
+    """`spline2d_interp`'s general path: a 6x6 window gathered per point."""
     ny, nx = z.shape
     if order % 2:
         i0 = np.trunc(y - 0.5).astype(np.int64)
@@ -571,7 +570,7 @@ def _spline2d_pointwise(z, x, y, order, dtype):
 
 
 def _spline_second_derivatives(Y, dtype):
-    """``_initSpline``'s ``R`` over the last axis, in ISCE3's float order."""
+    """`_initSpline`'s `R` over the last axis, in ISCE3's float order."""
     n = Y.shape[-1]
     U = dtype.type
     Q, p = _spline1d_weights(dtype, n)
@@ -585,11 +584,11 @@ def _spline_second_derivatives(Y, dtype):
 
 
 def _spline2d_even_table(z, x, y, order, dtype):
-    """:func:`spline2d_interp` for even orders and non-negative coordinates.
+    """`spline2d_interp` for even orders and non-negative coordinates.
 
-    There every row spline is evaluated on the same interval, ``j = order/2 -
-    1``, so the terms of ``_spline`` that depend only on the data -- ``Y[j-1]``,
-    ``t0`` and the two parenthesised factors of ``t1`` -- are the same for every
+    There every row spline is evaluated on the same interval, `j = order/2 -
+    1`, so the terms of `_spline` that depend only on the data -- `Y[j-1]`,
+    `t0` and the two parenthesised factors of `t1` -- are the same for every
     point sharing a window. They are computed once per window over the patch
     the points touch; per point only the powers of the fractional coordinate
     remain. Every float operation is the general path's, so the results are
@@ -635,9 +634,9 @@ _INTERPOLATORS = {
 # LUT2d (isce3::core::LUT2d)
 # ---------------------------------------------------------------------------
 class LUT2d:
-    """A regularly gridded function of ``(y=azimuth time, x=slant range)``.
+    """A regularly gridded function of `(y=azimuth time, x=slant range)`.
 
-    With no data it evaluates to ``ref_value`` everywhere and contains every
+    With no data it evaluates to `ref_value` everywhere and contains every
     point -- ISCE3's default-constructed LUT, which is how "no correction" and
     "zero-Doppler grid" are spelled.
     """
@@ -667,7 +666,7 @@ class LUT2d:
     @classmethod
     def from_coords(cls, xcoord, ycoord, data, method="bilinear",
                     bounds_error=True):
-        """``LUT2d(xcoord, ycoord, data)``: spacing from the first difference."""
+        """`LUT2d(xcoord, ycoord, data)`: spacing from the first difference."""
         xcoord = np.asarray(xcoord, float)
         ycoord = np.asarray(ycoord, float)
         data = np.asarray(data)
@@ -706,11 +705,11 @@ class LUT2d:
             & (y >= self.y_start) & (y <= self.y_end)
 
     def eval(self, y, x):
-        """Evaluate at azimuth ``y`` and range ``x``, clamping to the grid.
+        """Evaluate at azimuth `y` and range `x`, clamping to the grid.
 
         ISCE3 logs (it does not throw) on an out-of-bounds lookup with
-        ``bounds_error`` set, then clamps anyway; callers that must not
-        extrapolate check :meth:`contains` first, as ``geocodeSlc`` does.
+        `bounds_error` set, then clamps anyway; callers that must not
+        extrapolate check `contains` first, as `geocodeSlc` does.
         """
         y = np.asarray(y, float)
         x = np.asarray(x, float)
@@ -767,7 +766,7 @@ class RadarGrid:
         return self.starting_range + np.asarray(sample, float) * self.range_pixel_spacing
 
     def contains(self, t, r):
-        """``RadarGridParameters::contains``: half a pixel beyond each edge."""
+        """`RadarGridParameters::contains`: half a pixel beyond each edge."""
         t = np.asarray(t, float)
         r = np.asarray(r, float)
         half_t = self.azimuth_time_interval / 2
@@ -776,7 +775,7 @@ class RadarGrid:
             & (t <= self.sensing_stop + half_t) & (r <= self.end_range + half_r)
 
     def resize_keep_start_stop(self, ysize, xsize):
-        """``resizeKeepStartStop``: a coarser grid with the same corners."""
+        """`resizeKeepStartStop`: a coarser grid with the same corners."""
         if ysize <= 1 or xsize <= 1:
             raise ValueError("resized radar grid needs > 1 sample per axis")
         prf = self.prf
@@ -791,14 +790,14 @@ class RadarGrid:
 # geo2rdr / rdr2geo (isce3::geometry::detail)
 # ---------------------------------------------------------------------------
 def _look_side_ok(rvec, vel, pos, look_side):
-    """ISCE3's first-iteration check, ``(side == Right) xor (r x v . p > 0)``."""
+    """ISCE3's first-iteration check, `(side == Right) xor (r x v . p > 0)`."""
     positive = _dot(np.cross(rvec, vel), pos) > 0.0
     right = str(look_side).lower() == "right"
     return ~(right ^ positive)
 
 
 def _coarse_aztime(xyz, orbit, look_side, rmin=np.nan, rmax=np.nan):
-    """``updateAztime``: best of 15 evenly spaced orbit times (vectorized)."""
+    """`updateAztime`: best of 15 evenly spaced orbit times (vectorized)."""
     n = 15
     times = orbit.start_time + np.arange(n) * (orbit.end_time - orbit.start_time) / (n - 1)
     best_r = np.full(xyz.shape[0], 1e16)
@@ -823,17 +822,17 @@ def _coarse_aztime(xyz, orbit, look_side, rmin=np.nan, rmax=np.nan):
 
 def geo2rdr(llh, orbit, doppler=None, wavelength=1.0, look_side="left",
             t0=None, threshold=1e-8, maxiter=25, delta_range=1e-8):
-    """``detail::geo2rdr``: target ``(lon, lat, h)`` -> ``(t, r, converged)``.
+    """`detail::geo2rdr`: target `(lon, lat, h)` -> `(t, r, converged)`.
 
-    ``llh`` is an ``(n, 3)`` array in (rad, rad, m); ``doppler`` a
-    :class:`LUT2d` of the grid's Doppler in Hz (``None`` = zero-Doppler, ISCE3's
-    empty LUT). ``t0`` is the initial azimuth time (scalar or per point); points
+    `llh` is an `(n, 3)` array in (rad, rad, m); `doppler` a
+    `LUT2d` of the grid's Doppler in Hz (`None` = zero-Doppler, ISCE3's
+    empty LUT). `t0` is the initial azimuth time (scalar or per point); points
     whose guess lies outside the orbit get ISCE3's coarse search instead.
 
-    Each point stops iterating once its Newton step is below ``threshold`` and
-    keeps that iteration's ``(t, r)``. Non-converged points (including every
-    wrong-look-side and out-of-orbit point) come back with ``converged=False``;
-    their ``(t, r)`` are meaningless.
+    Each point stops iterating once its Newton step is below `threshold` and
+    keeps that iteration's `(t, r)`. Non-converged points (including every
+    wrong-look-side and out-of-orbit point) come back with `converged=False`;
+    their `(t, r)` are meaningless.
     """
     llh = np.atleast_2d(np.asarray(llh, float))
     xyz = lonlat_to_xyz(llh[:, 0], llh[:, 1], llh[:, 2])
@@ -843,7 +842,7 @@ def geo2rdr(llh, orbit, doppler=None, wavelength=1.0, look_side="left",
 
 def geo2rdr_xyz(xyz, orbit, doppler=None, wavelength=1.0, look_side="left",
                 t0=None, threshold=1e-8, maxiter=25, delta_range=1e-8):
-    """:func:`geo2rdr` for targets already in ECEF metres.
+    """`geo2rdr` for targets already in ECEF metres.
 
     Vectorised over points without changing any point's iterates: a point
     that converges (or is rejected) is frozen -- its time stops moving and its
@@ -935,12 +934,12 @@ def geo2rdr_xyz(xyz, orbit, doppler=None, wavelength=1.0, look_side="left",
 def rdr2geo(t, r, orbit, height=0.0, doppler_hz=0.0, wavelength=1.0,
             look_side="left", threshold=0.05, maxiter=25, extraiter=10,
             h0=None, dem=None):
-    """``detail::rdr2geo``: radar ``(t, r)`` -> target ``(lon, lat, h)``.
+    """`detail::rdr2geo`: radar `(t, r)` -> target `(lon, lat, h)`.
 
-    The target height comes from ``dem(lon_rad, lat_rad)`` when given, else the
-    constant ``height`` (ISCE3's raster-less ``DEMInterpolator``). ``h0`` is the
+    The target height comes from `dem(lon_rad, lat_rad)` when given, else the
+    constant `height` (ISCE3's raster-less `DEMInterpolator`). `h0` is the
     starting height guess (NaN/None = the satellite's nadir height, as ISCE3).
-    Returns ``(llh, converged)`` with ``llh`` an ``(n, 3)`` array.
+    Returns `(llh, converged)` with `llh` an `(n, 3)` array.
     """
     t = np.atleast_1d(np.asarray(t, float))
     r = np.broadcast_to(np.asarray(r, float), t.shape).astype(float)
@@ -1019,10 +1018,10 @@ def rdr2geo(t, r, orbit, height=0.0, doppler_hz=0.0, wavelength=1.0,
 
 
 def geo_perimeter(radar_grid, orbit, height=0.0, points_per_edge=11):
-    """``getGeoPerimeter`` at a constant height: ``(n, 3)`` lon/lat/h (rad, rad, m).
+    """`getGeoPerimeter` at a constant height: `(n, 3)` lon/lat/h (rad, rad, m).
 
-    Counter-clockwise from ``(t0, r0)`` (the vertex order depends on the look
-    side), ``4 * (points_per_edge - 1)`` points, zero-Doppler grid.
+    Counter-clockwise from `(t0, r0)` (the vertex order depends on the look
+    side), `4 * (points_per_edge - 1)` points, zero-Doppler grid.
     """
     t0, t1 = radar_grid.sensing_start, radar_grid.sensing_stop
     r0, r1 = radar_grid.starting_range, radar_grid.end_range
@@ -1045,10 +1044,10 @@ def geo_perimeter(radar_grid, orbit, height=0.0, points_per_edge=11):
 
 def geo_bounding_box(radar_grid, orbit, epsg, heights=(-500.0, 9000.0),
                      margin=0.0, points_per_edge=11):
-    """``getGeoBoundingBox``: ``(x_min, x_max, y_min, y_max)`` in ``epsg``.
+    """`getGeoBoundingBox`: `(x_min, x_max, y_min, y_max)` in `epsg`.
 
-    ``margin`` is in degrees and, as in ISCE3, converted to metres
-    (``deg * pi / 180 * 6.37e6``) for projected systems.
+    `margin` is in degrees and, as in ISCE3, converted to metres
+    (`deg * pi / 180 * 6.37e6`) for projected systems.
     """
     from pyproj import Transformer
 
@@ -1072,7 +1071,7 @@ def geo_bounding_box(radar_grid, orbit, epsg, heights=(-500.0, 9000.0),
 # ---------------------------------------------------------------------------
 # Metadata cubes (isce3::geometry::makeRadarGridCubes)
 # ---------------------------------------------------------------------------
-#: The ``metadata/radarGrid`` layers, with the dtype ISCE3 writes each in.
+#: The `metadata/radarGrid` layers, with the dtype ISCE3 writes each in.
 CUBE_LAYERS = {
     "slantRange": np.float64,
     "zeroDopplerAzimuthTime": np.float64,
@@ -1088,24 +1087,23 @@ CUBE_LAYERS = {
 
 def radar_grid_cube_layer(lon, lat, height, radar_grid, orbit, native_doppler,
                           threshold=1e-8, maxiter=25, delta_range=1e-8):
-    """One height of the ``metadata/radarGrid`` cube at nodes ``(lon, lat)``.
+    """One height of the `metadata/radarGrid` cube at nodes `(lon, lat)`.
 
-    ``lon``/``lat`` are radians of any shape; returns a dict of arrays of that
-    shape keyed like :data:`CUBE_LAYERS`. Port of ``makeRadarGridCubes`` with
-    ``flag_ground_velocity_from_rdr2geo=True`` (the binding's default):
+    `lon`/`lat` are radians of any shape; returns a dict of arrays of that
+    shape keyed like `CUBE_LAYERS`. Port of `makeRadarGridCubes` with
+    `flag_ground_velocity_from_rdr2geo=True` (the binding's default):
 
-    - range and time come from a **zero-Doppler** ``geo2rdr``;
+    - range and time come from a **zero-Doppler** `geo2rdr`;
     - every vector layer comes from the satellite state at the **native-Doppler**
-      time (a second ``geo2rdr`` against the RSLC's Doppler centroid, bounds
+      time (a second `geo2rdr` against the RSLC's Doppler centroid, bounds
       checking off) -- so the LOS is the beam-centre look, not the zero-Doppler
       one;
     - ground-track velocity is a finite difference of two constant-height
-      ``rdr2geo`` solutions half a PRI either side of the zero-Doppler time.
+      `rdr2geo` solutions half a PRI either side of the zero-Doppler time.
 
-    ISCE3 seeds each node's ``geo2rdr`` with its neighbour's solution; this
+    ISCE3 seeds each node's `geo2rdr` with its neighbour's solution; this
     seeds every node at mid-swath. The answers differ by less than the
-    convergence threshold (measured: 6.4 nm in range and 1.4e-8 s in time
-    against a real cube).
+    convergence threshold.
     """
     lon = np.asarray(lon, float)
     lat = np.asarray(lat, float)

@@ -1,16 +1,16 @@
-"""Numerical kernels for geocoding an RSLC: a port of ISCE3's ``geocodeSlc.cpp``.
+"""Numerical kernels for geocoding an RSLC: a port of ISCE3's `geocodeSlc.cpp`.
 
 Pure numpy, one output block at a time, no I/O -- the workflow that tiles a
 frame, reads the RSLC and writes the product lives in
-:mod:`nisar_tools.gslc_geocode`. Split out so the numerics can be tested against
+`nisar_tools.gslc_geocode`. Split out so the numerics can be tested against
 synthetic point targets without an HDF5 file in sight.
 
 The per-pixel algorithm (ISCE3 v0.25.16, what ASF's GSLCs are made with):
 
 1. Map pixel centre -> lon/lat -> DEM height (ISCE3's spline, float32).
-2. Zero-Doppler ``geo2rdr`` from mid-swath -> ``(t, r)``; keep ``r`` as the
+2. Zero-Doppler `geo2rdr` from mid-swath -> `(t, r)`; keep `r` as the
    *uncorrected* range for flattening.
-3. Timing corrections: ``t += dt_az(t, r)``, then ``r += dr(t, r)`` **evaluated
+3. Timing corrections: `t += dt_az(t, r)`, then `r += dr(t, r)` **evaluated
    at the corrected t** -- the order matters at the millimetre level.
 4. Reject points outside the radar grid (half a pixel beyond its edges) or the
    Doppler LUT; fractional line/sample indices otherwise.
@@ -19,7 +19,7 @@ The per-pixel algorithm (ISCE3 v0.25.16, what ASF's GSLCs are made with):
 6. 9x9 chip -> azimuth **Doppler demodulation** relative to the chip's integer
    row -> 8x8 windowed-sinc interpolation at the fractional position -> the
    Doppler phase of that fraction added back.
-7. Flatten: multiply by ``exp(+j 4 pi r_uncorrected / lambda)``.
+7. Flatten: multiply by `exp(+j 4 pi r_uncorrected / lambda)`.
 
 Step 6 is not optional on NISAR: the Doppler centroid is ~950 Hz against a
 1520 Hz line rate, so the azimuth spectrum straddles the Nyquist frequency and
@@ -40,10 +40,10 @@ SINC_ONE = 9
 
 @lru_cache(maxsize=1)
 def sinc_kernel():
-    """ISCE3's ``Sinc2dInterpolator(8, 8192)`` weight table, ``(8192, 8)``.
+    """ISCE3's `Sinc2dInterpolator(8, 8192)` weight table, `(8192, 8)`.
 
-    ``_sinc_coef(beta=1, pedestal=0, weight=1)``: a raised-cosine (Hann) window
-    over the whole 65536-tap filter times ``sinc(floor(i - soff) / 8192)`` --
+    `_sinc_coef(beta=1, pedestal=0, weight=1)`: a raised-cosine (Hann) window
+    over the whole 65536-tap filter times `sinc(floor(i - soff) / 8192)` --
     note the floor in the sinc argument but not in the window -- then each of
     the 8192 sub-sample rows normalised to unit sum.
     """
@@ -61,9 +61,9 @@ def sinc_kernel():
 
 
 def subswath_number(valid_samples, az_index, rg_index, length, width):
-    """``SubSwaths::getSampleSubSwath`` for integer index arrays.
+    """`SubSwaths::getSampleSubSwath` for integer index arrays.
 
-    ``valid_samples`` is the list of ``(lines, 2)`` ``[start, end)`` arrays; an
+    `valid_samples` is the list of `(lines, 2)` `[start, end)` arrays; an
     empty list means "all samples valid, subswath 1".
     """
     az_index = np.asarray(az_index, np.int64)
@@ -91,8 +91,8 @@ def radar_indices(lon, lat, height, radar_grid, orbit, native_doppler,
                   threshold=1e-8, maxiter=25, flatten_with_corrected_range=False):
     """Steps 2-5 for a set of output pixels.
 
-    ``lon``/``lat`` in radians and ``height`` in metres, all 1-D. Returns
-    ``(az_index, rg_index, flatten_range, mask)``: fractional full-grid indices
+    `lon`/`lat` in radians and `height` in metres, all 1-D. Returns
+    `(az_index, rg_index, flatten_range, mask)`: fractional full-grid indices
     (NaN where the pixel is not geocoded), the slant range to flatten with, and
     the uint8 subswath mask (255 = not in the radar grid).
     """
@@ -136,12 +136,12 @@ def radar_indices(lon, lat, height, radar_grid, orbit, native_doppler,
 
 @lru_cache(maxsize=1)
 def _kernel_columns():
-    """The float32 sinc table as ``(8, 8192)``, so a gather gives ``(8, P)`` rows."""
+    """The float32 sinc table as `(8, 8192)`, so a gather gives `(8, P)` rows."""
     return np.ascontiguousarray(sinc_kernel().astype(np.float32).T)
 
 
 def _mul_cf(ar, ai, br, bi):
-    """``std::complex<float>`` multiply, one ufunc per operation.
+    """`std::complex<float>` multiply, one ufunc per operation.
 
     Separate calls keep each product and sum a plain IEEE float32 operation:
     a single expression could be contracted into fused multiply-adds, which
@@ -155,8 +155,8 @@ def interpolate_slc(block, first_line, first_sample, az_index, rg_index,
                     batch=16384):
     """Steps 6-7: sinc-interpolate a radar block at fractional indices.
 
-    ``block`` is the complex RSLC window whose ``[0, 0]`` sample is
-    ``(first_line, first_sample)`` of the full grid -- or a sequence of
+    `block` is the complex RSLC window whose `[0, 0]` sample is
+    `(first_line, first_sample)` of the full grid -- or a sequence of
     same-shaped windows (one per polarization), which share every
     polarization-independent step and come back as a list. Pixels whose 9x9
     chip would leave the *block* stay NaN -- ISCE3 checks against the block it
@@ -164,9 +164,9 @@ def interpolate_slc(block, first_line, first_sample, az_index, rg_index,
     complex64.
 
     The arithmetic is ISCE3's, operation for operation, in float32: each chip
-    sample demodulated by ``complex<float>(cos, -sin)`` of its row's Doppler
-    phase, then ``sum_i sum_j (chip * ky_i) * kx_j`` accumulated in that order
-    (``Sinc2dInterpolator::_sinc_eval_2d``), then the Doppler phase of the
+    sample demodulated by `complex<float>(cos, -sin)` of its row's Doppler
+    phase, then `sum_i sum_j (chip * ky_i) * kx_j` accumulated in that order
+    (`Sinc2dInterpolator::_sinc_eval_2d`), then the Doppler phase of the
     fractional line and the flattening phase multiplied back on. A float32 sum
     is not associative, so evaluating the same weights separably (a range pass
     then an azimuth pass) changes ~0.1% of pixels after mantissa truncation.
@@ -254,7 +254,7 @@ def _chip_geometry(s, az_rel, rg_rel, int_az, int_rg, W, t_full, r_full,
 
 
 def _sinc_chips(block_re, block_im, g):
-    """Interpolate one image's chips for a batch described by :func:`_chip_geometry`."""
+    """Interpolate one image's chips for a batch described by `_chip_geometry`."""
     f32 = np.float32
     kx, ky = g["kx"], g["ky"]
     acc_re = np.zeros(kx.shape[1], f32)
@@ -276,10 +276,10 @@ def _sinc_chips(block_re, block_im, g):
 
 
 def truncate_mantissa(z, significant_bits=10):
-    """``isce3.core.types.truncate_mantissa``, in place on float or complex arrays.
+    """`isce3.core.types.truncate_mantissa`, in place on float or complex arrays.
 
-    Zeroes all but the top ``significant_bits`` mantissa bits so gzip has
-    something to work with -- the reason ASF's GSLC ``max_real_value`` reads
+    Zeroes all but the top `significant_bits` mantissa bits so gzip has
+    something to work with -- the reason ASF's GSLC `max_real_value` reads
     like 95.75 rather than 95.7493. NaN stays NaN (its top mantissa bit is kept).
     """
     if np.iscomplexobj(z):

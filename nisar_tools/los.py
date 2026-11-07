@@ -1,16 +1,20 @@
-"""The :class:`LOSStack`: line-of-sight displacement + per-pixel look geometry.
+"""The `LOSStack`: line-of-sight displacement + per-pixel look geometry.
 
-Produced from an :class:`~nisar_tools.unwrap.UnwrappedStack` by scaling the
+Produced from a `nisar_tools.unwrap.UnwrappedStack` by scaling the
 unwrapped phase to metres and attaching the incidence angle and ENU
 line-of-sight unit vector sampled from a GSLC's built-in geometry cube at the
-DEM height (see :mod:`nisar_tools.geometry`).
+DEM height (see `nisar_tools.geometry`).
 
-The ``los`` displacement is per-pair ``(pair, y, x)`` and stays lazy; the
-geometry (``incidence_angle``, ``look_angle``, ``los_east``/``los_north``/
-``los_up``, ``height``) is one field per grid ``(y, x)`` -- the viewing geometry
+The `los` displacement is per-pair `(pair, y, x)` and stays lazy; the
+geometry (`incidence_angle`, `look_angle`, `los_east`/`los_north`/
+`los_up`, `height`) is one field per grid `(y, x)` -- the viewing geometry
 is shared across the repeat-pass stack -- and is computed eagerly, once.
 
-``incidence_angle`` and ``look_angle`` are not the same thing: incidence is
+Signs: `los` is in metres and positive toward the sensor (a decreasing range),
+and `los_east`/`los_north`/`los_up` is the target-to-sensor unit vector, so a
+ground displacement projects onto the line of sight by a plain dot product.
+
+`incidence_angle` and `look_angle` are not the same thing: incidence is
 measured at the target, between the line of sight and the local vertical, while
 the look (off-nadir) angle is measured at the spacecraft, against the ellipsoid
 normal there. Earth curvature makes the look angle the smaller of the two.
@@ -28,7 +32,7 @@ _GEOM_2D = ("incidence_angle", "look_angle", "los_east", "los_north",
             "los_up", "height")
 
 #: Multiplier taking a displacement grid to metres, which is what everything
-#: downstream -- ``rms_min``, ``exclude_within``, the Green's functions -- assumes.
+#: downstream -- `rms_min`, `exclude_within`, the Green's functions -- assumes.
 _LOS_UNITS = {"m": 1.0, "cm": 0.01, "mm": 0.001}
 
 
@@ -36,7 +40,7 @@ def _as_granule_list(gslc):
     """Normalise a granule argument to a list of paths.
 
     A single path is by far the common case, but a merged stack needs one per
-    frame. Strings and ``os.PathLike`` are scalars here -- a string is iterable,
+    frame. Strings and `os.PathLike` are scalars here -- a string is iterable,
     so testing for iterability alone would silently split a path into
     characters.
     """
@@ -49,7 +53,7 @@ def _as_granule_list(gslc):
 
 
 def _match_grid(da, ref, resampling):
-    """Put ``da`` on ``ref``'s lattice, resampling only if it is not already."""
+    """Put `da` on `ref`'s lattice, resampling only if it is not already."""
     from . import geo
 
     same = (
@@ -66,7 +70,7 @@ def _finalise_look(ds):
     """Validate, renormalise and complete the look geometry.
 
     Reprojecting three components independently shortens the vector slightly, and
-    ``los_up == cos(incidence)`` only holds for a unit vector -- so it is
+    `los_up == cos(incidence)` only holds for a unit vector -- so it is
     renormalised, and the incidence angle derived from it. A norm far from 1 to
     begin with means the grids are not a unit vector at all, which is raised on
     rather than quietly rescaled.
@@ -111,7 +115,7 @@ class LOSStack(RasterStackMixin):
     # angles. Keeping the unit vector -- not just the displacement magnitude --
     # is what lets the scalar LOS be decomposed into ground components later
     # (e.g. inverting ascending + descending for vertical and east-west). The
-    # sampled DEM ``height`` is available via ``fields=["height", ...]``.
+    # sampled DEM `height` is available via `fields=["height", ...]`.
     GRD_DEFAULT_FIELDS = ("los", "los_east", "los_north", "los_up",
                           "incidence_angle", "look_angle")
 
@@ -122,30 +126,30 @@ class LOSStack(RasterStackMixin):
     def from_unwrapped(cls, unwrapped, gslc, dem=None, frequency="A",
                        wavelength=None, sign=1, mask_geometry=True,
                        product="GSLC"):
-        """Build a :class:`LOSStack` from an unwrapped stack.
+        """Build a `LOSStack` from an unwrapped stack.
 
-        ``gslc`` is a granule path supplying the geometry cube and (unless
-        ``wavelength`` is given) the radar wavelength. For a stack built by
-        :meth:`~nisar_tools.stack.GSLCStack.merge`, pass **one granule per
+        `gslc` is a granule path supplying the geometry cube and (unless
+        `wavelength` is given) the radar wavelength. For a stack built by
+        `nisar_tools.stack.GSLCStack.merge`, pass **one granule per
         frame**: each cube only spans its own frame, so a single granule leaves
         the rest of a merged stack without geometry. The cubes are sampled in
         order and combined, earlier granules taking precedence where they
-        overlap, matching ``merge``'s own rule.
+        overlap, matching `merge`'s own rule.
 
-        ``product`` names the granule's product group (``"GSLC"``, or ``"GUNW"``
-        when the geometry comes from a NASA GUNW's own embedded cube). ``dem`` is
-        a GeoTIFF path or DataArray of ellipsoidal heights (``None`` -> sea-level
-        geometry). ``sign=-1`` corrects data whose fringe sense is inverted
-        relative to this package's ``ref * conj(sec)`` convention; the stored
-        ``los`` is positive toward the sensor either way, and nothing downstream
-        re-applies it (see :func:`nisar_tools.geometry.phase_to_los`).
+        `product` names the granule's product group (`"GSLC"`, or `"GUNW"`
+        when the geometry comes from a NASA GUNW's own embedded cube). `dem` is
+        a GeoTIFF path or DataArray of ellipsoidal heights (`None` -> sea-level
+        geometry). `sign=-1` corrects data whose fringe sense is inverted
+        relative to this package's `ref * conj(sec)` convention; the stored
+        `los` is positive toward the sensor either way, and nothing downstream
+        re-applies it (see `nisar_tools.geometry.phase_to_los`).
 
-        ``mask_geometry`` (default) blanks the geometry outside the data. The
+        `mask_geometry` (default) blanks the geometry outside the data. The
         cube spans the frame's whole bounding rectangle and knows nothing about
         where the radar actually had returns, so interpolating it fills every
         pixel -- which plots as a solid rectangle bearing no resemblance to the
         swath, and quietly reports an incidence angle for ground the pass never
-        illuminated. Pass ``False`` to keep the full rectangle.
+        illuminated. Pass `False` to keep the full rectangle.
         """
         from . import geometry
 
@@ -202,50 +206,48 @@ class LOSStack(RasterStackMixin):
                  look_convention="target_to_sensor", epsg=None,
                  resolution=None, resampling="bilinear", direction=None,
                  look_direction=None, wavelength=None):
-        """Build a :class:`LOSStack` from GMT ``.grd`` grids of displacement and
-        look vector -- the route in for LOS products this package did not make
-        (GMTSAR, ISCE, ALOS, a colleague's ``.grd``).
+        """Build a `LOSStack` from GMT `.grd` grids of displacement and look vector.
 
-        ``los`` is one displacement grid or a sequence of them (one per pair);
-        ``look_e``/``look_n``/``look_u`` are the three components of the
+        The route in for LOS products this package did not make (GMTSAR, ISCE,
+        ALOS, a colleague's `.grd`).
+
+        `los` is one displacement grid or a sequence of them (one per pair);
+        `look_e`/`look_n`/`look_u` are the three components of the
         line-of-sight unit vector, shared by every pair. Look grids on a
-        different lattice than ``los`` are resampled onto it.
+        different lattice than `los` are resampled onto it.
 
-        Three things have to be declared because no ``.grd`` records them, and
+        Three things have to be declared because no `.grd` records them, and
         each is silently wrong-looking rather than loud if mis-set:
 
-        ``units``
-            ``"m"`` (default), ``"cm"`` or ``"mm"`` -- a file called
-            ``los_cm.grd`` needs ``units="cm"``. Everything downstream works in
-            metres, so a factor of 100 here becomes a factor of 100 in the
-            recovered slip.
-        ``sign``
-            ``+1`` if the grid is already **positive toward the sensor** (this
-            package's convention, and the sense of a *decreasing* range);
-            ``-1`` if it is positive away, i.e. positive range change, which is
-            the other common convention. Applied on load, exactly as
-            :func:`~nisar_tools.geometry.phase_to_los` applies it, so what is
-            stored is canonical and nothing downstream re-applies it.
-        ``look_convention``
-            ``"target_to_sensor"`` (default, this package's) or
-            ``"sensor_to_target"``, which is negated on load. Checked against
-            the data: the vertical component of a target->sensor vector is
-            ``cos(incidence)`` and must be **positive**, so a mis-declaration
-            raises rather than inverting the geometry.
+        - `units`: `"m"` (default), `"cm"` or `"mm"` -- a file called
+          `los_cm.grd` needs `units="cm"`. Everything downstream works in
+          metres, so a factor of 100 here becomes a factor of 100 in the
+          recovered slip.
+        - `sign`: `+1` if the grid is already **positive toward the sensor**
+          (this package's convention, and the sense of a *decreasing* range);
+          `-1` if it is positive away, i.e. positive range change, which is
+          the other common convention. Applied on load, exactly as
+          `nisar_tools.geometry.phase_to_los` applies it, so what is
+          stored is canonical and nothing downstream re-applies it.
+        - `look_convention`: `"target_to_sensor"` (default, this package's) or
+          `"sensor_to_target"`, which is negated on load. Checked against
+          the data: the vertical component of a target->sensor vector is
+          `cos(incidence)` and must be **positive**, so a mis-declaration
+          raises rather than inverting the geometry.
 
         The grid is reprojected to a metric CRS if it is geographic -- the
-        quadtree in :meth:`~slipsolve.Observations.from_los` measures cell
-        widths against ``width_min`` in metres, so a lon/lat lattice would put
-        ``width_min=1000`` at a million columns. ``epsg`` picks the target
-        (default: the UTM zone of the scene centre) and ``resolution`` its pixel
+        quadtree in `slipsolve.Observations.from_los` measures cell
+        widths against `width_min` in metres, so on a lon/lat lattice
+        `width_min=1000` would mean 1000 degrees. `epsg` picks the target
+        (default: the UTM zone of the scene centre) and `resolution` its pixel
         size in metres (default: rasterio's estimate from the source grid).
 
-        ``direction`` (``"ascending"``/``"descending"``) and ``look_direction``
-        (``"left"``/``"right"``; ALOS is **right**-looking, NISAR is left) are
+        `direction` (`"ascending"`/`"descending"`) and `look_direction`
+        (`"left"`/`"right"`; ALOS is **right**-looking, NISAR is left) are
         carried as provenance and are what lets
-        :func:`slipsolve.diagnostics.scene_report` check ``los_east``'s
+        `slipsolve.diagnostics.scene_report` check `los_east`'s
         sign against the pass geometry -- the invariant that catches an inverted
-        look vector. ``wavelength`` is provenance only; the grid is already
+        look vector. `wavelength` is provenance only; the grid is already
         displacement, so nothing rescales by it.
         """
         from . import geo
@@ -327,7 +329,7 @@ class LOSStack(RasterStackMixin):
             "stage": name,
             # `.get`, not `self.epsg`: a stack resampled into a LocalFrame has no
             # EPSG code at all, and the property raises. The frame goes in beside
-            # it, and only when present, so a UTM stack keeps the hash it had.
+            # it, and only when present, so it does not change a UTM stack's hash.
             "epsg": self.ds.attrs.get("epsg"),
             **({"frame": self.ds.attrs["frame"]}
                if self.ds.attrs.get("frame") is not None else {}),
@@ -337,9 +339,9 @@ class LOSStack(RasterStackMixin):
             "frequency": self.ds.attrs.get("frequency"),
             "sign": self.ds.attrs.get("sign"),
             # `sign` alone cannot invalidate a store when the *formula* changes
-            # underneath it -- its value stayed 1 across the 2026-07-28 sign fix
-            # while every pixel flipped. Pinning the convention itself makes a
-            # stale `los_*.zarr` raise instead of silently reloading mirrored
+            # underneath it: its value can stay 1 while every pixel flips.
+            # Pinning the convention itself makes a store written under another
+            # convention raise instead of silently reloading mirrored
             # displacement.
             "phase_convention": f"ref*conj(sec),d={geometry.PHASE_RANGE_SIGN:+d}(lambda/4pi)phi",
             "pairs": self.ds.attrs.get("pairs"),
@@ -350,9 +352,11 @@ class LOSStack(RasterStackMixin):
 
     # -- export -----------------------------------------------------------
     def _grd_specs(self):
-        """The per-pair ``los`` displacement (written ``los_pair{i}.grd``) and
-        the shared 2-D look geometry: the ENU LOS unit vector, the two angles,
-        and the sampled DEM ``height`` (one file each)."""
+        """The per-pair `los` (written `los_pair{i}.grd`) and the shared look geometry.
+
+        The geometry is the ENU LOS unit vector, the two angles and the sampled
+        DEM `height`, one file each.
+        """
         specs = [("los", self.ds["los"], True)]
         for v in _GEOM_2D:
             if v in self.ds.data_vars:
@@ -364,15 +368,15 @@ class LOSStack(RasterStackMixin):
         """Quadtree-sample this stack into slip-inversion observations.
 
         The seam between this package and
-        `slipsolve <https://github.com/eitanrapa/slipsolve-python>`_, and it
-        lives **here** on purpose. ``slipsolve`` is duck-typed on ``.ds`` and
+        [slipsolve](https://github.com/eitanrapa/SlipSolve-Python), and it
+        lives **here** on purpose. `slipsolve` is duck-typed on `.ds` and
         knows nothing about NISAR; the adapter therefore belongs with the class
         that is NISAR-specific, not with the inversion. That is what lets the
         inversion be installed, tested and released without this package.
 
-        ``kwargs`` are passed through to
-        :meth:`slipsolve.Observations.from_los` -- ``rms_min``, ``width_min``,
-        ``width_max``, ``exclude_within`` and the rest of the quadtree controls.
+        `kwargs` are passed through to
+        `slipsolve.Observations.from_los` -- `rms_min`, `width_min`,
+        `width_max`, `exclude_within` and the rest of the quadtree controls.
         """
         try:
             from slipsolve import Observations

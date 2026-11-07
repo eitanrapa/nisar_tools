@@ -1,28 +1,53 @@
-"""nisar_tools: object-oriented, out-of-core NISAR GSLC InSAR processing.
+"""nisar_tools: out-of-core NISAR InSAR processing with xarray and dask.
 
-The pipeline is built around lazy ``xarray`` datasets backed by ``dask`` and
-persisted between stages to a Zarr :class:`~nisar_tools.workspace.Workspace`,
-so a full stack of acquisitions never needs to fit in memory at once.
+Every stage is a lazy `xarray` dataset backed by `dask` and is persisted to a
+Zarr `Workspace`, so a full stack of acquisitions never has to fit in memory
+and an interrupted run resumes where it left off.
 
-Typical flow::
+The main entry points, in pipeline order:
 
-    from nisar_tools import GSLC, GSLCStack, Workspace
+- `download`: GSLC granules, DEMs and NISAR TEC files from NASA Earthdata
+  (`download_gslcs`, `download_dem`, `download_tec`, `login`).
+- `GSLC` and `RSLC`: one granule each, read lazily. `geocode_rslc` makes a
+  NISAR-format GSLC from an RSLC (a port of ISCE3's GSLC workflow), and a
+  `RegistrationField` coregisters it to a reference GSLC.
+- `GSLCStack`: co-registered GSLCs on one grid: crop, merge adjacent frames,
+  mask water and swath edges.
+- `InterferogramStack`: multilooked interferograms and coherence, the Goldstein
+  filter, water, edge and island masking.
+- `UnwrappedStack`: SNAPHU unwrapping (or a NASA GUNW, read as it is),
+  deramping, outlier rejection.
+- `ionosphere` and `nisar_tools.split_spectrum`: the dual-frequency
+  (split-spectrum) ionosphere correction.
+- `PixelOffsetStack` (amplitude cross-correlation of two GSLCs) and `roff`
+  (NISAR's dense ROFF/GOFF offsets from two RSLCs, ported from ISCE3).
+- `LOSStack`: line-of-sight displacement in metres, positive toward the
+  sensor, with the per-pixel look geometry.
 
-    ws = Workspace("workdir/")
-    stack = GSLCStack.from_gslcs([GSLC(p) for p in paths], bbox=bbox)
-    stack = stack.persist(ws, "slc_stack", files=paths, bbox=bbox)
-    igrams = stack.form_interferograms(looks=5).persist(ws, "igrams")
-    igrams = igrams.filter_goldstein(alpha=0.5)   # adaptive phase filter
-    unw = igrams.unwrap(ws, nproc=8)
+A typical run:
 
-    offsets = stack.pixel_offsets(step=64)        # amplitude offset tracking
+```python
+from nisar_tools import GSLC, GSLCStack, Workspace
 
-Making a GSLC from an RSLC (a port of ISCE3's GSLC workflow)::
+ws = Workspace("workdir/")
+stack = GSLCStack.from_gslcs([GSLC(p) for p in paths], bbox=bbox)
+stack = stack.persist(ws, "slc_stack", files=paths, bbox=bbox)
+igrams = stack.form_interferograms(looks=5).persist(ws, "igrams")
+igrams = igrams.filter_goldstein(alpha=0.5)
+unw = igrams.unwrap(ws, nproc=8)
+los = unw.to_los(gslc=paths[0], dem=dem_path)
 
-    from nisar_tools import RSLC, download_tec, geocode_rslc
+offsets = stack.pixel_offsets(step=64)        # amplitude offset tracking
+```
 
-    tec = download_tec("data/", rslc=rslc_path)
-    geocode_rslc(rslc_path, "data/", dem_path, tec_file=tec, like=same_frame_gunw)
+Making a GSLC from an RSLC:
+
+```python
+from nisar_tools import download_tec, geocode_rslc
+
+tec = download_tec("data/", rslc=rslc_path)
+geocode_rslc(rslc_path, "data/", dem_path, tec_file=tec, like=same_frame_gunw)
+```
 """
 
 from . import download

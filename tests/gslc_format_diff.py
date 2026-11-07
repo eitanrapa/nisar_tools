@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Compare the HDF5 *format* of two NISAR GSLC files, ignoring their data.
 
-Usage::
+Usage:
 
     python tests/gslc_format_diff.py REFERENCE.h5 CANDIDATE.h5 [--values]
 
@@ -9,10 +9,10 @@ Walks both files and reports, per object: presence, dtype, rank, chunking,
 filter pipeline, fill value, and every attribute's name and type. Shapes are
 compared only where they do not depend on the scene (scalars, and the rank of
 everything else), because two granules of different frames legitimately differ
-in size. ``--values`` additionally compares scalar values and attribute values
+in size. `--values` additionally compares scalar values and attribute values
 that are scene-independent (descriptions, units, CF names).
 
-Built to check :mod:`nisar_tools.gslc_product` against an ASF-distributed GSLC;
+Built to check `nisar_tools.gslc_product` against an ASF-distributed GSLC;
 exit status is non-zero if anything structural differs.
 """
 

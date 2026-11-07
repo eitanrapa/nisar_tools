@@ -208,8 +208,8 @@ def test_mark_pair_done_is_thread_safe(tmp_path):
 # The rules these pin (see nisar_tools/_kernels.py):
 #   * tile geometry depends on the raster, never on nproc;
 #   * every tiling SNAPHU is handed satisfies its own CheckParams preconditions
-#     AND stays under the per-tile region ceiling that made unwrap abort with
-#     "Number of regions in tile exceeds max allowed" at small nproc.
+#     and stays under the per-tile region ceiling, past which SNAPHU aborts with
+#     "Number of regions in tile exceeds max allowed".
 
 SHAPES = [
     (11, 11), (64, 64), (300, 900), (522, 474), (903, 1112), (2000, 3000),
@@ -231,8 +231,8 @@ def test_snaphu_params_is_always_legal(shape):
 def test_snaphu_params_is_independent_of_nproc(shape):
     """Tiling is part of the answer, so nproc must not move it.
 
-    The old formula derived ntiles from nproc, which silently changed the
-    unwrapped phase between runs while leaving the params hash untouched.
+    Deriving ntiles from nproc would silently change the unwrapped phase
+    between runs while leaving the params hash untouched.
     """
     geometries = {_kernels.snaphu_params(shape, n) for n in range(1, 65)}
     assert len(geometries) == 1
@@ -252,14 +252,14 @@ def test_snaphu_params_respects_the_tile_budget(shape):
 
 
 def test_snaphu_params_check_warns_about_the_region_ceiling():
-    """The exact configuration that used to abort inside SNAPHU.
+    """A tiling past SNAPHU's per-tile region ceiling warns; a finer one is silent.
 
     A warning, not an error: the ceiling is on the region *count*, and
-    ``tile_area / min_region_size`` is only the worst case -- a 600x332 tile with a
-    32000 budget was measured forming 6566 regions and unwrapping fine. Refusing
-    outright would block a coarse tiling that would have worked.
+    `tile_area / min_region_size` is only the worst case -- a tile can form far
+    fewer regions than that and unwrap fine. Refusing outright would block a
+    coarse tiling that would have worked.
     """
-    # 4000x4000 at the old nproc=2 mapping: one 4000x2128 tile, 8.5 M pixels.
+    # 4000x4000 in (1, 2) tiles: one 4000x2128 tile, 8.5 M pixels.
     with pytest.warns(RuntimeWarning, match="Number of regions in tile exceeds"):
         _kernels.snaphu_params_check((4000, 4000), (1, 2), 256)
     # A finer grid on the same raster is silent.
@@ -272,7 +272,7 @@ def test_snaphu_params_check_reports_checkparams_conditions():
     # ntilerow^2 > nlines
     with pytest.raises(ValueError, match=r"ntilerow\^2"):
         _kernels.snaphu_params_check((100, 4000), (11, 2), 4)
-    # ntilecol + colovrlp > linelen -- the hole the old max(10, ...) floor left.
+    # ntilecol + colovrlp > linelen
     with pytest.raises(ValueError, match="ntilecol \\+ colovrlp"):
         _kernels.snaphu_params_check((400, 11), (2, 2), 10)
     # A single tile is exempt: snaphu ignores the tiling entirely.
@@ -290,8 +290,8 @@ def test_snaphu_params_honours_explicit_overrides():
 
 def test_snaphu_error_detail_strips_the_constant_overlap_warning():
     """SNAPHU writes warnings and errors to the same stream, and snaphu-py
-    re-raises the whole buffer -- so the overlap warning always led the message
-    and made every failure look like an overlap problem."""
+    re-raises the whole buffer -- so the overlap warning would lead every message
+    and make every failure look like an overlap problem."""
     stderr = (
         "WARNING: Tile overlap is small (may give bad results)\n"
         "Number of regions in tile exceeds max allowed\n"
@@ -316,7 +316,7 @@ def test_unwrap_tiling_is_in_the_params_hash_but_nproc_is_not(
     igrams.unwrap(ws, name="a", nproc=1)
     base = ws.stored_params_hash("a")
 
-    # nproc no longer changes the result, so it must not invalidate the store.
+    # nproc does not change the result, so it must not invalidate the store.
     igrams.unwrap(ws, name="a", nproc=4)
     assert ws.stored_params_hash("a") == base
 

@@ -1,41 +1,41 @@
 """Dense pixel offsets between two radar-geometry SLCs: ISCE3's PyCuAmpcor, in numpy.
 
 This is the cross-correlator NISAR's ROFF/GOFF products are made with: ISCE3 v0.25.16
-``nisar.workflows.offsets_product`` drives ``isce3.cuda.matchtemplate.PyCuAmpcor`` (GPU only --
+`nisar.workflows.offsets_product` drives `isce3.cuda.matchtemplate.PyCuAmpcor` (GPU only --
 "Currently ISCE3 supports only GPU cross-correlation") on the reference RSLC and the
-geometry-coregistered secondary. Each window follows ``cuAmpcorChunk::run`` step for step:
+geometry-coregistered secondary. Each window follows `cuAmpcorChunk::run` step for step:
 
 1. **Raw stage.** Amplitudes; the reference window's mean removed (the secondary's is not --
    the normalisation takes care of it). FFT cross-correlation of the reference window over the
-   ``window + 2*half_search`` secondary chip (``cuFreqCorrelator``: template zero-padded at the
-   end, ``conj(T) * S``, the top-left ``2*half_search + 1`` lags kept). Normalised
-   cross-correlation, ``corr / sqrt((S2 - S1**2/N) * sum(t**2) + FLT_EPSILON)`` with ``S1``/``S2``
-   the secondary's sums over each lag's window (``cuCorrNormalize``). Integer peak (first maximum
+   `window + 2*half_search` secondary chip (`cuFreqCorrelator`: template zero-padded at the
+   end, `conj(T) * S`, the top-left `2*half_search + 1` lags kept). Normalised
+   cross-correlation, `corr / sqrt((S2 - S1**2/N) * sum(t**2) + FLT_EPSILON)` with `S1`/`S2`
+   the secondary's sums over each lag's window (`cuCorrNormalize`). Integer peak (first maximum
    in row-major order). Offset variance from the surface's curvature at that peak
-   (``cuEstimateVariance``; 99 where the peak touches the edge or the curvature is below 1e-2).
-   SNR = peak**2 / mean of corr**2 over a ``correlation_statistics_zoom`` window around the peak,
-   the peak excluded (``cuEstimateSnr``; samples outside the surface do not count).
-2. **Re-centre.** A secondary chip of ``window + 2*h`` around the peak, ``h =
-   correlation_surface_zoom / (2 * slc_oversampling_factor)``, its start clamped to the search
-   window (``dev_adjustOffset``; the clamp is remembered as the *shift*).
-3. **Oversampled stage.** Both chips deramped (``deramping_method="complex"``: the mean phase step
-   along the chosen axis, ``angle(sum z * conj(z_next))``, removed as a linear ramp in double
-   precision), FFT-oversampled by ``slc_oversampling_factor`` (``cuOverSamplerC2C``: inverse FFT,
-   1/N, the quadrant copy of ``cuArraysPaddingMany`` -- the Nyquist bin goes to the negative
+   (`cuEstimateVariance`; 99 where the peak touches the edge or the curvature is below 1e-2).
+   SNR = peak**2 / mean of corr**2 over a `correlation_statistics_zoom` window around the peak,
+   the peak excluded (`cuEstimateSnr`; samples outside the surface do not count).
+2. **Re-centre.** A secondary chip of `window + 2*h` around the peak,
+   `h = correlation_surface_zoom / (2 * slc_oversampling_factor)`, its start clamped to the search
+   window (`dev_adjustOffset`; the clamp is remembered as the *shift*).
+3. **Oversampled stage.** Both chips deramped (`deramping_method="complex"`: the mean phase step
+   along the chosen axis, `angle(sum z * conj(z_next))`, removed as a linear ramp in double
+   precision), FFT-oversampled by `slc_oversampling_factor` (`cuOverSamplerC2C`: inverse FFT,
+   1/N, the quadrant copy of `cuArraysPaddingMany` -- the Nyquist bin goes to the negative
    side, unsplit -- forward FFT), amplitudes, the reference's mean removed, correlated and
    normalised again; the last row and column dropped to make the surface even.
-4. **Sub-pixel.** That surface oversampled by ``correlation_surface_oversampling_factor``
-   (``"sinc"``: ``cuSincOverSamplerR2R`` -- an 8-tap Hann-windowed sinc of bandwidth 0.75,
+4. **Sub-pixel.** That surface oversampled by `correlation_surface_oversampling_factor`
+   (`"sinc"`: `cuSincOverSamplerR2R` -- an 8-tap Hann-windowed sinc of bandwidth 0.75,
    tabulated at 1/4096 sample, normalised by its weight sum, evaluated only within +-2 surface
-   samples of the re-centred peak, the rest left 0; ``"fft"``: ``cuOverSamplerR2R``). Argmax.
-5. ``offset = start + argmax / (surface_factor * slc_factor) - half_search`` per axis; the
-   oversampled maximum is the ``correlationSurfacePeak``.
+   samples of the re-centred peak, the rest left 0; `"fft"`: `cuOverSamplerR2R`). Argmax.
+5. `offset = start + argmax / (surface_factor * slc_factor) - half_search` per axis; the
+   oversampled maximum is the `correlationSurfacePeak`.
 
 **Departures.** float32 FFTs as cuFFT, but numpy's summation order: not bit-identical to the GPU,
 agreement is to rounding. The separable sinc is evaluated as two small matrix products
 (identical arithmetic up to rounding -- the CUDA kernel's 2-D sum and normalisation factor into
-row and column weights). ``cuSincInterpolation_kernel`` wraps the *row* index with the
-*column* count (``inx -= inNY``); the surfaces here are square, so it cannot differ.
+row and column weights). `cuSincInterpolation_kernel` wraps the *row* index with the
+*column* count (`inx -= inNY`); the surfaces here are square, so it cannot differ.
 
 Axes follow ISCE3: "down" = azimuth = rows, "across" = range = columns.
 """
@@ -58,7 +58,7 @@ _SINC_DECFACTOR = 4096
 
 @dataclass(frozen=True)
 class AmpcorParams:
-    """One offsets layer, as ``offsets_product``'s runconfig gives it (NISAR GOFF defaults)."""
+    """One offsets layer, as `offsets_product`'s runconfig gives it (NISAR GOFF defaults)."""
 
     window_range: int = 64
     window_azimuth: int = 64
@@ -74,7 +74,7 @@ class AmpcorParams:
 
     @property
     def zoom_window(self):
-        """``zoomWindowSize`` after ``setupParameters``."""
+        """`zoomWindowSize` after `setupParameters`."""
         actual = min(self.half_search_range, self.half_search_azimuth) * 2 * self.slc_oversampling_factor
         return min(self.correlation_surface_zoom, actual)
 
@@ -89,7 +89,7 @@ def _sinc_filter_cached():
 
 
 def sinc_filter():
-    """``cuSetupSincKernel``: the 8-tap Hann-windowed sinc table, float32, length 8*4096 + 1."""
+    """`cuSetupSincKernel`: the 8-tap Hann-windowed sinc table, float32, length 8*4096 + 1."""
     intplength = int(_SINC_RELFILTLEN / _SINC_BETA + 0.5)
     ncoef = intplength * _SINC_DECFACTOR
     i = np.arange(ncoef + 1, dtype=np.float64)
@@ -112,8 +112,8 @@ def _sinc_matrix(n_in, covs, rows):
 
 
 def _sinc_matrix_impl(n_in, covs, rows):
-    """Normalised sinc weights mapping an ``n_in`` surface onto output indices ``rows``
-    (``cuSincInterpolation_kernel``'s 1-D factor): ``(len(rows), n_in)``."""
+    """Normalised sinc weights mapping an `n_in` surface onto output indices `rows`
+    (`cuSincInterpolation_kernel`'s 1-D factor): `(len(rows), n_in)`."""
     filt, ntap = _sinc_filter_cached()
     rows = np.asarray(rows)
     r_out = rows.astype(np.float32) / np.float32(covs)
@@ -129,7 +129,7 @@ def _sinc_matrix_impl(n_in, covs, rows):
 
 
 def _fft_oversample(z, factor, workers):
-    """``cuOverSamplerC2C``: ``fft(quadrant_pad(ifft(z)))`` per image, ``(N, h, w)`` -> ``(N, h*f, w*f)``."""
+    """`cuOverSamplerC2C`: `fft(quadrant_pad(ifft(z)))` per image, `(N, h, w)` -> `(N, h*f, w*f)`."""
     n, h1, w1 = z.shape
     h2, w2 = h1 * factor, w1 * factor
     F = sfft.ifft2(z, axes=(-2, -1), workers=workers)
@@ -143,14 +143,14 @@ def _fft_oversample(z, factor, workers):
 
 
 def _fft_oversample_real(s, factor, workers):
-    """``cuOverSamplerR2R`` on a batch of real surfaces (the ``"fft"`` method)."""
+    """`cuOverSamplerR2R` on a batch of real surfaces (the `"fft"` method)."""
     return _fft_oversample(s.astype(np.complex64), factor, workers).real.astype(np.float32)
 
 
 def _deramp(z, method, axis):
-    """``cuDeramp``: remove the mean phase step along ``axis`` (0 azimuth, 1 range, 2 both).
+    """`cuDeramp`: remove the mean phase step along `axis` (0 azimuth, 1 range, 2 both).
 
-    The ramp ``exp(i (row*phase_x + col*phase_y))`` factors into a row and a column term,
+    The ramp `exp(i (row*phase_x + col*phase_y))` factors into a row and a column term,
     so it is applied as two broadcast multiplies (CUDA rotates each sample once, in double;
     the difference is float32 rounding).
     """
@@ -170,11 +170,11 @@ def _deramp(z, method, axis):
 
 
 def _xcorr(t, s, workers):
-    """``cuFreqCorrelator``: correlation of templates ``t`` (N, ht, wt) over images ``s`` (N, hs, ws).
+    """`cuFreqCorrelator`: correlation of templates `t` (N, ht, wt) over images `s` (N, hs, ws).
 
-    ``corr[u, v] = sum t[i, j] s[i + u, j + v]`` for the ``(hs - ht + 1, ws - wt + 1)`` lags that
+    `corr[u, v] = sum t[i, j] s[i + u, j + v]` for the `(hs - ht + 1, ws - wt + 1)` lags that
     keep the template inside the image. Those lags never wrap, so the transform may be any size
-    of at least the image: a fast length is used instead of cuFFT's ``(hs, ws)``.
+    of at least the image: a fast length is used instead of cuFFT's `(hs, ws)`.
     """
     n, ht, wt = t.shape
     _, hs, ws = s.shape
@@ -188,7 +188,7 @@ def _xcorr(t, s, workers):
 
 
 def _window_sums(a, ht, wt, nu, nv):
-    """Sums of ``a`` (N, H, W) over every ``ht x wt`` window at the ``nu x nv`` leading lags."""
+    """Sums of `a` (N, H, W) over every `ht x wt` window at the `nu x nv` leading lags."""
     c = np.cumsum(a, axis=1, dtype=np.float64)
     r = c[:, ht - 1:ht - 1 + nu, :].copy()
     r[:, 1:, :] -= c[:, :nu - 1, :]
@@ -199,7 +199,7 @@ def _window_sums(a, ht, wt, nu, nv):
 
 
 def _normalise(corr, t, s):
-    """``cuCorrNormalize``: normalised cross-correlation (template mean already removed)."""
+    """`cuCorrNormalize`: normalised cross-correlation (template mean already removed)."""
     n, ht, wt = t.shape
     nu, nv = corr.shape[1:]
     t2 = np.einsum("nij,nij->n", t, t, dtype=np.float64)
@@ -210,12 +210,12 @@ def _normalise(corr, t, s):
 
 
 def _argmax_cuda(values, gids, block=NTHREADS):
-    """``cudaKernel_maxloc2D``'s choice among ``values`` (N, K) at flat indices ``gids``.
+    """`cudaKernel_maxloc2D`'s choice among `values` (N, K) at flat indices `gids`.
 
-    Each of ``block`` threads keeps the first strict maximum of the flat indices congruent to
+    Each of `block` threads keeps the first strict maximum of the flat indices congruent to
     its id; the tree reduction keeps the lower thread on a tie. So the winner is the maximum
-    whose ``gid % block`` is smallest, then the smallest ``gid``. NaN never wins (every
-    comparison with it is false). Returns ``(position in K, value)`` per row.
+    whose `gid % block` is smallest, then the smallest `gid`. NaN never wins (every
+    comparison with it is false). Returns `(position in K, value)` per row.
     """
     v = values
     if np.isnan(v).any():
@@ -232,14 +232,14 @@ def _argmax_cuda(values, gids, block=NTHREADS):
 
 
 def _argmax2d(a):
-    """``cuArraysMaxloc2D`` over a batch of 2-D surfaces: ``(row, col, value)`` per image."""
+    """`cuArraysMaxloc2D` over a batch of 2-D surfaces: `(row, col, value)` per image."""
     n, h, w = a.shape
     k, v = _argmax_cuda(a.reshape(n, -1), np.arange(h * w))
     return k // w, k % w, v
 
 
 def _variance(corr, px, py, peak, template_size):
-    """``cuEstimateVariance``: (cov_down, cov_across, cov_cross) in raw pixels**2."""
+    """`cuEstimateVariance`: (cov_down, cov_across, cov_cross) in raw pixels**2."""
     n, nx, ny = corr.shape
     out = np.full((n, 3), [99.0, 99.0, 0.0], np.float32)
     ok = (px - 1 >= 0) & (py - 1 >= 0) & (px + 1 < nx) & (py + 1 < ny)
@@ -249,7 +249,7 @@ def _variance(corr, px, py, peak, template_size):
     c = corr[idx].astype(np.float32)
     x, y = px[idx], py[idx]
     g = lambda dx, dy: c[np.arange(idx.size), x + dx, y + dy]    # noqa: E731
-    # ``- (a + b - 2.0*c)``: the float sum a + b, then a double subtraction, rounded on assignment
+    # `- (a + b - 2.0*c)`: the float sum a + b, then a double subtraction, rounded on assignment
     dxx = (-((g(1, 0) + g(-1, 0)).astype(np.float64) - 2.0 * g(0, 0))).astype(np.float32)
     dyy = (-((g(0, 1) + g(0, -1)).astype(np.float64) - 2.0 * g(0, 0))).astype(np.float32)
     dxy = (g(1, 1) + g(-1, -1) - g(1, -1) - g(-1, 1)) * np.float32(0.25)
@@ -271,7 +271,7 @@ def _variance(corr, px, py, peak, template_size):
 
 
 def _snr(corr, px, py, peak, zoom):
-    """``cuArraysCopyExtractCorr`` + ``cuArraysSumCorr`` + ``cuEstimateSnr``."""
+    """`cuArraysCopyExtractCorr` + `cuArraysSumCorr` + `cuEstimateSnr`."""
     n, nx, ny = corr.shape
     zx, zy = min(zoom, nx), min(zoom, ny)
     ox = np.arange(zx)[None, :] + px[:, None] - zx // 2
@@ -289,7 +289,7 @@ def _snr(corr, px, py, peak, zoom):
 
 
 def _adjust(maxloc, old_range, new_range):
-    """``dev_adjustOffset``: zoom-chip start inside the search window, and the clamp shift."""
+    """`dev_adjustOffset`: zoom-chip start inside the search window, and the clamp shift."""
     start = maxloc - new_range
     rbound = 2 * (old_range - new_range)
     shift = np.where(start < 0, -start, np.where(start > rbound, start - rbound, 0))
@@ -300,12 +300,13 @@ def _adjust(maxloc, old_range, new_range):
 def ampcor_windows(ref, sec, params=AmpcorParams(), workers=1):
     """Offsets for a batch of windows.
 
-    ``ref`` is ``(N, window_azimuth, window_range)`` complex reference windows and ``sec``
-    ``(N, window_azimuth + 2*half_search_azimuth, window_range + 2*half_search_range)`` complex
-    secondary chips, the chip's ``[half_search, half_search]`` sample aligned with the window's
-    ``[0, 0]`` (zero gross offset). Returns a dict of per-window arrays: ``down`` and ``across``
-    offsets (secondary minus reference, raw pixels), ``snr``, ``cov`` ``(N, 3)`` (down, across,
-    cross; raw pixels**2) and ``peak`` (the oversampled correlation maximum).
+    `ref` is `(N, window_azimuth, window_range)` complex reference windows and `sec`
+    `(N, window_azimuth + 2*half_search_azimuth, window_range + 2*half_search_range)` complex
+    secondary chips, the chip's `[half_search, half_search]` sample aligned with the window's
+    `[0, 0]` (zero gross offset). Returns a dict of per-window arrays: `down` and `across`
+    offsets (secondary minus reference, raw pixels), `snr`, `cov` `(N, 3)` (down, across,
+    cross; raw pixels**2), `peak` (the oversampled correlation maximum) and the integer
+    raw-stage offsets `raw_down` and `raw_across`.
     """
     p = params
     ref = np.asarray(ref, np.complex64)
@@ -385,10 +386,10 @@ def ampcor_windows(ref, sec, params=AmpcorParams(), workers=1):
 def window_grid(length, width, layers, margin=250, skip_azimuth=15, skip_range=15,
                 start_pixel_azimuth=None, start_pixel_range=None, gross_offset_azimuth=0,
                 gross_offset_range=0):
-    """``get_start_pixels`` + ``get_offsets_shape``: the window lattice common to all ``layers``.
+    """`get_start_pixels` + `get_offsets_shape`: the window lattice common to all `layers`.
 
-    Returns ``(az_start, rg_start, n_down, n_across)``: window ``(i, j)`` covers reference rows
-    ``az_start + i*skip_azimuth`` onward and columns ``rg_start + j*skip_range`` onward.
+    Returns `(az_start, rg_start, n_down, n_across)`: window `(i, j)` covers reference rows
+    `az_start + i*skip_azimuth` onward and columns `rg_start + j*skip_range` onward.
     """
     margin = max(margin, abs(gross_offset_range), abs(gross_offset_azimuth))
     hs_az = min(L.half_search_azimuth for L in layers)

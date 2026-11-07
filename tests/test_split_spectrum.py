@@ -1,7 +1,7 @@
-"""``nisar_tools.split_spectrum``: the main/side-band ionosphere without the fault leakage.
+"""`nisar_tools.split_spectrum`: the main/side-band ionosphere without the fault leakage.
 
 The central property: with the A phase unwrapped correctly (the caller's job, fault-aware), the
-only thing unwrapped is ``r = phi_B - (f_B/f_A) phi_A = k d``, which holds no deformation, so a
+only thing unwrapped is `r = phi_B - (f_B/f_A) phi_A = k d`, which holds no deformation, so a
 large near-fault deformation -- steps included -- does not reach the screen.
 """
 
@@ -132,7 +132,7 @@ def test_gslc_cells_sums_the_pairs(tmp_path):
 
 def _steep_pair(tmp_path, gradient=10.0, seed=3):
     """Band A (5 m) and band B (40 x 5 m) GSLC pairs over 10 x 10 cells of 240 m, perfectly coherent, with independent
-    speckle amplitudes in the two bands: the deformation ``gradient`` (rad/km at f_A, along x, plus curvature along y)
+    speckle amplitudes in the two bands: the deformation `gradient` (rad/km at f_A, along x, plus curvature along y)
     and a smooth ionosphere. Returns the paths and the analytic deformation and ionosphere as functions of (x, y)."""
     rng = np.random.default_rng(seed)
     y = 3000.0 - 2.5 - 5.0 * np.arange(552)
@@ -214,7 +214,7 @@ def test_gslc_cells_counts_only_pixels_with_a_model(tmp_path):
 
 
 def test_gslc_cells_can_drop_partially_focused_pixels(tmp_path):
-    """The products' mask (0 = partially focused) keeps a near-range strip out of the cell sums (A004, 2026-10-14)."""
+    """The products' mask (0 = partially focused) keeps a near-range strip out of the cell sums."""
     rng = np.random.default_rng(0)
     x = 1000.0 + 2.5 + 5.0 * np.arange(96)
     y = 3000.0 - 2.5 - 5.0 * np.arange(96)
@@ -235,8 +235,8 @@ def test_gslc_cells_can_drop_partially_focused_pixels(tmp_path):
 
 
 def test_gslc_cells_near_range_drops_only_the_near_range_strip(tmp_path):
-    """``subswath_mask="near_range"`` drops partially focused pixels only near the swath's near-range edge and keeps a
-    partially focused datatake start (A004, 2026-10-14: its rupture lies in one)."""
+    """`subswath_mask="near_range"` drops partially focused pixels only near the swath's near-range edge and keeps a
+    partially focused datatake start, where the signal of interest can lie."""
     rng = np.random.default_rng(0)
     nx = 240
     x = 1000.0 + 2.5 + 5.0 * np.arange(nx)             # whole cells: columns 40-87, 88-135, 136-183, 184-231
@@ -275,7 +275,7 @@ def test_gslc_cells_near_range_drops_only_the_near_range_strip(tmp_path):
 
 def test_plane_fill_follows_a_gradient_to_a_one_sided_edge():
     """Data on one side only, then a gap (a coast along a fault plus an excluded zone): ISCE3's fill, a zero-order
-    mean, lags the gradient there; the local-plane fill does not (D126, 2026-10-14: +20..26 mm LOS at the trace)."""
+    mean, lags the gradient there; the local-plane fill does not."""
     ny, nx, cell = 120, 160, 240.0
     yy, xx = np.mgrid[0:ny, 0:nx]
     truth = 0.02 * yy                                    # rad per 240 m cell along y
@@ -296,8 +296,8 @@ def test_plane_fill_follows_a_gradient_to_a_one_sided_edge():
 
 
 def test_a_wider_plane_fill_crosses_a_wide_edge_gap():
-    """An excluded near-range strip ~12 km wide (A004, 2026-10-14): the plane at the guide's sigma (2.6 km) reaches ~8 km
-    and the guide's constant takes over beyond; ``fill_m`` widens the plane so it follows the gradient across."""
+    """An excluded near-range strip ~12 km wide: the plane at the guide's sigma (2.6 km) reaches ~8 km and the guide's
+    constant takes over beyond; `fill_m` widens the plane so it follows the gradient across."""
     ny, nx, cell = 100, 200, 240.0
     yy, xx = np.mgrid[0:ny, 0:nx]
     truth = 0.02 * xx                                    # rad per 240 m cell, across the strip
@@ -313,7 +313,7 @@ def test_a_wider_plane_fill_crosses_a_wide_edge_gap():
     assert np.median(np.abs((s_wide - truth)[far])) < 0.15      # 0.095, most of it the final Gaussian at the array edge
     assert np.median(np.abs((s_wide - truth)[inner])) < 0.02     # nothing changes where there are data
     assert np.allclose(s_wide[inner], s_plane[inner], atol=1e-9)
-    # a capped reach: the plane stops 2.4 km out and the far end falls back to the guide (A004's islands)
+    # a capped reach: the plane stops 2.4 km out and the far end falls back to the guide
     s_cap, _ = ss.ionosphere_filter(data, sig, mask, cell, fill="plane", fill_m=6000.0, fill_reach_m=2400.0)
     assert np.median(np.abs((s_cap - truth)[far])) > 0.5
     assert np.allclose(s_cap[inner], s_plane[inner], atol=1e-9)
@@ -382,10 +382,10 @@ def test_a_ladder_of_planes_fills_each_gap_with_the_plane_that_interpolates_it()
 
 
 def test_a_singularity_in_a_gap_fill_does_not_cut_across_the_data():
-    """D040 (Panama, 2026-10-17): the wide Gaussians filling Parita Bay left a phase singularity 28 km from any cell, and
-    SNAPHU over the whole grid cut from it to the nearest grid edge -- across the 20 km neck joining Azuero to the
-    mainland -- putting one cycle of r (73 rad of screen) between them. Planted here: land north and south of a bay,
-    joined by a neck on the west, and a singularity in the bay nearer the west edge than any other."""
+    """The wide Gaussians that fill a large gap (a bay) can leave a phase singularity far from any cell. SNAPHU over the
+    whole grid cuts from it to the nearest grid edge, and where that cut crosses a neck of land it puts one cycle of r
+    (73 rad of screen) between the two sides. Planted here: land north and south of a bay, joined by a neck on the
+    west, and a singularity in the bay nearer the west edge than any other."""
     import snaphu
 
     ny, nx = 200, 220
@@ -398,7 +398,7 @@ def test_a_singularity_in_a_gap_fill_does_not_cut_across_the_data():
     phase = ss.wrap(truth)
     _, reach = ss._lowpass_filled(phase, valid, 3.0)
     assert not reach[100, 52] and reach[100, 25]           # the singularity lies beyond the data's reach
-    # the old way, SNAPHU over the whole grid, puts a cycle between north and south (the scene reproduces the failure)
+    # SNAPHU over the whole grid puts a cycle between north and south (the scene reproduces the failure)
     old = np.asarray(snaphu.unwrap(np.exp(1j * phase).astype(np.complex64), np.full(phase.shape, 0.95, np.float32),
                                    nlooks=50.0, cost="smooth", init="mcf")[0], float)
     jump = np.median((old - truth)[north]) - np.median((old - truth)[south])
@@ -441,8 +441,8 @@ def test_block_cycles_reads_how_far_a_block_is_off():
 
 
 def test_block_cycles_ignores_patches_of_local_cycle_errors():
-    """The near field of a rupture unwraps in patches (D141's north side): a third of the reference's cells 2-6 km from
-    the gap one cycle up must not move the tie."""
+    """The near field of a rupture unwraps in patches: a third of the reference's cells 2-6 km from the gap one cycle up
+    must not move the tie."""
     from scipy import ndimage
 
     c0, _ = ss.main_diff_coefficients(F_A, F_B)
@@ -474,8 +474,7 @@ def test_block_cycles_through_the_screen_with_a_rupture_between():
 def test_the_side_band_picks_the_unwrapping_that_is_right_patch_by_patch():
     """Two unwrappings of one pair disagree by a cycle in two patches: in one the base is wrong (the alternative right),
     in the other the alternative is. Every cycle the main band is off moves the raw dispersive estimate by 3.21 rad
-    times the share of a cell it covers, so the side band tells the two apart (D141, 2026-10-21: a 26 km2 patch 3 km
-    north of the trace, a cycle off in the cut unwrapping and right in the uncut one, reads -0.8 +- 0.1)."""
+    times the share of a cell it covers, so the side band tells the two apart."""
     rng = np.random.default_rng(5)
     nc, k, cell = 100, 4, 240.0                         # 100 x 100 cells of 240 m, main band on 60 m pixels
     xp = 60.0 * (np.arange(nc * k) + 0.5)

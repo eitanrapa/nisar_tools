@@ -1,24 +1,25 @@
-"""The :class:`PixelOffsetStack`: sub-pixel offsets by amplitude cross-correlation.
+"""The `PixelOffsetStack`: sub-pixel offsets by amplitude cross-correlation.
 
-Backed by a lazy ``xarray`` Dataset with ``x_offset``, ``y_offset`` and
-``correlation`` (all float32) variables of dims ``(pair, y, x)``, on a *coarse*
+Backed by a lazy `xarray` Dataset with `x_offset`, `y_offset` and
+`correlation` (all float32) variables of dims `(pair, y, x)`, on a *coarse*
 lattice of correlation locations rather than the full-resolution grid. Each pair
-carries ``ref_time`` and ``sec_time`` auxiliary coordinates (plain coords rather
-than a MultiIndex, which would not serialise to Zarr), and ``x_pixel``/``y_pixel``
+carries `ref_time` and `sec_time` auxiliary coordinates (plain coords rather
+than a MultiIndex, which would not serialise to Zarr), and `x_pixel`/`y_pixel`
 give the 0-based index into the *source* grid that each axis's locations sit at.
 
-This is a port of GMTSAR's ``xcorr``; :func:`nisar_tools._kernels.pixel_offsets`
+This is a port of GMTSAR's `xcorr`; `nisar_tools._kernels.pixel_offsets`
 holds the numerics and records where it departs from that reference.
 
-**What the offsets mean here.** ``xcorr`` runs on radar-geometry SLCs, where the
+**What the offsets mean here.** `xcorr` runs on radar-geometry SLCs, where the
 two images are unaligned and the offsets are a coregistration solution in range
 and azimuth. A NISAR GSLC is *geocoded*: the pair already shares one map grid, so
 there is nothing to coregister and what the correlation measures is the shift of
 the backscatter pattern in map x/y between the two dates -- ground displacement,
 which is the measurement that survives where the interferogram decorrelates. The
-fields are named for the map axes for that reason, and
-:attr:`~PixelOffsetStack.east_offset` / :attr:`~PixelOffsetStack.north_offset`
-convert them to metres.
+fields are named for the map axes for that reason (in pixels: `x_offset` along
+the map x axis, `y_offset` along the row index), and
+`PixelOffsetStack.east_offset` / `PixelOffsetStack.north_offset`
+convert them to metres of eastward and northward motion.
 """
 
 import warnings
@@ -38,17 +39,17 @@ from .interferogram import make_pairs
 #: data and are not independent. Sampling below the resolution is what makes a
 #: readable map of a displacement field and lets a discontinuity be localised to
 #: better than a template width; it does not add information. Raise it to
-#: ``nx_corr // 2`` for independent estimates at a quarter of the cost.
+#: `nx_corr // 2` for independent estimates at a quarter of the cost.
 DEFAULT_STEP = 16
 
-#: ``fitoffset.csh`` refuses to fit fewer than this many points.
+#: `fitoffset.csh` refuses to fit fewer than this many points.
 MIN_USEFUL_ROWS = 8
 
-#: Default correlation cut for :meth:`PixelOffsetStack.robust_offsets`, matching
-#: ``fitoffset.csh``'s own threshold on ``xcorr``'s correlation column.
+#: Default correlation cut for `PixelOffsetStack.robust_offsets`, matching
+#: `fitoffset.csh`'s own threshold on `xcorr`'s correlation column.
 DEFAULT_MIN_CORRELATION = 20.0
 
-#: Default robust-sigma cut for :meth:`PixelOffsetStack.robust_offsets`. Wide
+#: Default robust-sigma cut for `PixelOffsetStack.robust_offsets`. Wide
 #: enough to keep real deformation (which is what the field is measured for) and
 #: still catch the search-edge false peaks, which sit many sigma out.
 DEFAULT_N_SIGMA = 6.0
@@ -58,8 +59,8 @@ class PixelOffsetStack(RasterStackMixin):
     """A stack of sub-pixel offset fields with their correlation."""
 
     STAGE = "offsets"
-    #: The three measured fields; ``east_offset``/``north_offset`` (the same
-    #: numbers in metres) are available from :meth:`to_grd` on request.
+    #: The three measured fields; `east_offset`/`north_offset` (the same
+    #: numbers in metres) are available from `to_grd` on request.
     GRD_DEFAULT_FIELDS = ("x_offset", "y_offset", "correlation")
 
     def __init__(self, ds):
@@ -75,40 +76,40 @@ class PixelOffsetStack(RasterStackMixin):
     ):
         """Cross-correlate pairs of acquisitions on a coarse lattice.
 
-        The correlation locations are laid out either by ``step`` (the gap
-        between them in pixels, the default at :data:`DEFAULT_STEP`) or by
-        ``nx``/``ny`` (how many of them, GMTSAR's ``-nx``/``-ny``); the two are
+        The correlation locations are laid out either by `step` (the gap
+        between them in pixels, the default at `DEFAULT_STEP`) or by
+        `nx`/`ny` (how many of them, GMTSAR's `-nx`/`-ny`); the two are
         mutually exclusive. Either way the lattice is exactly uniform and inset by
         half a correlation window, so every patch lies wholly inside the raster
         and the result is a georeferenced raster in its own right --
-        :meth:`~nisar_tools._base.RasterStackMixin.crop`,
-        :meth:`~nisar_tools._base.RasterStackMixin.to_grd` and
-        :meth:`persist` all work on it unchanged.
+        `nisar_tools._base.RasterStackMixin.crop`,
+        `nisar_tools._base.RasterStackMixin.to_grd` and
+        `persist` all work on it unchanged.
 
-        ``nx_corr``/``ny_corr`` size the correlation template -- which is the
-        **resolution** of the result, as distinct from ``step``, which is only how
-        densely it is sampled -- and ``xsearch``/``ysearch`` the search half-width,
-        both in pixels. The patch that gets transformed is ``ny_corr + 2*ysearch``
-        by ``nx_corr + 2*xsearch``. The defaults are a 64 px template searched over
+        `nx_corr`/`ny_corr` size the correlation template -- which is the
+        **resolution** of the result, as distinct from `step`, which is only how
+        densely it is sampled -- and `xsearch`/`ysearch` the search half-width,
+        both in pixels. The patch that gets transformed is `ny_corr + 2*ysearch`
+        by `nx_corr + 2*xsearch`. The defaults are a 64 px template searched over
         +/-16 px, i.e. 320 m and +/-80 m at NISAR's 5 m posting; they are **not**
         GMTSAR's 128/64, which are sized for a radar-geometry pair that still needs
-        coregistering. See :func:`nisar_tools._kernels.pixel_offsets` for why a
+        coregistering. See `nisar_tools._kernels.pixel_offsets` for why a
         narrower search is better here.
 
-        ``x_shift``/``y_shift`` centre the search on a known bulk displacement
-        (GMTSAR's PRM ``rshift``/``ashift``) and are added back into the answer.
+        `x_shift`/`y_shift` centre the search on a known bulk displacement
+        (GMTSAR's PRM `rshift`/`ashift`) and are added back into the answer.
         They default to 0 because a geocoded pair is already aligned to the whole
         pixel; set them from the median of a first pass when it is not.
 
-        See :func:`nisar_tools._kernels.pixel_offsets` for the sub-pixel
-        refinement (``interp_factor``, ``subpixel_window``, ``subpixel``), the
-        input oversampling (``oversample``) and the invalid-sample rule
-        (``min_valid_fraction``). ``locations_per_tile`` is a dask granularity dial
+        See `nisar_tools._kernels.pixel_offsets` for the sub-pixel
+        refinement (`interp_factor`, `subpixel_window`, `subpixel`), the
+        input oversampling (`oversample`) and the invalid-sample rule
+        (`min_valid_fraction`). `locations_per_tile` is a dask granularity dial
         only and does not change the result.
 
         The raw fields this returns are not yet readable as ground motion: they
         carry the pair's bulk geolocation offset and a few percent of false peaks
-        that the correlation does not flag. :meth:`robust_offsets` removes both.
+        that the correlation does not flag. `robust_offsets` removes both.
         """
         if step is not None and (nx is not None or ny is not None):
             raise ValueError(
@@ -166,7 +167,7 @@ class PixelOffsetStack(RasterStackMixin):
                 # Deliberately data variables, not coordinates. As coordinates
                 # they ride along on every field cut from this stack, and then
                 # collide with the reprojected axis of anything that warps one --
-                # `.grd` export and plotting both raised "conflicting sizes for
+                # `.grd` export and plotting would raise "conflicting sizes for
                 # dimension 'y'". Nothing needs them attached to a field; to_text
                 # reads them off the Dataset.
                 "y_pixel": ("y", y_pixel),
@@ -213,16 +214,16 @@ class PixelOffsetStack(RasterStackMixin):
     # -- derived fields ----------------------------------------------------
     @property
     def east_offset(self):
-        """``x_offset`` in metres of eastward ground displacement."""
+        """`x_offset` in metres of eastward ground displacement."""
         out = self.ds["x_offset"] * float(self.ds.attrs["x_spacing"])
         return out.rename("east_offset")
 
     @property
     def north_offset(self):
-        """``y_offset`` in metres of **northward** ground displacement.
+        """`y_offset` in metres of **northward** ground displacement.
 
-        The sign flip is free: ``y_spacing`` is stored signed and is negative on a
-        north-up grid, so a positive ``y_offset`` -- a feature moving to a larger
+        The sign flip is free: `y_spacing` is stored signed and is negative on a
+        north-up grid, so a positive `y_offset` -- a feature moving to a larger
         row index, i.e. southward -- multiplies out to a negative northing.
         """
         out = self.ds["y_offset"] * float(self.ds.attrs["y_spacing"])
@@ -236,39 +237,35 @@ class PixelOffsetStack(RasterStackMixin):
         This is how an offset field is read as ground motion. Three steps, each
         removing something the raw field carries that is not displacement:
 
-        1. **Drop locations below** ``min_correlation``. The default of 20 is
-           ``fitoffset.csh``'s own threshold on the same number.
-        2. **Drop locations more than** ``n_sigma`` **robust standard deviations
+        1. **Drop locations below** `min_correlation`. The default of 20 is
+           `fitoffset.csh`'s own threshold on the same number.
+        2. **Drop locations more than** `n_sigma` **robust standard deviations
            from the median**, the scale being the MAD,
-           ``1.4826 * median(|x - median|)``. This is what removes the false
+           `1.4826 * median(|x - median|)`. This is what removes the false
            peaks, and nothing else does: a window that fails to match still
            reports an argmax, which pins at the edge of the search and comes back
-           as +/-(search - 0.5) px *with a high correlation*. Measured on a real
-           A061 crop, 3-4% of locations, none of which a correlation cut finds.
-           The MAD is used rather than a standard deviation precisely because
-           those outliers would inflate the scale that is meant to catch them.
-           A MAD of zero says over half the kept locations hold *exactly* the
-           median, which real data does -- the two D_071 granules are
-           co-registered to the whole pixel and their offset is uniform to an IQR
-           of 0.000 -- so the scale is then taken from the locations that do
-           differ, rather than every one of them being called an outlier.
-        3. **Subtract the median** (``centre=False`` keeps it). That median is the
-           pair's bulk geolocation offset -- measured at -1.06 px, i.e. -5.3 m,
-           between two real D_071 granules, agreeing between two crops 20 km apart
-           to 0.06 px. It is several times the deformation signal in the same
-           scene and constant across it, so plotting the raw field shows the
-           offset between two products and hides the ground motion.
+           as +/-(search - 0.5) px *with a high correlation*, so a correlation
+           cut does not find it. The MAD is used rather than a standard deviation
+           precisely because those outliers would inflate the scale that is meant
+           to catch them. A MAD of zero says over half the kept locations hold
+           *exactly* the median, which real data can do (two granules
+           co-registered to the whole pixel give a uniform offset), so the scale
+           is then taken from the locations that do differ, rather than every one
+           of them being called an outlier.
+        3. **Subtract the median** (`centre=False` keeps it). That median is the
+           pair's bulk geolocation offset, which can be a pixel or more: often
+           several times the deformation signal in the same scene and constant
+           across it, so plotting the raw field shows the offset between two
+           products and hides the ground motion.
 
         The statistics are computed **per pair**, since each pair has its own bulk
-        shift, and per component, since the two scatter differently (0.093 px in
-        ``y`` against 0.278 px in ``x`` on that same crop, the difference being the
-        signal). The removed median and the robust sigma are recorded in the
-        result's ``attrs`` as ``robust_median``/``robust_sigma``, one per pair --
-        the median is itself a measurement, of how far apart the two products are
-        geolocated.
+        shift, and per component, since the two scatter differently. The removed
+        median and the robust sigma are recorded in the result's `attrs` as
+        `robust_median`/`robust_sigma`, one per pair -- the median is itself a
+        measurement, of how far apart the two products are geolocated.
 
-        ``field`` is any of ``x_offset``, ``y_offset`` (pixels) or ``east_offset``,
-        ``north_offset`` (metres). Returns a lazy-free :class:`xarray.DataArray`
+        `field` is any of `x_offset`, `y_offset` (pixels) or `east_offset`,
+        `north_offset` (metres). Returns an in-memory `xarray.DataArray`
         with this stack's dims and coords, so it plots and exports like any other
         field.
         """
@@ -312,11 +309,10 @@ class PixelOffsetStack(RasterStackMixin):
             deviation = np.abs(sample - median)
             sigma = 1.4826 * float(np.median(deviation))
             if sigma == 0.0:
-                # Over half the kept locations hold *exactly* the median. Real
-                # data does this: the two D_071 granules are co-registered to the
-                # whole pixel and their offset came out uniform to an IQR of
-                # 0.000. Taking the scale from the locations that do differ keeps
-                # those few instead of calling every one of them an outlier.
+                # Over half the kept locations hold *exactly* the median, as two
+                # granules co-registered to the whole pixel can. Taking the scale
+                # from the locations that do differ keeps those few instead of
+                # calling every one of them an outlier.
                 spread = deviation[deviation > 0]
                 sigma = 1.4826 * float(np.median(spread)) if spread.size else 0.0
             medians.append(median)
@@ -384,37 +380,37 @@ class PixelOffsetStack(RasterStackMixin):
 
     def to_text(self, outdir, indices=None, min_correlation=0.0,
                 stem="freq_xcorr", comment=None, lonlat=True):
-        """Write the offsets as GMTSAR ``xcorr`` ASCII, one file per pair.
+        """Write the offsets as GMTSAR `xcorr` ASCII, one file per pair.
 
-        Each line is ``x_pixel x_offset y_pixel y_offset correlation`` under
-        ``xcorr``'s own format string, leading and trailing space included, so the
-        files feed ``fitoffset.csh`` -- or any ``awk '{if ($5 > 20) ...}'`` on top
+        Each line is `x_pixel x_offset y_pixel y_offset correlation` under
+        `xcorr`'s own format string, leading and trailing space included, so the
+        files feed `fitoffset.csh` -- or any `awk '{if ($5 > 20) ...}'` on top
         of it -- unchanged. Pixel indices are 0-based, as the reference's C array
         indices are, and index the **source** GSLC grid, not this coarse one.
 
-        Two further columns, ``lon`` and ``lat`` in decimal degrees, follow by
-        default: the location's own ground position -- what a GMT ``psxy`` or
-        ``blockmean`` wants, and the only thing in the file that means anything
+        Two further columns, `lon` and `lat` in decimal degrees, follow by
+        default: the location's own ground position -- what a GMT `psxy` or
+        `blockmean` wants, and the only thing in the file that means anything
         outside this granule's own grid. They are **appended**, in that order
         (GMT's x-then-y, not the spoken "lat/lon"), so the five columns the
-        reference writes keep their positions and every ``awk`` on top of them
+        reference writes keep their positions and every `awk` on top of them
         still reads the same fields -- which is what lets them be the default
-        without breaking a ``fitoffset.csh`` pipeline. ``lonlat=False`` writes
-        the five-column file alone, byte-for-byte what ``xcorr`` produces.
+        without breaking a `fitoffset.csh` pipeline. `lonlat=False` writes
+        the five-column file alone, byte-for-byte what `xcorr` produces.
 
-        Files are named ``{stem}_pair{i}.dat``, mirroring
-        :meth:`~nisar_tools._base.RasterStackMixin.to_grd`; ``indices`` selects
+        Files are named `{stem}_pair{i}.dat`, mirroring
+        `nisar_tools._base.RasterStackMixin.to_grd`; `indices` selects
         which pairs to write (default: all). Returns the written paths.
 
-        Locations whose offset is NaN are dropped -- a ``nan`` in the offset
-        column would poison a ``trend2d`` fit rather than simply score badly --
-        and ``min_correlation`` drops more. The default of 0 keeps everything
+        Locations whose offset is NaN are dropped -- a `nan` in the offset
+        column would poison a `trend2d` fit rather than simply score badly --
+        and `min_correlation` drops more. The default of 0 keeps everything
         measurable, which is the reference's behaviour: it writes every location
-        and leaves the cut to ``fitoffset.csh``.
+        and leaves the cut to `fitoffset.csh`.
 
-        ``comment`` writes ``#``-prefixed provenance lines first. Off by default,
-        because ``xcorr`` writes no header and an unprefixed one would be compared
-        numerically by ``awk``.
+        `comment` writes `#`-prefixed provenance lines first. Off by default,
+        because `xcorr` writes no header and an unprefixed one would be compared
+        numerically by `awk`.
         """
         outdir = Path(outdir)
         outdir.mkdir(parents=True, exist_ok=True)
@@ -478,19 +474,19 @@ class PixelOffsetStack(RasterStackMixin):
     def plot_offsets(self, pair=0, units="pixels", min_correlation=0.0,
                      quiver=False, robust=False,
                      n_sigma=DEFAULT_N_SIGMA, vmax=None, **kwargs):
-        """Plot one pair's offset field. See :func:`nisar_tools.plot.plot_offsets`.
+        """Plot one pair's offset field. See `nisar_tools.plot.plot_offsets`.
 
-        ``robust=True`` plots :meth:`robust_offsets` of both components instead of
+        `robust=True` plots `robust_offsets` of both components instead of
         the raw fields -- correlation-gated, MAD-clipped and centred on their own
         median -- which is almost always what you want to look at: the raw field is
         dominated by the pair's bulk geolocation offset and speckled with
-        search-edge false peaks. It then takes ``min_correlation`` (defaulting to
-        :data:`DEFAULT_MIN_CORRELATION` rather than 0, since a robust statistic
-        needs a gated sample) and ``n_sigma``. ``vmax`` sets the symmetric colour
-        limit explicitly; with ``robust=True`` a value near the expected
-        displacement, e.g. ``vmax=0.5`` px, is usually more legible than the
-        automatic 98th-percentile scale. ``cmap`` and ``nan_color`` pass through to
-        :func:`nisar_tools.plot.plot_offsets`.
+        search-edge false peaks. It then takes `min_correlation` (defaulting to
+        `DEFAULT_MIN_CORRELATION` rather than 0, since a robust statistic
+        needs a gated sample) and `n_sigma`. `vmax` sets the symmetric colour
+        limit explicitly; with `robust=True` a value near the expected
+        displacement, e.g. `vmax=0.5` px, is usually more legible than the
+        automatic 98th-percentile scale. `cmap` and `nan_color` pass through to
+        `nisar_tools.plot.plot_offsets`.
         """
         from .plot import plot_offsets
 

@@ -1,34 +1,33 @@
 """Dense pixel offsets between two RSLCs: NISAR's ROFF, ported from ISCE3 to numpy.
 
-ISCE3 v0.25.16 makes a ROFF in four steps (``nisar.workflows.insar``):
+ISCE3 v0.25.16 makes a ROFF in four steps (`nisar.workflows.insar`):
 
-1. ``rdr2geo``: every reference pixel onto the DEM (zero-Doppler; threshold 1e-7 m, 25 + 10
+1. `rdr2geo`: every reference pixel onto the DEM (zero-Doppler; threshold 1e-7 m, 25 + 10
    iterations);
-2. ``geo2rdr``: those targets into the secondary (zero-Doppler; 1e-8 s, 25 iterations) --
+2. `geo2rdr`: those targets into the secondary (zero-Doppler; 1e-8 s, 25 iterations) --
    per-pixel line and sample offsets, secondary index minus reference index;
-3. ``resample_slc`` (coarse): the secondary resampled onto the reference grid by
-   ``ResampSlc`` -- a 9x9 chip deramped by the secondary's native Doppler,
-   ``Sinc2dInterpolator(8, 8192)``, the Doppler phase put back, 0 where invalid, no
+3. `resample_slc` (coarse): the secondary resampled onto the reference grid by
+   `ResampSlc` -- a 9x9 chip deramped by the secondary's native Doppler,
+   `Sinc2dInterpolator(8, 8192)`, the Doppler phase put back, 0 where invalid, no
    flattening;
-4. ``offsets_product``: PyCuAmpcor per layer (:mod:`nisar_tools.ampcor`) on the reference and
+4. `offsets_product`: PyCuAmpcor per layer (`nisar_tools.ampcor`) on the reference and
    the coregistered secondary; then metres -- along-track by the ground-track velocity times
    the reference's azimuth time spacing, slant range by its range spacing.
 
 So the offsets are what the geometry leaves: orbit and timing errors, deformation, the
-ionosphere. Windows start at ``start + k*skip`` (top-left corners, ``start = margin +
-min(half_search)``) and every layer is labelled at ``start + min(window)//2``
-(``get_offset_radar_grid``) -- a layer with larger windows than the smallest is labelled off
+ionosphere. Windows start at `start + k*skip` (top-left corners, `start = margin +
+min(half_search)`) and every layer is labelled at `start + min(window)//2`
+(`get_offset_radar_grid`) -- a layer with larger windows than the smallest is labelled off
 its own centre by half the difference: **32 px in both axes for GOFF's 128 x 128 layer2**.
-:func:`dense_offsets` keeps ISCE3's labels and records each layer's true centre offset.
+`dense_offsets` keeps ISCE3's labels and records each layer's true centre offset.
 
-Departures (none moves an offset beyond rounding; see the module tests and the validation
-against a real ROFF):
+Departures (none moves an offset beyond rounding):
 
-- steps 1-2 are solved on a node lattice every ``geometry_step`` pixels and interpolated
+- steps 1-2 are solved on a node lattice every `geometry_step` pixels and interpolated
   bicubically, not at every pixel;
-- the resample chip is centred on ``trunc`` of the position instead of ``round`` and the
+- the resample chip is centred on `trunc` of the position instead of `round` and the
   Doppler is evaluated at the input position instead of at the output index on the
-  secondary's grid (this is :func:`~nisar_tools._geocode_kernels.interpolate_slc`, shared with
+  secondary's grid (this is `nisar_tools._geocode_kernels.interpolate_slc`, shared with
   the GSLC geocoder) -- the same interpolant, different float32 rounding;
 - the correlator runs in numpy, not cuFFT.
 """
@@ -42,7 +41,7 @@ from . import radar
 from ._geocode_kernels import interpolate_slc
 from .ampcor import AmpcorParams, ampcor_windows
 
-#: The layers of NISAR's GOFF/ROFF (``offsets_product`` in the PGE runconfig, v0.25.16).
+#: The layers of NISAR's GOFF/ROFF (`offsets_product` in the PGE runconfig, v0.25.16).
 GOFF_LAYERS = {
     "layer1": AmpcorParams(window_range=64, window_azimuth=64,
                            half_search_range=16, half_search_azimuth=16),
@@ -50,7 +49,7 @@ GOFF_LAYERS = {
                            half_search_range=16, half_search_azimuth=16),
 }
 
-#: ``rdr2geo``/``geo2rdr`` settings of the InSAR PGE runconfig.
+#: `rdr2geo`/`geo2rdr` settings of the InSAR PGE runconfig.
 RDR2GEO = dict(threshold=1e-7, maxiter=25, extraiter=10)
 GEO2RDR = dict(threshold=1e-8, maxiter=25)
 
@@ -66,14 +65,14 @@ def _rslc(x):
 
 
 def _dem(x):
-    """A DEM path, or anything with ``heights(lon_rad, lat_rad)`` (a DEMInterpolator)."""
+    """A DEM path, or anything with `heights(lon_rad, lat_rad)` (a DEMInterpolator)."""
     from .dem import DEMInterpolator
     return x if hasattr(x, "heights") else DEMInterpolator(x)
 
 
 @dataclass(frozen=True)
 class OffsetLattice:
-    """The window lattice shared by every layer (``get_start_pixels`` + ``get_offsets_shape``)."""
+    """The window lattice shared by every layer (`get_start_pixels` + `get_offsets_shape`)."""
 
     az_start: int
     rg_start: int
@@ -102,7 +101,7 @@ class OffsetLattice:
                    win_az // 2, win_rg // 2)
 
     def window_lines(self, rows):
-        """Top-left reference line of the windows in lattice ``rows``."""
+        """Top-left reference line of the windows in lattice `rows`."""
         return self.az_start + np.asarray(rows) * self.skip_azimuth
 
     def window_samples(self, cols):
@@ -117,12 +116,12 @@ class OffsetLattice:
 
 
 def geometry_offsets(reference, secondary, dem, lines, samples, frequency="A"):
-    """Steps 1-2 at reference pixels ``lines`` x ``samples`` (1-D, any spacing).
+    """Steps 1-2 at reference pixels `lines` x `samples` (1-D, any spacing).
 
-    Returns ``(d_line, d_sample)``, each ``(len(lines), len(samples))``: the secondary's
+    Returns `(d_line, d_sample)`, each `(len(lines), len(samples))`: the secondary's
     fractional line and sample of the target each reference pixel images, minus the
-    reference pixel's own line and sample (``isce3::geometry::Geo2Rdr``'s ``azimuth.off`` /
-    ``range.off``). NaN where either solve fails. Both orbits are the products' own.
+    reference pixel's own line and sample (`isce3::geometry::Geo2Rdr`'s `azimuth.off` /
+    `range.off`). NaN where either solve fails. Both orbits are the products' own.
     """
     reference, secondary, dem = _rslc(reference), _rslc(secondary), _dem(dem)
     rg = reference.radar_grid(frequency)
@@ -132,9 +131,9 @@ def geometry_offsets(reference, secondary, dem, lines, samples, frequency="A"):
     r = rg.starting_range + S.ravel() * rg.range_pixel_spacing
     llh, ok1 = radar.rdr2geo(t, r, reference.orbit, doppler_hz=0.0, wavelength=rg.wavelength,
                              look_side=rg.look_side, dem=dem.heights, **RDR2GEO)
-    # ``Topo`` keeps every rdr2geo answer, converged or not: the DEM spline is float32, so
-    # heights jitter at ~1e-5 m and a 1e-7 m threshold is often unreachable (22% of a hilly
-    # tile) although the target sits on the range sphere to 1e-10 m.
+    # `Topo` keeps every rdr2geo answer, converged or not: the DEM spline is float32, so
+    # heights jitter at ~1e-5 m and a 1e-7 m threshold is often unreachable although the
+    # target sits on the range sphere to 1e-10 m.
     del ok1
     t2, r2, ok2 = radar.geo2rdr(llh, secondary.orbit, None, sg.wavelength, sg.look_side,
                                 t0=t, **GEO2RDR)
@@ -145,11 +144,11 @@ def geometry_offsets(reference, secondary, dem, lines, samples, frequency="A"):
 
 
 def ground_track_velocity(rslc, dem, t, r, frequency="A"):
-    """``getGeolocationGrid``'s ground-track velocity (m/s) at radar ``(t, r)`` (1-D).
+    """`getGeolocationGrid`'s ground-track velocity (m/s) at radar `(t, r)` (1-D).
 
     Target on the DEM at zero Doppler; platform at the target's native-Doppler time;
-    ``cos(alpha) |target| |v| / |platform|`` with ``alpha`` the geocentric angle between them
-    (``writeVectorDerivedCubes``' cosine law). This is what ISCE3 multiplies along-track pixel
+    `cos(alpha) |target| |v| / |platform|` with `alpha` the geocentric angle between them
+    (`writeVectorDerivedCubes`' cosine law). This is what ISCE3 multiplies along-track pixel
     offsets by (times the reference's azimuth time spacing).
     """
     rslc, dem = _rslc(rslc), _dem(dem)
@@ -183,17 +182,17 @@ def _bicubic(nodes_l, nodes_s, values, lines, samples):
 
 
 def _node_axis(i0, i1, step):
-    """Lattice nodes every ``step`` covering ``[i0, i1)`` with one node to spare each side."""
+    """Lattice nodes every `step` covering `[i0, i1)` with one node to spare each side."""
     a = (int(np.floor(i0 / step)) - 1) * step
     b = (int(np.ceil((i1 - 1) / step)) + 1) * step
     return np.arange(a, b + step, step, dtype=float)
 
 
 def coarse_resample(secondary, reader, lines, samples, d_line, d_sample, frequency="A"):
-    """Step 3 for the reference block ``lines`` x ``samples`` (contiguous 1-D index ranges).
+    """Step 3 for the reference block `lines` x `samples` (contiguous 1-D index ranges).
 
-    ``d_line``/``d_sample`` are the per-pixel offsets of that block. Returns the coregistered
-    secondary block, complex64, 0 where the secondary cannot be interpolated (``ResampSlc``'s
+    `d_line`/`d_sample` are the per-pixel offsets of that block. Returns the coregistered
+    secondary block, complex64, 0 where the secondary cannot be interpolated (`ResampSlc`'s
     invalid value).
     """
     sg = secondary.radar_grid(frequency)
@@ -220,7 +219,7 @@ def coarse_resample(secondary, reader, lines, samples, d_line, d_sample, frequen
 
 def _tile_offsets(ref, sec, ref_reader, sec_reader, dem, lattice, layers, rows, cols,
                   frequency, geometry_step, batch):
-    """Everything for one tile of the lattice; returns a dict of ``(ni, nj)`` arrays."""
+    """Everything for one tile of the lattice; returns a dict of `(ni, nj)` arrays."""
     ni, nj = len(rows), len(cols)
     lay = list(layers.values())
     W_a = max(L.window_azimuth for L in lay)
@@ -286,20 +285,20 @@ def dense_offsets(reference, secondary, dem, *, frequency="A", polarization="HH"
                   progress=None):
     """A ROFF's pixel-offset layers from two RSLCs (steps 1-4 of the module docstring).
 
-    ``reference``/``secondary`` are RSLC paths or :class:`~nisar_tools.rslc.RSLC`; ``dem`` a
-    raster path or :class:`~nisar_tools.dem.DEMInterpolator` (NISAR's DEM, as the PGE).
-    ``layers`` defaults to :data:`GOFF_LAYERS`; the lattice to the PGE's (margin 250, skip 15,
-    start ``margin + min(half_search)``). ``rows``/``cols`` select lattice indices (``range``
+    `reference`/`secondary` are RSLC paths or `nisar_tools.rslc.RSLC`; `dem` a
+    raster path or `nisar_tools.dem.DEMInterpolator` (NISAR's DEM, as the PGE).
+    `layers` defaults to `GOFF_LAYERS`; the lattice to the PGE's (margin 250, skip 15,
+    start `margin + min(half_search)`). `rows`/`cols` select lattice indices (`range`
     or slice; default all) -- a subset gives exactly the same values as the full run.
 
-    Tiles of ``tile`` = (rows, cols) windows run on ``workers`` threads; ``batch`` windows go
-    through the correlator at once. ``progress(done, total)`` is called after each tile.
+    Tiles of `tile` = (rows, cols) windows run on `workers` threads; `batch` windows go
+    through the correlator at once. `progress(done, total)` is called after each tile.
 
-    Returns an :class:`xarray.Dataset` on ``(row, col)`` lattice indices with ISCE3's
-    ``zeroDopplerTime``/``slantRange`` labels, the ROFF variables on ``(layer, row, col)``
-    (metres; variances in m**2), the raw pixel offsets ``down``/``across`` (reference pixels),
-    the ``groundTrackVelocity`` used, and the geometry offsets at the labels
-    (``geometryLineOffset``/``geometrySampleOffset``, secondary pixels) -- add those to the
+    Returns an `xarray.Dataset` on `(row, col)` lattice indices with ISCE3's
+    `zeroDopplerTime`/`slantRange` labels, the ROFF variables on `(layer, row, col)`
+    (metres; variances in m**2), the raw pixel offsets `down`/`across` (reference pixels),
+    the `groundTrackVelocity` used, and the geometry offsets at the labels
+    (`geometryLineOffset`/`geometrySampleOffset`, secondary pixels) -- add those to the
     pixel offsets for the total secondary-minus-reference offset.
     """
     import xarray as xr
@@ -390,7 +389,7 @@ def dense_offsets(reference, secondary, dem, *, frequency="A", polarization="HH"
 
 
 def open_roff(path, rows=None, cols=None, frequency="A", polarization="HH"):
-    """A NISAR ROFF's pixel offsets in :func:`dense_offsets`' layout (``rows``/``cols`` slices)."""
+    """A NISAR ROFF's pixel offsets in `dense_offsets`' layout (`rows`/`cols` slices)."""
     import h5py
     import xarray as xr
 
@@ -426,7 +425,7 @@ def open_roff(path, rows=None, cols=None, frequency="A", polarization="HH"):
 
 
 def goff_geogrid(path, frequency="A"):
-    """``(x, y, epsg)`` pixel-centre coordinates of a NISAR GOFF, to geocode onto the same grid."""
+    """`(x, y, epsg)` pixel-centre coordinates of a NISAR GOFF, to geocode onto the same grid."""
     import h5py
 
     with h5py.File(path, "r") as f:
@@ -436,17 +435,17 @@ def goff_geogrid(path, frequency="A"):
 
 def geocode_offsets(ds, reference, dem, x, y, epsg, *, variables=OFFSET_VARIABLES,
                     window_centres=False, frequency="A", block_rows=256):
-    """ROFF -> GOFF (``geocode_insar``): each map pixel bilinear from the offsets lattice.
+    """ROFF -> GOFF (`geocode_insar`): each map pixel bilinear from the offsets lattice.
 
-    ``ds`` is :func:`dense_offsets` output or :func:`open_roff` (same reference). ``x``/``y``
-    are 1-D pixel-centre coordinates in ``epsg`` (:func:`goff_geogrid` reads a GOFF's).
-    Each pixel: DEM height (biquintic), zero-Doppler ``geo2rdr`` on the reference orbit,
-    fractional lattice row and column from the labels, ``BilinearInterpolator`` -- NaN
-    outside the lattice (or the subset ``ds`` holds) and wherever a neighbour is NaN.
+    `ds` is `dense_offsets` output or `open_roff` (same reference). `x`/`y`
+    are 1-D pixel-centre coordinates in `epsg` (`goff_geogrid` reads a GOFF's).
+    Each pixel: DEM height (biquintic), zero-Doppler `geo2rdr` on the reference orbit,
+    fractional lattice row and column from the labels, `BilinearInterpolator` -- NaN
+    outside the lattice (or the subset `ds` holds) and wherever a neighbour is NaN.
 
-    ``window_centres=True`` places each layer at its windows' true centre instead of ISCE3's
-    label (which is off by ``centre_shift_*`` pixels for layers larger than the smallest:
-    32 px for GOFF's layer2). Returns an :class:`xarray.Dataset` on ``(layer, y, x)``.
+    `window_centres=True` places each layer at its windows' true centre instead of ISCE3's
+    label (which is off by `centre_shift_*` pixels for layers larger than the smallest:
+    32 px for GOFF's layer2). Returns an `xarray.Dataset` on `(layer, y, x)`.
     """
     import xarray as xr
     from pyproj import Transformer
@@ -499,29 +498,24 @@ def geocode_offsets(ds, reference, dem, x, y, epsg, *, variables=OFFSET_VARIABLE
 
 def offset_los_stacks(ds, reference_gslc, reference, dem, x, y, epsg, *, layer="layer1",
                       window_centres=False, frequency="A", geocoded=None):
-    """A ROFF as two LOS-style stacks a slip inversion reads like InSAR: ``{"range", "along"}``.
+    """A ROFF as two LOS-style stacks a slip inversion reads like InSAR: `{"range", "along"}`.
 
-    Each is an :class:`~nisar_tools.los.LOSStack` whose ``los`` (metres, ``(pair, y, x)``) is
-    the ground displacement projected on that stack's own unit vector, ``los_east`` /
-    ``los_north`` / ``los_up``:
+    Each is a `nisar_tools.los.LOSStack` whose `los` (metres, `(pair, y, x)`) is
+    the ground displacement projected on that stack's own unit vector, `los_east` /
+    `los_north` / `los_up`:
 
-    - ``"range"``: ``-slantRangeOffset`` on the target->sensor LOS unit vector. A slant-range
+    - `"range"`: `-slantRangeOffset` on the target->sensor LOS unit vector. A slant-range
       offset is secondary minus reference range, + away from the sensor; this package's LOS is
       + toward it, so it is the same quantity as an interferogram's LOS, with no 2 pi ambiguity;
-    - ``"along"``: ``+alongTrackOffset`` on the along-track unit vector, which is horizontal and
+    - `"along"`: `+alongTrackOffset` on the along-track unit vector, which is horizontal and
       points along the flight direction (+ = the ground moved that way).
 
-    Both vectors come from ``reference_gslc``'s geometry cube (the ROFF's reference date, the
-    same cube :class:`~nisar_tools.los.LOSStack` uses), sampled at ``dem``'s heights.
-    ``reference`` is that date's RSLC and ``dem`` a GeoTIFF path; both geocode the offsets
-    (:func:`geocode_offsets`, or pass its output as ``geocoded``). Each stack also carries
-    ``variance`` (m**2, the correlator's), ``snr`` and ``correlationSurfacePeak``, for masking
-    and weighting -- per-window sigmas are ~0.2 m in range and ~0.3 m along-track on D141.
-
-    Signs checked on D141 Panama (left-lateral, the north block moving WNW): the north-minus-
-    south step 0.5-1.5 km from the trace is -4.29 m in slant range (toward a sensor looking ESE)
-    and -1.50 m along-track (against the SSW flight direction). The along-track vector is
-    orthogonal to the LOS to 0.018 there, as zero-Doppler geometry requires.
+    Both vectors come from `reference_gslc`'s geometry cube (the ROFF's reference date, the
+    same cube `nisar_tools.los.LOSStack` uses), sampled at `dem`'s heights.
+    `reference` is that date's RSLC and `dem` a GeoTIFF path; both geocode the offsets
+    (`geocode_offsets`, or pass its output as `geocoded`). Each stack also carries
+    `variance` (m**2, the correlator's), `snr` and `correlationSurfacePeak`, for masking
+    and weighting (per-window sigmas are a few decimetres).
     """
     import xarray as xr
 

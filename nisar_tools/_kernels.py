@@ -1,31 +1,31 @@
 """Numeric kernels for multilooking, interferogram formation, Goldstein phase
-filtering, sub-pixel offset tracking, and SNAPHU sizing.
+filtering, sub-pixel offset tracking, unwrapped-phase cleaning and SNAPHU sizing.
 
 The multilook/interferogram numerics are ported verbatim from the original
-procedural module (kept as ``tests/legacy_reference.py``, the equivalence-test
-oracle). The ``*_dask`` helpers wrap the same math so it can
+procedural module (kept as `tests/legacy_reference.py`, the equivalence-test
+oracle). The `*_dask` helpers wrap the same math so it can
 run lazily over chunked arrays without ever materializing a full-resolution
 stack. The plain-numpy versions are kept as the reference implementation that
 the dask path is equivalence-tested against.
 
-:func:`igram_coherence` is the one place that departs from the oracle: it
+`igram_coherence` is the one place that departs from the oracle: it
 defaults to a NaN-aware normalized convolution, because the legacy formula lets
 scipy's non-NaN-aware filters spread every invalid sample across the whole
-filter footprint. ``nan_aware=False`` still reproduces the legacy result
+filter footprint. `nan_aware=False` still reproduces the legacy result
 exactly, and that is what the equivalence tests pin.
 
-:func:`goldstein_filter` is new (it has no legacy counterpart); it is a 2D
-whole-plane operation validated by its own properties -- an exact ``alpha=0``
-round-trip, phase-noise reduction, and NaN preservation -- rather than against
-the legacy oracle.
+`goldstein_filter` has no legacy counterpart; it is a 2D whole-plane
+operation validated by its own properties (an exact `alpha=0` round-trip,
+phase-noise reduction, and NaN preservation) rather than against the legacy
+oracle.
 
-:func:`pixel_offsets` has no legacy counterpart either. It ports GMTSAR's
-``xcorr`` in its default frequency-domain mode, and is pinned by properties --
+`pixel_offsets` has no legacy counterpart either. It ports GMTSAR's
+`xcorr` in its default frequency-domain mode, and is pinned by properties:
 recovery of a planted integer and sub-pixel shift, and agreement with the
-brute-force time-domain correlator in ``tests/offset_reference.py``, which stands
-in for the ``-time`` mode this deliberately does not port. Unlike every other
-kernel here its output lives on a *coarser* grid than its input, so it cannot go
-through :func:`halo_planes`; :func:`pixel_offsets_dask` decomposes it instead.
+brute-force time-domain correlator in `tests/offset_reference.py`, which stands
+in for the `-time` mode this deliberately does not port. Unlike every other
+kernel here its output lives on a coarser grid than its input, so it cannot go
+through `halo_planes`; `pixel_offsets_dask` decomposes it instead.
 """
 
 import math
@@ -47,7 +47,7 @@ VALID_CONVOLUTIONS = ("Uniform", "Gaussian")
 
 
 def _is_dask(arr):
-    """True if ``arr`` is a dask array, without importing dask eagerly."""
+    """True if `arr` is a dask array, without importing dask eagerly."""
     return type(arr).__module__.split(".")[0] == "dask"
 
 
@@ -55,13 +55,13 @@ def _multilook_many(arrays, max_x, max_y, looks, downsample, convolution, *, sig
     """Multilook several same-shaped real arrays, fusing the dask passes.
 
     On dask the arrays are stacked on a new leading axis and pushed through a
-    single :func:`multilook_dask`. They share an input footprint and a halo, so as
+    single `multilook_dask`. They share an input footprint and a halo, so as
     separate calls each one materialises the same overlap again;
-    ``multilook_dask`` only ever filters the trailing two axes, so the stacked
-    axis rides through untouched exactly as ``pair`` does.
+    `multilook_dask` only ever filters the trailing two axes, so the stacked
+    axis rides through untouched exactly as `pair` does.
 
-    Numpy input is looped instead. :func:`multilook` is the verbatim 2-D legacy
-    kernel -- it filters *every* axis and slices the first two -- so a stacked
+    Numpy input is looped instead. `multilook` is the verbatim 2-D legacy
+    kernel: it filters every axis and slices the first two, so a stacked
     axis would be smoothed along and mis-sliced. There is nothing to save there
     anyway: without chunks there is no halo to materialise twice.
     """
@@ -81,8 +81,8 @@ def _multilook_many(arrays, max_x, max_y, looks, downsample, convolution, *, sig
 def _fillna_zero(arr):
     """Replace NaNs with 0.0 on either a numpy or a dask array.
 
-    ``np.nan_to_num(arr, nan=0.0)`` does not dispatch onto dask (its
-    ``nan_to_num`` rejects the ``nan=`` keyword), so dask is handled
+    `np.nan_to_num(arr, nan=0.0)` does not dispatch onto dask (its
+    `nan_to_num` rejects the `nan=` keyword), so dask is handled
     explicitly. The numpy branch is kept identical to the legacy call.
     """
     if _is_dask(arr):
@@ -98,9 +98,9 @@ def _overlap_depth(looks, convolution, sigma=None):
     The depth must be at least the filter's radius, otherwise contributions
     from neighbouring chunks are silently dropped and chunk seams appear.
 
-    - Uniform filter of ``size=looks`` reaches at most ``looks // 2`` samples.
-    - Gaussian filter of ``sigma`` (default ``looks``) reaches
-      ``int(truncate*sigma + 0.5)`` samples, where scipy's default ``truncate`` is 4.0.
+    - Uniform filter of `size=looks` reaches at most `looks // 2` samples.
+    - Gaussian filter of `sigma` (default `looks`) reaches
+      `int(truncate*sigma + 0.5)` samples, where scipy's default `truncate` is 4.0.
     """
     if convolution == "Gaussian":
         return int(4.0 * gaussian_sigma(looks, sigma) + 0.5)
@@ -110,12 +110,12 @@ def _overlap_depth(looks, convolution, sigma=None):
 
 
 def gaussian_sigma(looks, sigma=None):
-    """The Gaussian multilook's sigma in input samples: ``sigma`` if given, else ``looks``.
+    """The Gaussian multilook's sigma in input samples: `sigma` if given, else `looks`.
 
-    ``sigma=looks`` (the default, and the legacy kernel) is a heavy low-pass for a
-    stride of ``looks``: its amplitude response is 0.29 at half the output grid's
-    Nyquist and 0.007 at Nyquist, so steep phase gradients -- the near field of a
-    rupture -- lose coherence before unwrapping. ``sigma=looks/2`` keeps 0.73 / 0.29.
+    `sigma=looks` (the default, and the legacy kernel) is a heavy low-pass for a
+    stride of `looks`: its amplitude response is 0.29 at half the output grid's
+    Nyquist and 0.007 at Nyquist, so steep phase gradients (the near field of a
+    rupture) lose coherence before unwrapping. `sigma=looks/2` keeps 0.73 / 0.29.
     """
     s = float(looks if sigma is None else sigma)
     if not s > 0:
@@ -126,9 +126,9 @@ def gaussian_sigma(looks, sigma=None):
 def multilook(arr, max_x, max_y, looks, downsample, convolution, *, sigma=None):
     """Convolve and (optionally) downsample a 2D array. Verbatim numpy kernel.
 
-    Mirrors the original ``_multilook_array``. Operates on real or complex
-    numpy arrays via scipy's filters directly. ``sigma`` (Gaussian only) is the
-    filter's sigma in input samples, default ``looks`` (see :func:`gaussian_sigma`).
+    Mirrors the original `_multilook_array`. Operates on real or complex
+    numpy arrays via scipy's filters directly. `sigma` (Gaussian only) is the
+    filter's sigma in input samples, default `looks` (see `gaussian_sigma`).
     """
     if convolution == "Gaussian":
         smoothed = gaussian_filter(arr, sigma=gaussian_sigma(looks, sigma), mode="constant", cval=0.0)
@@ -145,12 +145,12 @@ def multilook(arr, max_x, max_y, looks, downsample, convolution, *, sigma=None):
 
 
 def multilook_dask(arr, max_x, max_y, looks, downsample, convolution, *, sigma=None):
-    """Lazy multilook over a chunked dask array, matching :func:`multilook`.
+    """Lazy multilook over a chunked dask array, matching `multilook`.
 
     Filters real and imaginary parts separately (linear filters make this
     identical to filtering the complex array, and avoids version-dependent
-    complex support inside ``map_overlap``). The smoothing uses
-    ``map_overlap`` with a mode-dependent depth so the result is independent
+    complex support inside `map_overlap`). The smoothing uses
+    `map_overlap` with a mode-dependent depth so the result is independent
     of the chunk layout.
     """
     depth = _overlap_depth(looks, convolution, sigma)
@@ -190,17 +190,17 @@ def multilook_dask(arr, max_x, max_y, looks, downsample, convolution, *, sigma=N
 
 
 def boundary_response(ny, nx, max_x, max_y, looks, downsample, convolution, *, sigma=None):
-    """The filter's response to an all-valid raster, i.e. ``multilook(ones)``.
+    """The filter's response to an all-valid raster, i.e. `multilook(ones)`.
 
-    ``mode="constant", cval=0.0`` treats everything beyond the raster as zero,
+    `mode="constant", cval=0.0` treats everything beyond the raster as zero,
     so the response decays toward the edges (to 0.5 at a straight edge, 0.25 at
     a corner) instead of staying at 1. Dividing a smoothed valid-mask by this
-    turns it into a true valid *fraction*, which is what distinguishes a real
+    turns it into a true valid fraction, which is what distinguishes a real
     data boundary from the arbitrary edge where the raster was cropped.
 
     Both filters are separable, so this is the outer product of two 1D
-    profiles rather than a full 2D filter pass -- two vectors of length ``ny``
-    and ``nx``, negligible next to the arrays being multilooked.
+    profiles rather than a full 2D filter pass: two vectors of length `ny`
+    and `nx`, negligible next to the arrays being multilooked.
     """
     prof_y, prof_x = boundary_response_profiles(
         ny, nx, max_x, max_y, looks, downsample, convolution, sigma=sigma
@@ -210,7 +210,7 @@ def boundary_response(ny, nx, max_x, max_y, looks, downsample, convolution, *, s
 
 def boundary_response_profiles(ny, nx, max_x, max_y, looks, downsample,
                                convolution, *, sigma=None):
-    """The two 1-D profiles whose outer product is :func:`boundary_response`.
+    """The two 1-D profiles whose outer product is `boundary_response`.
 
     Exposed separately so the nan-aware normalisation can divide a dask array by
     each vector in turn: the outer product is a full-grid float64 array, and
@@ -244,32 +244,32 @@ def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
 
     Works on either numpy or dask arrays: the only backend-specific step is
     the multilook, which is dispatched on the array type. Every other
-    operation (``*``, ``conj``, ``abs``, ``sqrt``, ``isfinite``, ``where``,
-    ``clip``) is supported identically by numpy and dask.
+    operation (`*`, `conj`, `abs`, `sqrt`, `isfinite`, `where`,
+    `clip`) is supported identically by numpy and dask.
 
-    ``nan_aware=False`` reproduces the legacy formula verbatim. That path feeds
+    `nan_aware=False` reproduces the legacy formula verbatim. That path feeds
     NaN straight into scipy's filters, which are not NaN-aware, so every
     invalid sample spreads over the whole filter footprint: a radius of
-    ``4 * looks`` for Gaussian, and -- because ``uniform_filter`` is a running
-    sum -- everything downstream along both axes for Uniform. On real GSLCs,
-    which are NaN outside the swath (~45% of a granule) and on every merged
-    union grid, that erodes or wipes out the interferogram.
+    `4 * looks` for Gaussian, and (because `uniform_filter` is a running
+    sum) everything downstream along both axes for Uniform. On real GSLCs,
+    which are NaN outside the swath (a large part of a granule) and on every
+    merged union grid, that erodes or wipes out the interferogram.
 
-    ``nan_aware=True`` (the default) instead never lets NaN reach scipy. It
+    `nan_aware=True` (the default) instead never lets NaN reach scipy. It
     zero-fills the invalid samples, multilooks the validity mask alongside the
-    data, and divides it back out -- a normalized convolution. An output pixel
-    is kept when at least ``min_valid_fraction`` of its filter weight came from
+    data, and divides it back out: a normalized convolution. An output pixel
+    is kept when at least `min_valid_fraction` of its filter weight came from
     valid input, so the NaN footprint neither dilates nor grows: at a straight
     edge the 0.5 default lands exactly on the true boundary.
 
     Relative to the legacy path this leaves the phase and the coherence
-    unchanged -- the smoothed mask cancels exactly in the coherence ratio, and
+    unchanged: the smoothed mask cancels exactly in the coherence ratio, and
     dividing by a positive real does not move the argument. The one difference
-    is the interferogram *amplitude* within a filter radius of a boundary,
+    is the interferogram amplitude within a filter radius of a boundary,
     where the normalization removes the zero-padding bias the legacy path
     carries.
 
-    Returns ``(interferogram, coherence)`` as ``(complex, float32)``.
+    Returns `(interferogram, coherence)` as `(complex, float32)`.
     """
     if not nan_aware:
         raw_interf = c1 * np.conj(c2)
@@ -350,33 +350,33 @@ def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
 
 
 def downsampled_coords(coords, looks, max_n):
-    """Coordinate values for a downsampled axis (block-mean of ``looks``)."""
+    """Coordinate values for a downsampled axis (block-mean of `looks`)."""
     return coords[:max_n].reshape(-1, looks).mean(axis=1)
 
 
 def lattice_lead(coords, looks):
     """Leading samples to drop so multilook blocks land on the absolute lattice.
 
-    Multilooking block-means ``looks`` consecutive samples starting at index 0
-    of whatever array it is handed, so the *phase* of the multilooked grid is
+    Multilooking block-means `looks` consecutive samples starting at index 0
+    of whatever array it is handed, so the phase of the multilooked grid is
     set by where the crop began. Two frames of one track cropped to different
     extents then come out on lattices offset by a fraction of a multilooked
-    pixel -- which is not a lattice they share, so :meth:`UnwrappedStack.merge`
-    can no longer reach their union by padding.
+    pixel, which is not a lattice they share, so `UnwrappedStack.merge`
+    cannot reach their union by padding.
 
-    Anchoring removes that dependence: ``coords[0] / d`` is this crop's position
-    on the absolute native lattice, so dropping ``s = -coords[0]/d (mod looks)``
-    samples makes every block boundary a whole multiple of ``looks`` native
+    Anchoring removes that dependence: `coords[0] / d` is this crop's position
+    on the absolute native lattice, so dropping `s = -coords[0]/d (mod looks)`
+    samples makes every block boundary a whole multiple of `looks` native
     samples from the lattice origin. Every frame on one native lattice then
     multilooks onto the same grid, whatever it was cropped to, and merges need
     no resampling at all.
 
-    Rounded with ``floor(v + 0.5)``, not :func:`round`: NISAR grids put pixel
-    *centres* on half-integer multiples of the spacing, so ``v`` lands exactly
-    on a tie and :func:`round`'s round-half-to-even would break it *upwards or
-    downwards depending on the crop*, reintroducing the very offset this removes.
+    Rounded with `floor(v + 0.5)`, not `round`: NISAR grids put pixel
+    centres on half-integer multiples of the spacing, so `v` lands exactly
+    on a tie and `round`'s round-half-to-even would break it upwards or
+    downwards depending on the crop, reintroducing the very offset this removes.
 
-    Costs at most ``looks - 1`` samples off the near edge of each axis.
+    Costs at most `looks - 1` samples off the near edge of each axis.
     """
     if len(coords) < 2:  # no spacing to read; nothing to anchor to
         return 0
@@ -385,11 +385,11 @@ def lattice_lead(coords, looks):
 
 
 def _patch_origins(n, ps, step):
-    """Start indices of length-``ps`` patches tiling ``[0, n)`` with stride ``step``.
+    """Start indices of length-`ps` patches tiling `[0, n)` with stride `step`.
 
-    Always includes ``0`` and ``n - ps`` so every sample is covered by at least
+    Always includes `0` and `n - ps` so every sample is covered by at least
     one full patch (the final patch is flush with the far edge, overlapping its
-    neighbour a little more than ``step``). If ``n <= ps`` a single patch suffices.
+    neighbour a little more than `step`). If `n <= ps` a single patch suffices.
     """
     if n <= ps:
         return [0]
@@ -404,38 +404,38 @@ def goldstein_filter(igram, alpha=0.5, patch_size=32, overlap=0.75, psd_smooth=3
                      grid_shape=None):
     """Goldstein-Werner adaptive spectral filter on a 2D complex interferogram.
 
-    The interferogram is tiled into overlapping ``patch_size`` windows. Each
+    The interferogram is tiled into overlapping `patch_size` windows. Each
     patch is tapered, FFT'd, and its spectrum is scaled by
-    ``(smooth(|Z|) / max)**alpha`` -- an adaptive low-pass that attenuates
-    low-power (noisy) frequencies while preserving the dominant fringe -- then
+    `(smooth(|Z|) / max)**alpha` (an adaptive low-pass that attenuates
+    low-power, noisy frequencies while preserving the dominant fringe), then
     inverse-FFT'd and accumulated with a weighted overlap-add (Welch-style, a
     strictly-positive Hamming taper doubling as both the analysis window and the
     blend weight, with a final divide by the summed squared weights).
 
-    ``alpha`` is the filter strength, either:
+    `alpha` is the filter strength, either:
 
-    - a float in ``[0, 1]``: constant strength; ``0`` is an exact identity (no
+    - a float in `[0, 1]`: constant strength; `0` is an exact identity (no
       filtering), larger values filter more aggressively; or
-    - ``"adaptive"``: the Baran et al. (2003) modification -- each patch's
-      strength is ``1 - (window-weighted mean coherence over the patch)``, so
+    - `"adaptive"`: the Baran et al. (2003) modification, where each patch's
+      strength is `1 - (window-weighted mean coherence over the patch)`, so
       incoherent areas are filtered hard and coherent ones barely touched. This
-      is what GMTSAR's ``phasefilt`` does when given ``-amp1/-amp2``, and
-      requires a ``coherence`` array (same shape as ``igram``, values in
-      ``[0, 1]``).
+      is what GMTSAR's `phasefilt` does when given `-amp1/-amp2`, and
+      requires a `coherence` array (same shape as `igram`, values in
+      `[0, 1]`).
 
-    ``patch_size`` is the FFT window (clipped to the raster if smaller);
-    ``overlap`` is the fractional patch overlap in ``[0, 1)``; ``psd_smooth`` is
+    `patch_size` is the FFT window (clipped to the raster if smaller);
+    `overlap` is the fractional patch overlap in `[0, 1)`; `psd_smooth` is
     the boxcar size used to smooth the magnitude spectrum (wrapped, since a DFT
     spectrum is periodic).
 
     NaNs (e.g. the interferogram's out-of-swath fill) are treated as zero for the
     transforms and restored to NaN in the output. Returns a complex array of the
-    same shape and dtype as ``igram``.
+    same shape and dtype as `igram`.
 
-    ``y_index``/``x_index``/``grid_shape`` let this run on a *window* of a bigger
+    `y_index`/`x_index`/`grid_shape` let this run on a window of a bigger
     raster while keeping the patch lattice and the overlap-add normalization
     global, so the window's interior matches the whole-plane answer exactly. They
-    are what :func:`goldstein_filter_dask` uses to decompose the filter spatially;
+    are what `goldstein_filter_dask` uses to decompose the filter spatially;
     leave them unset for a plain whole-plane call.
     """
     adaptive = isinstance(alpha, str)
@@ -567,21 +567,21 @@ def goldstein_filter(igram, alpha=0.5, patch_size=32, overlap=0.75, psd_smooth=3
 
 def goldstein_filter_dask(igram, coherence=None, *, alpha=0.5, patch_size=32,
                           overlap=0.75, psd_smooth=3):
-    """Goldstein filter over a dask ``(pair, y, x)`` array, chunk by chunk.
+    """Goldstein filter over a dask `(pair, y, x)` array, chunk by chunk.
 
     The filter is local: a pixel's value depends only on the patches containing
-    it, so nothing further than ``patch_size`` away matters and a ``patch_size``
-    halo suffices. What a plain ``map_overlap`` would get *wrong* is the patch
-    lattice -- recomputed per block, it would land at different absolute positions
+    it, so nothing further than `patch_size` away matters and a `patch_size`
+    halo suffices. What a plain `map_overlap` would get wrong is the patch
+    lattice: recomputed per block, it would land at different absolute positions
     than the whole-plane run and give different spectra. So each block is handed
-    its global origin and the global grid shape, and evaluates the *global* lattice
+    its global origin and the global grid shape, and evaluates the global lattice
     restricted to its own padded window. Every patch touching the kept region lies
     wholly inside that window, so the trimmed result is exactly the whole-plane
     result.
 
-    The padded windows are sliced explicitly rather than via ``map_overlap``,
+    The padded windows are sliced explicitly rather than via `map_overlap`,
     because that aligns extra arrays by broadcasting from the right and cannot be
-    handed a per-axis index array alongside a ``(pair, y, x)`` stack.
+    handed a per-axis index array alongside a `(pair, y, x)` stack.
 
     Numpy input falls through to the whole-plane batch wrapper.
     """
@@ -640,13 +640,13 @@ def goldstein_filter_dask(igram, coherence=None, *, alpha=0.5, patch_size=32,
 def goldstein_filter_planes(arr, coherence=None, *, alpha=0.5, patch_size=32,
                             overlap=0.75, psd_smooth=3, y_index=None,
                             x_index=None, grid_shape=None):
-    """Apply :func:`goldstein_filter` to each trailing 2D plane of ``arr``.
+    """Apply `goldstein_filter` to each trailing 2D plane of `arr`.
 
-    Leading axes (e.g. a stacked ``pair`` dimension) are looped over so a whole
+    Leading axes (e.g. a stacked `pair` dimension) are looped over so a whole
     3D block goes through in one call without the planes ever mixing. Kept as a
     thin batch wrapper so the 2D kernel stays the single reference implementation.
-    ``coherence`` (for ``alpha="adaptive"``) is indexed plane-by-plane alongside
-    ``arr``; it is the optional second positional input so ``xr.apply_ufunc`` can
+    `coherence` (for `alpha="adaptive"`) is indexed plane-by-plane alongside
+    `arr`; it is the optional second positional input so `xr.apply_ufunc` can
     pass it as a second core-dims array.
     """
     arr = np.asarray(arr)
@@ -672,17 +672,17 @@ def goldstein_filter_planes(arr, coherence=None, *, alpha=0.5, patch_size=32,
 def offset_locations(n, window, count=None, step=None, shift=0):
     """Window start indices for a correlation-location lattice along one axis.
 
-    Every origin ``o`` satisfies ``o >= 0``, ``o + window <= n`` **and** the same
-    for the secondary's window at ``o + shift``, so both patches lie wholly inside
+    Every origin `o` satisfies `o >= 0`, `o + window <= n` and the same
+    for the secondary's window at `o + shift`, so both patches lie wholly inside
     the raster. That inset by half a window at each end is the whole constraint;
-    GMTSAR's :file:`get_locations.c` additionally adds two range columns and drops
+    GMTSAR's `get_locations.c` additionally adds two range columns and drops
     the first and last "because the data have been extended", which is an artefact
     of range-compressed SLC padding and has no analogue on a geocoded grid.
 
-    Exactly one of ``count`` (GMTSAR's ``-nx``/``-ny``: that many locations) or
-    ``step`` (the gap between locations, in pixels) must be given. Both produce an
-    **exactly uniform** lattice -- ``count`` rounds the gap down to a whole number
-    of pixels rather than spreading the locations to the far edge -- because the
+    Exactly one of `count` (GMTSAR's `-nx`/`-ny`: that many locations) or
+    `step` (the gap between locations, in pixels) must be given. Both produce an
+    exactly uniform lattice (`count` rounds the gap down to a whole number
+    of pixels rather than spreading the locations to the far edge), because the
     result is a georeferenced raster and rioxarray needs a uniform grid to build
     its affine transform.
     """
@@ -726,8 +726,8 @@ def offset_locations(n, window, count=None, step=None, shift=0):
 def offset_centre_pixels(origins, window):
     """The reference-grid pixel index each correlation window is attributed to.
 
-    GMTSAR's ``loc[].x``/``loc[].y``, the values its ASCII output names: the patch
-    runs from ``centre - npx/2``, so the centre is ``origin + window // 2``. An
+    GMTSAR's `loc[].x`/`loc[].y`, the values its ASCII output names: the patch
+    runs from `centre - npx/2`, so the centre is `origin + window // 2`. An
     index rather than a half-sample position, so the export names a real pixel and
     the product's map coordinate can be that pixel's own coordinate.
     """
@@ -735,14 +735,14 @@ def offset_centre_pixels(origins, window):
 
 
 def _fft_oversample(patches, factor):
-    """FFT-interpolate the trailing two axes of ``patches`` by an integer factor.
+    """FFT-interpolate the trailing two axes of `patches` by an integer factor.
 
-    A port of GMTSAR's ``fft_arrange_interpolate``: the spectrum's positive
+    A port of GMTSAR's `fft_arrange_interpolate`: the spectrum's positive
     frequencies stay at the front of the longer axis and its negative frequencies
     move to the back, zeros in between, then the inverse transform is scaled by
-    ``factor`` per axis so the original samples are reproduced exactly. Used for
-    both jobs the reference uses it for -- oversampling the input patches
-    (``do_range_interpolate``) and the correlation surface (``do_highres_corr``).
+    `factor` per axis so the original samples are reproduced exactly. Used for
+    both jobs the reference uses it for: oversampling the input patches
+    (`do_range_interpolate`) and the correlation surface (`do_highres_corr`).
 
     Requires even axis lengths, as the reference does: it places the whole Nyquist
     bin at the negative-frequency end, which is only well defined for even sizes.
@@ -768,11 +768,11 @@ def _fft_oversample(patches, factor):
 
 
 def _offset_amplitude(patches, oversample):
-    """``(amplitude, valid)`` for a batch of patches, oversampled if asked.
+    """`(amplitude, valid)` for a batch of patches, oversampled if asked.
 
-    Invalid samples are zero-filled *before* the interpolation, as they are before
+    Invalid samples are zero-filled before the interpolation, as they are before
     every other transform in this module, and the validity mask is upsampled by
-    repetition -- a sample either had data or it did not, and interpolating that
+    repetition: a sample either had data or it did not, and interpolating that
     answer would invent partial validity.
     """
     valid = np.isfinite(patches)  # complex: true only if both parts are finite
@@ -804,98 +804,82 @@ def pixel_offsets(ref, sec, y_origins, x_origins, *, nx_corr=64, ny_corr=64,
                   oversample=1, min_valid_fraction=0.5):
     """Sub-pixel offsets between two images by amplitude cross-correlation.
 
-    A port of GMTSAR's ``xcorr`` in its default frequency-domain mode
-    (``do_freq_xcorr.c``, ``highres_corr.c``, ``do_time_int_xcorr.c``). At each
-    location an ``npy x npx`` patch is cut from both images, where
-    ``npx = nx_corr + 2*xsearch`` and ``npy = ny_corr + 2*ysearch``; both are
-    reduced to amplitude and demeaned; the *secondary* is masked to its central
-    ``ny_corr x nx_corr`` template so the circular FFT correlation cannot wrap
+    A port of GMTSAR's `xcorr` in its default frequency-domain mode
+    (`do_freq_xcorr.c`, `highres_corr.c`, `do_time_int_xcorr.c`). At each
+    location an `npy x npx` patch is cut from both images, where
+    `npx = nx_corr + 2*xsearch` and `npy = ny_corr + 2*ysearch`; both are
+    reduced to amplitude and demeaned; the secondary is masked to its central
+    `ny_corr x nx_corr` template so the circular FFT correlation cannot wrap
     around; the correlation surface is the inverse transform of
-    ``F(ref) * conj(F(sec))``; and its peak over lags in ``[-search, +search)``
+    `F(ref) * conj(F(sec))`; and its peak over lags in `[-search, +search)`
     gives the integer offset, refined by FFT-interpolating an
-    ``subpixel_window``-wide window of the surface (raised to the 0.25 power, as
-    the reference does) by ``interp_factor``.
+    `subpixel_window`-wide window of the surface (raised to the 0.25 power, as
+    the reference does) by `interp_factor`.
 
-    **Sign**: an offset is positive when the feature sits at a *larger* index in
-    ``sec`` than in ``ref``, i.e. it is ``sec_position - ref_position``. Same
-    convention as the reference's ``xoff``/``yoff``.
+    Sign: an offset is positive when the feature sits at a larger index in
+    `sec` than in `ref`, i.e. it is `sec_position - ref_position`. Same
+    convention as the reference's `xoff`/`yoff`.
 
-    ``x_shift``/``y_shift`` are an a-priori integer shift applied to the
+    `x_shift`/`y_shift` are an a-priori integer shift applied to the
     secondary's patch and added back to the result (the reference's PRM
-    ``rshift``/``ashift``); they let the search window be centred on a known bulk
+    `rshift`/`ashift`); they let the search window be centred on a known bulk
     displacement.
 
-    ``oversample`` FFT-interpolates both patches before correlating, the reference's
-    ``-range_interp``. It defaults to **1 (off)**: the reference oversamples range
+    `oversample` FFT-interpolates both patches before correlating, the reference's
+    `-range_interp`. It defaults to 1 (off): the reference oversamples range
     only, and does it by keeping the middle half of the interpolated line while
-    calling it the same window -- which silently halves the correlation window's
+    calling it the same window, which silently halves the correlation window's
     ground extent. On a geocoded grid there is no distinguished range axis, so this
     oversamples both axes symmetrically instead, and the offsets are divided by the
     factor on the way out.
 
-    Returns ``(x_offset, y_offset, correlation)``, each ``(len(y_origins),
-    len(x_origins))`` float32. ``correlation`` is the reference's normalised
-    time-domain value at the peak, ``100 * |sum a*b| / sqrt(sum a^2 * sum b^2)``
-    over the template -- the number ``fitoffset.csh`` thresholds at 20 -- and the
-    offsets are NaN (with correlation 0) wherever fewer than ``min_valid_fraction``
-    of a patch's samples are finite.
+    Returns `(x_offset, y_offset, correlation)`, each
+    `(len(y_origins), len(x_origins))` float32. `correlation` is the reference's
+    normalised time-domain value at the peak,
+    `100 * |sum a*b| / sqrt(sum a^2 * sum b^2)` over the template (the number
+    GMTSAR's `fitoffset.csh` thresholds at 20), and the offsets are NaN (with
+    correlation 0) wherever fewer than `min_valid_fraction` of a patch's samples
+    are finite.
 
-    **The window defaults are not the reference's.** ``xcorr`` uses
-    ``nx_corr = ny_corr = 128`` with ``xsearch = ysearch = 64``, sized for radar
+    The window defaults are not the reference's. `xcorr` uses
+    `nx_corr = ny_corr = 128` with `xsearch = ysearch = 64`, sized for radar
     geometry where the pair is genuinely unaligned and the search has to cover a
     coregistration error. A geocoded pair is already aligned to the whole pixel, so
     almost all of that search is spent on lags that cannot occur, and every one of
     them is another chance to pick a false peak. The defaults here are a 64 px
-    template searched over +/-16 px -- 320 m and +/-80 m at NISAR's 5 m posting --
-    which on real data halved the false-peak rate (4.2% to 2.5%) without moving the
-    measured displacement gradient. Widen ``xsearch``/``ysearch`` only for a pair
-    that really is offset by more than a few pixels, and use ``x_shift``/``y_shift``
-    in preference: it recentres the search instead of enlarging it.
+    template searched over +/-16 px (320 m and +/-80 m at NISAR's 5 m posting),
+    which gives fewer false peaks without moving the measured displacement
+    gradient. Widen `xsearch`/`ysearch` only for a pair that really is offset by
+    more than a few pixels, and use `x_shift`/`y_shift` in preference: it
+    recentres the search instead of enlarging it.
 
-    ``subpixel_window`` follows the reference at **8**, and the reason is worth
-    recording because it went the other way at the old, wider defaults. The
-    refinement FFT-interpolates that window, i.e. treats it as periodic, and at 8
-    samples a correlation peak has not decayed by the window's edges, so ringing
-    drags the interpolated maximum around. That is a *bias*. Measured on a
-    band-limited field over fractional shifts 0 to 0.94, at the defaults above:
-
-    ==========================  ======  ======
-    ``subpixel_window``              8      16
-    --------------------------  ------  ------
-    max abs bias (px)           0.1357  0.0791
-    scatter after centring (px) 0.0939  0.1934
-    ==========================  ======  ======
-
-    So the wider window does cut the bias, and at ``nx_corr=128, xsearch=64`` it did
-    so for free (rms 0.0945 vs 0.1019) -- which is why 16 was the default until the
-    windows shrank. At a 64 px template it is no longer free: it buys 0.066 px of
-    bias for 0.070 px of extra scatter. The scatter is what matters, because the
-    bias is uniform over a scene and
-    :meth:`~nisar_tools.offsets.PixelOffsetStack.robust_offsets` -- the way an
-    offset field is read as ground motion -- subtracts the field's own median and
+    `subpixel_window` follows the reference at 8. The refinement FFT-interpolates
+    that window, i.e. treats it as periodic, and at 8 samples a correlation peak
+    has not decayed by the window's edges, so ringing drags the interpolated
+    maximum around: a bias of up to ~0.14 px over fractional shifts. A 16-sample
+    window cuts the bias by about 40% but, at a 64 px template, doubles the
+    scatter (~0.09 to ~0.19 px on a band-limited synthetic field). The scatter is what
+    matters, because the bias is uniform over a scene and
+    `nisar_tools.offsets.PixelOffsetStack.robust_offsets` (the way an
+    offset field is read as ground motion) subtracts the field's own median and
     so removes it exactly, while leaving the scatter untouched. Pass
-    ``subpixel_window=16`` when the absolute offset matters rather than its
-    variation, and keep it well under ``2*search``: the window is clipped to the
+    `subpixel_window=16` when the absolute offset matters rather than its
+    variation, and keep it well under `2*search`: the window is clipped to the
     correlation surface and zero-padded beyond it, so one as wide as the surface
-    biases every peak that is not already centred.
+    biases every peak that is not already centred. Raising `interp_factor` does
+    not help: the bias comes from the window, not the interpolation step.
 
-    Raising ``interp_factor`` does **not** substitute -- 16 and 64 bias identically
-    -- which is what shows this is the window and not the interpolation step size,
-    and a parabola fit to the same surfaces is unbiased, which is what shows the
-    surface itself is right.
-
-    The window only matters where the correlation peak is *wide*. On real NISAR
-    GSLC, which is close to critically sampled and so nearly white, 8, 16 and 32
-    were measured to agree exactly, and correlating a real granule against itself
-    returns 0.000 at every location.
+    The window only matters where the correlation peak is wide. NISAR GSLCs are
+    close to critically sampled and so nearly white, and there the window size
+    makes little difference.
 
     Departures from the reference, all deliberate: the correlation sums are
-    accumulated in float64 rather than through the reference's ``(int)`` cast of
-    the demeaned amplitudes (an artefact of its short-integer SLCs -- NISAR GSLC
+    accumulated in float64 rather than through the reference's `(int)` cast of
+    the demeaned amplitudes (an artefact of its short-integer SLCs: NISAR GSLC
     amplitudes are O(1) floats, which that cast would truncate to zero);
-    invalid samples are handled at all; ``np.fft.fftshift`` replaces the
-    ``(-1)^(i+j)`` checkerboard (identical for even sizes, correct for odd);
-    ``highres_corr.c``'s ``jpeak = j - ny2/2`` (which should read ``nx2/2``, and is
+    invalid samples are handled at all; `np.fft.fftshift` replaces the
+    `(-1)^(i+j)` checkerboard (identical for even sizes, correct for odd);
+    `highres_corr.c`'s `jpeak = j - ny2/2` (which should read `nx2/2`, and is
     invisible only because the sub-pixel window is square by default) is not
     reproduced; and the reference's rescale of the surface to the peak value is
     dropped, being a uniform positive scale that cannot move an argmax.
@@ -1059,12 +1043,12 @@ def pixel_offsets(ref, sec, y_origins, x_origins, *, nx_corr=64, ny_corr=64,
 
 
 def pixel_offsets_planes(ref, sec, y_origins, x_origins, **kwargs):
-    """Apply :func:`pixel_offsets` to each trailing 2D plane pair of ``ref``/``sec``.
+    """Apply `pixel_offsets` to each trailing 2D plane pair of `ref`/`sec`.
 
-    Returns the three outputs stacked on a **new leading axis** --
-    ``(3, *leading, gy, gx)``, ordered ``x_offset, y_offset, correlation`` -- rather
-    than as a tuple, so a single ``da.map_blocks`` can carry all three out of one
-    task. :func:`pixel_offsets_dask` splits the axis apart again.
+    Returns the three outputs stacked on a new leading axis,
+    `(3, *leading, gy, gx)`, ordered `x_offset, y_offset, correlation`, rather
+    than as a tuple, so a single `da.map_blocks` can carry all three out of one
+    task. `pixel_offsets_dask` splits the axis apart again.
     """
     ref = np.asarray(ref)
     sec = np.asarray(sec)
@@ -1086,23 +1070,23 @@ def pixel_offsets_planes(ref, sec, y_origins, x_origins, **kwargs):
 def pixel_offsets_dask(ref, sec, y_origins, x_origins, *, locations_per_tile=16,
                        nx_corr=64, ny_corr=64, xsearch=16, ysearch=16,
                        x_shift=0, y_shift=0, **kwargs):
-    """:func:`pixel_offsets` over dask ``(pair, y, x)`` arrays, tile by tile.
+    """`pixel_offsets` over dask `(pair, y, x)` arrays, tile by tile.
 
-    The *location lattice* is tiled, not the raster: each task takes a
-    ``locations_per_tile`` square block of locations, is handed the one fine-pixel
+    The location lattice is tiled, not the raster: each task takes a
+    `locations_per_tile` square block of locations, is handed the one fine-pixel
     window covering all of their patches (and their shifted secondary patches), and
-    returns that block's coarse answers. As in :func:`goldstein_filter_dask` the
-    windows are sliced explicitly rather than through ``map_overlap``, which has no
+    returns that block's coarse answers. As in `goldstein_filter_dask` the
+    windows are sliced explicitly rather than through `map_overlap`, which has no
     way to express an output grid coarser than its input.
 
-    Read amplification is ``((k*step + window) / (k*step))**2`` for
-    ``k = locations_per_tile``: about 1.9x at the defaults, where the dense step 16
+    Read amplification is `((k*step + window) / (k*step))**2` for
+    `k = locations_per_tile`: about 1.9x at the defaults, where the dense step 16
     lattice makes a tile narrow relative to its 96 px window. Raising
-    ``locations_per_tile`` brings it down (1.4x at 32, 1.2x at 64) at the cost of
+    `locations_per_tile` brings it down (1.4x at 32, 1.2x at 64) at the cost of
     fewer, larger tasks; it changes nothing about the result, which is why it does
     not belong in a stage's parameter hash.
 
-    Returns the three dask arrays ``(x_offset, y_offset, correlation)``.
+    Returns the three dask arrays `(x_offset, y_offset, correlation)`.
     """
     params = dict(
         nx_corr=nx_corr, ny_corr=ny_corr, xsearch=xsearch, ysearch=ysearch,
@@ -1154,27 +1138,27 @@ def pixel_offsets_dask(ref, sec, y_origins, x_origins, *, locations_per_tile=16,
 
 # -- unwrapped-phase cleaning: edge masking, spline outlier rejection, deramp --
 #
-# Ports the recipe of the user's ``filt_gunw.csh`` (GMT ``surface -T`` tension
-# spline + residual outlier masking + a deramp) into pure numpy/scipy. GMT's
-# adjustable-tension surface has no direct scipy equivalent; a NaN-aware smooth
-# surface (normalized Gaussian convolution, the same zero-fill/divide trick as
-# ``igram_coherence``) stands in for the smooth trend, and a low-order 2D
-# polynomial least-squares fit stands in for the ramp.
+# A numpy/scipy version of a GMT cleaning recipe (a `surface -T` tension
+# spline, residual outlier masking and a deramp). GMT's adjustable-tension
+# surface has no direct scipy equivalent; a NaN-aware smooth surface (normalized
+# Gaussian convolution, the same zero-fill/divide trick as igram_coherence)
+# stands in for the smooth trend, and a low-order 2D polynomial least-squares
+# fit stands in for the ramp.
 
 
 def smooth_surface(field, scale, exclude=None):
-    """NaN-aware smooth surface of ``field`` (2D), Gaussian ``scale`` in pixels.
+    """NaN-aware smooth surface of `field` (2D), Gaussian `scale` in pixels.
 
     Invalid pixels are zero-filled for the convolution and divided back out via
-    a smoothed validity mask, so a NaN neither reads as 0 nor spreads -- the
+    a smoothed validity mask, so a NaN neither reads as 0 nor spreads: the
     normalized-convolution trick used by the nan-aware multilook. Output is NaN
     where the smoothed validity mass is negligible (too little nearby data).
 
-    ``exclude`` (optional boolean mask, same shape) drops those pixels from the
+    `exclude` (optional boolean mask, same shape) drops those pixels from the
     fit while still evaluating the surface there: the normalized convolution
     fills them from surrounding non-excluded data. Used to keep a signal region
     out of a deramp's trend estimate. Its interior comes back NaN if the gap is
-    wide relative to ``scale`` (no nearby data survives to interpolate from).
+    wide relative to `scale` (no nearby data survives to interpolate from).
     """
     field = np.asarray(field, dtype=np.float64)
     finite = np.isfinite(field)
@@ -1188,7 +1172,7 @@ def smooth_surface(field, scale, exclude=None):
 
 
 def poly_ncoef(degree):
-    """Number of coefficients in a total-degree-``degree`` 2D polynomial."""
+    """Number of coefficients in a total-degree-`degree` 2D polynomial."""
     return (int(degree) + 1) * (int(degree) + 2) // 2
 
 
@@ -1198,8 +1182,8 @@ def _poly_columns(ny, nx, degree, y0=0, x0=0, bny=None, bnx=None):
     Normalizing keeps the least-squares system well conditioned regardless of
     the pixel coordinates' magnitude. Total-degree basis: 1, x, y, x^2, xy, ...
 
-    ``(y0, x0)`` and ``(bny, bnx)`` select a window of the ``(ny, nx)`` grid while
-    keeping the normalization *global*, so a chunk-wise fit builds the same basis
+    `(y0, x0)` and `(bny, bnx)` select a window of the `(ny, nx)` grid while
+    keeping the normalization global, so a chunk-wise fit builds the same basis
     the whole-plane fit does. Defaults cover the whole grid.
     """
     bny = ny if bny is None else bny
@@ -1213,12 +1197,12 @@ def _poly_columns(ny, nx, degree, y0=0, x0=0, bny=None, bnx=None):
 
 
 def poly_surface(field, degree, exclude=None):
-    """Least-squares 2D polynomial surface fit to ``field``'s finite pixels.
+    """Least-squares 2D polynomial surface fit to `field`'s finite pixels.
 
     Evaluated on the whole grid (a polynomial is defined everywhere). Returns
-    all-NaN if there are fewer valid pixels than coefficients. ``exclude``
-    (optional boolean mask, same shape) drops those pixels from the fit -- so a
-    masked signal region does not bias the ramp -- while the fitted polynomial is
+    all-NaN if there are fewer valid pixels than coefficients. `exclude`
+    (optional boolean mask, same shape) drops those pixels from the fit, so a
+    masked signal region does not bias the ramp, while the fitted polynomial is
     still evaluated over the full grid.
     """
     field = np.asarray(field, dtype=np.float64)
@@ -1235,12 +1219,12 @@ def poly_surface(field, degree, exclude=None):
 
 
 def fit_surface(field, method="spline", scale=None, degree=1, exclude=None):
-    """Fit a smooth surface to a 2D ``field`` -- the trend a deramp subtracts.
+    """Fit a smooth surface to a 2D `field`: the trend a deramp subtracts.
 
-    The single source of truth for the smooth trend :func:`deramp` subtracts.
-    ``method="spline"`` is a NaN-aware normalized-convolution Gaussian at sigma
-    ``scale`` px (default a quarter of the smaller axis); ``method="poly"`` is a
-    total-degree-``degree`` 2D polynomial. ``exclude`` (optional boolean mask)
+    The single source of truth for the smooth trend `deramp` subtracts.
+    `method="spline"` is a NaN-aware normalized-convolution Gaussian at sigma
+    `scale` px (default a quarter of the smaller axis); `method="poly"` is a
+    total-degree-`degree` 2D polynomial. `exclude` (optional boolean mask)
     is forwarded to the underlying fit to keep a signal region out of it.
     """
     field = np.asarray(field, dtype=np.float64)
@@ -1256,10 +1240,10 @@ def fit_surface(field, method="spline", scale=None, degree=1, exclude=None):
 def remove_outliers(field, scale, threshold, iterations):
     """Iteratively NaN pixels far from a NaN-aware smooth surface (2D).
 
-    Mirrors ``filt_gunw.csh``: fit a smooth trend, flag ``|field - trend| >
-    threshold`` as outliers, and refit on the survivors. ``threshold`` is in the
-    field's own units (radians for unwrapped phase). Returns a copy with the
-    rejected pixels set to NaN.
+    Fit a smooth trend, flag `|field - trend| > threshold` as outliers, and
+    refit on the survivors, as the GMT tension-spline cleaning step does.
+    `threshold` is in the field's own units (radians for unwrapped phase).
+    Returns a copy with the rejected pixels set to NaN.
     """
     out = np.array(field, dtype=np.float64)
     for _ in range(int(iterations)):
@@ -1269,17 +1253,17 @@ def remove_outliers(field, scale, threshold, iterations):
 
 
 def deramp(field, degree=1, method="poly", scale=None, exclude=None):
-    """Estimate and subtract a long-wavelength surface (ramp) from ``field`` (2D).
+    """Estimate and subtract a long-wavelength surface (ramp) from `field` (2D).
 
-    ``method="poly"`` subtracts a total-degree-``degree`` polynomial (the classic
-    InSAR deramp; 1 = plane); ``method="spline"`` subtracts a NaN-aware smooth
-    surface at Gaussian sigma ``scale`` (defaults to a quarter of the smaller
+    `method="poly"` subtracts a total-degree-`degree` polynomial (the classic
+    InSAR deramp; 1 = plane); `method="spline"` subtracts a NaN-aware smooth
+    surface at Gaussian sigma `scale` (defaults to a quarter of the smaller
     axis), a high-pass that also removes gently curved ionosphere ramps. NaNs are
-    preserved. The subtracted surface is exactly what :func:`fit_surface`
-    produces, so ``deramp(spline) == field - fit_surface(spline)``.
+    preserved. The subtracted surface is exactly what `fit_surface`
+    produces, so `deramp(spline) == field - fit_surface(spline)`.
 
-    ``exclude`` (optional boolean mask) marks a signal region to leave out of the
-    ramp *fit*; the ramp is still subtracted from those pixels, so the signal is
+    `exclude` (optional boolean mask) marks a signal region to leave out of the
+    ramp fit; the ramp is still subtracted from those pixels, so the signal is
     kept but not allowed to bias the trend.
     """
     field = np.asarray(field, dtype=np.float64)
@@ -1288,28 +1272,28 @@ def deramp(field, degree=1, method="poly", scale=None, exclude=None):
     return (field - surface).astype(np.asarray(field).dtype)
 
 
-#: The four sides of a raster, named against the **grid**, not the orbit: a side
+#: The four sides of a raster, named against the grid, not the orbit: a side
 #: is simply where a line of data begins or ends. On a north-up geocoded grid
-#: flown by a near-polar orbit, ``left``/``right`` are the near- and far-range
-#: swath boundaries and ``top``/``bottom`` the azimuth ends -- but *which* of
+#: flown by a near-polar orbit, `left`/`right` are the near- and far-range
+#: swath boundaries and `top`/`bottom` the azimuth ends, but which of
 #: left/right is near range depends on the pass and the look direction, so the
 #: names stay grid-relative, where they cannot be misread.
 EDGE_SIDES = ("left", "right", "top", "bottom")
 
-#: The two sides ``edges="along_track"`` selects.
+#: The two sides `edges="along_track"` selects.
 ALONG_TRACK_SIDES = ("left", "right")
 
 
 def edge_depths(edge_pixels, edges="along_track"):
-    """Resolve an ``edges`` selection to ``{side: depth}``, dropping zero depths.
+    """Resolve an `edges` selection to `{side: depth}`, dropping zero depths.
 
-    ``edges`` is one side name, a sequence of them, ``"along_track"`` (= ``left``
-    and ``right``, the two range boundaries), or a mapping of side to its own
-    depth. Everything but a mapping takes its depth from ``edge_pixels``; a
-    mapping carries its own, and ``edge_pixels`` is then not consulted at all.
+    `edges` is one side name, a sequence of them, `"along_track"` (= `left`
+    and `right`, the two range boundaries), or a mapping of side to its own
+    depth. Everything but a mapping takes its depth from `edge_pixels`; a
+    mapping carries its own, and `edge_pixels` is then not consulted at all.
 
-    ``"all"`` is not a side selection -- it is the isotropic erosion, a different
-    operation -- so it is rejected here and callers dispatch on it first.
+    `"all"` is not a side selection (it is the isotropic erosion, a different
+    operation), so it is rejected here and callers dispatch on it first.
     """
     if isinstance(edges, str) and edges == "all":
         raise ValueError(
@@ -1335,8 +1319,8 @@ def edge_depths(edge_pixels, edges="along_track"):
 
 
 def _scan_edge_band(valid, axis, lo_depth, hi_depth):
-    """Band within ``lo_depth`` of the first, or ``hi_depth`` of the last, valid
-    sample of every line along ``axis`` (1 scans rows, 0 scans columns)."""
+    """Band within `lo_depth` of the first, or `hi_depth` of the last, valid
+    sample of every line along `axis` (1 scans rows, 0 scans columns)."""
     v = valid if axis == 1 else valid.T
     band = np.zeros_like(v)
     any_valid = v.any(axis=1)
@@ -1356,23 +1340,23 @@ def _scan_edge_band(valid, axis, lo_depth, hi_depth):
 
 
 def side_edge_mask(valid, depths):
-    """Pixels within ``depths[side]`` of the data's own edge on each named side.
+    """Pixels within `depths[side]` of the data's own edge on each named side.
 
-    A side is found by **scanning**, not by eroding: for ``left``/``right`` each
+    A side is found by scanning, not by eroding: for `left`/`right` each
     raster row's first and last valid samples are the two boundaries, and for
-    ``top``/``bottom`` each column's. That is what keeps the trim off everything
-    else that merely borders a NaN -- a coastline, a lake blanked by
-    :meth:`~nisar_tools.unwrap.UnwrappedStack.mask_water`, and the sides that
+    `top`/`bottom` each column's. That is what keeps the trim off everything
+    else that merely borders a NaN: a coastline, a lake blanked by
+    `nisar_tools.unwrap.UnwrappedStack.mask_water`, and the sides that
     were not asked for.
 
-    Every side is measured against the **same** input footprint, so trimming two
+    Every side is measured against the same input footprint, so trimming two
     sides in one call is not the same as two chained calls: the second call would
     scan what the first one left behind, and on a sheared swath a row's ends move
     once its neighbours are trimmed.
 
-    Returns the boolean mask of pixels to *drop*. Rows are independent of one
+    Returns the boolean mask of pixels to drop. Rows are independent of one
     another and so are columns, so a left/right selection decomposes freely along
-    ``y`` (needing whole rows) and a top/bottom one along ``x``.
+    `y` (needing whole rows) and a top/bottom one along `x`.
     """
     valid = np.asarray(valid, dtype=bool)
     drop = np.zeros_like(valid)
@@ -1386,21 +1370,21 @@ def side_edge_mask(valid, depths):
 
 
 def along_track_edge_mask(valid, edge_pixels):
-    """Pixels within ``edge_pixels`` of a row's first/last valid sample.
+    """Pixels within `edge_pixels` of a row's first/last valid sample.
 
     The near- and far-range boundaries of a swath are the edges that run
-    *along-track*, and they are the only ones carrying the decorrelated
+    along-track, and they are the only ones carrying the decorrelated
     antenna-pattern fringe. On a north-up geocoded grid a near-polar orbit puts
-    the track within a few degrees of grid north (measured 3-7 deg on the D126
-    frame), so across-track is grid *east* and each raster row crosses the swath
-    once: its first and last valid samples are the two range boundaries.
+    the track within a few degrees of grid north, so across-track is grid east
+    and each raster row crosses the swath once: its first and last valid samples
+    are the two range boundaries.
 
     The depth is measured in columns, so it is the perpendicular depth divided by
     cos(track tilt): 0.7% deep at 7 degrees, far below one pixel of the erosion
     itself.
 
-    This is :func:`side_edge_mask` over ``left`` and ``right`` at one depth --
-    the two sides that answer to this geometry. Name the sides individually to
+    This is `side_edge_mask` over `left` and `right` at one depth, the two
+    sides that answer to this geometry. Name the sides individually to
     trim only one of them, or to reach the azimuth ends.
     """
     edge_pixels = int(edge_pixels)
@@ -1408,24 +1392,24 @@ def along_track_edge_mask(valid, edge_pixels):
 
 
 def mask_edges(field, edge_pixels, edges="along_track"):
-    """Trim ``edge_pixels`` of swath edge off ``field`` (2D), NaN-ing the border.
+    """Trim `edge_pixels` of swath edge off `field` (2D), NaN-ing the border.
 
-    ``edges="along_track"`` (default) trims only the near/far-range boundaries --
+    `edges="along_track"` (default) trims only the near/far-range boundaries:
     the edges that run along-track, and the only ones with a decorrelated fringe.
-    See :func:`along_track_edge_mask`; it needs whole raster rows.
+    See `along_track_edge_mask`; it needs whole raster rows.
 
-    ``edges`` also takes the sides one at a time: a name from :data:`EDGE_SIDES`,
-    a sequence of them, or a ``{side: pixels}`` mapping when they want different
-    depths (``edge_pixels`` is then unused). ``top``/``bottom`` scan columns
-    rather than rows, so they need whole raster *columns*. See
-    :func:`side_edge_mask`.
+    `edges` also takes the sides one at a time: a name from `EDGE_SIDES`,
+    a sequence of them, or a `{side: pixels}` mapping when they want different
+    depths (`edge_pixels` is then unused). `top`/`bottom` scan columns
+    rather than rows, so they need whole raster columns. See
+    `side_edge_mask`.
 
-    ``edges="all"`` erodes the whole finite footprint by ``edge_pixels`` cross
-    iterations (:func:`scipy.ndimage.binary_erosion`, also trimming the raster
-    edge via ``border_value=0``). That reaches inward from *every* valid/NaN
+    `edges="all"` erodes the whole finite footprint by `edge_pixels` cross
+    iterations (`scipy.ndimage.binary_erosion`, also trimming the raster
+    edge via `border_value=0`). That reaches inward from every valid/NaN
     boundary, so it also eats a collar around coastlines, water-masked lakes and
-    the azimuth ends of the frame; on the D126 frame that was 47.5% of everything
-    it removed. Kept for the cases where the footprint really is all swath edge.
+    the azimuth ends of the frame, which on a coastal frame can be much of what
+    it removes. Kept for the cases where the footprint really is all swath edge.
 
     A no-op when the requested depths are all 0.
     """
@@ -1444,31 +1428,31 @@ def mask_edges(field, edge_pixels, edges="along_track"):
 
 def remove_unconnected_regions(field, min_size=None, connectivity=1,
                                max_drop_fraction=0.01):
-    """NaN the finite regions of ``field`` (2D) that the mainland cannot reach.
+    """NaN the finite regions of `field` (2D) that the mainland cannot reach.
 
     An unwrapper propagates phase along arcs between adjacent pixels, so a region
     with no path to the main body carries no recoverable ambiguity however large
-    it is -- the criterion here is **connectivity, not size**. On a coastal frame
+    it is: the criterion here is connectivity, not size. On a coastal frame
     the strays are islets, ships, platforms and decorrelated fragments left behind
     by the coastline mask; feeding them to SNAPHU produces artifacts that appear to
     bridge open water.
 
-    ``min_size=None`` (the default) keeps only the largest component. Pass
-    ``min_size=N`` to keep every component of more than ``N`` pixels instead, which
+    `min_size=None` (the default) keeps only the largest component. Pass
+    `min_size=N` to keep every component of more than `N` pixels instead, which
     is the escape hatch for a scene that genuinely is two landmasses: it keeps both
     real bodies and still drops the speckle.
 
-    ``connectivity=1`` (4-connected) is the default because a diagonal touch is not
+    `connectivity=1` (4-connected) is the default because a diagonal touch is not
     an arc for the solver, so a diagonally-attached region is just as unreachable as
-    a detached one. It is also the conservative reading -- 4-connectivity splits
-    more apart, so it removes more. ``connectivity=2`` allows diagonal links.
+    a detached one. It is also the conservative reading: 4-connectivity splits
+    more apart, so it removes more. `connectivity=2` allows diagonal links.
 
-    ``max_drop_fraction`` guards against blanking a real landmass: if the *largest
-    single* dropped component exceeds that fraction of the valid pixels, raise
-    rather than silently delete it. Deliberately not the *total* dropped -- a scene
+    `max_drop_fraction` guards against blanking a real landmass: if the largest
+    single dropped component exceeds that fraction of the valid pixels, raise
+    rather than silently delete it. Deliberately not the total dropped: a scene
     shredded into thousands of tiny blobs has a large total but no large component,
     and those blobs are exactly what this is for, so a total-based guard would fire
-    on the case the function exists to handle. ``None`` disables it.
+    on the case the function exists to handle. `None` disables it.
 
     A no-op when nothing is finite, or when everything finite is already one
     component.
@@ -1521,11 +1505,11 @@ def remove_unconnected_regions(field, min_size=None, connectivity=1,
 
 
 def _batch_planes(func, arr, **kwargs):
-    """Apply a 2D-plane ``func`` to each trailing plane of a possibly-3D ``arr``.
+    """Apply a 2D-plane `func` to each trailing plane of a possibly-3D `arr`.
 
-    Leading axes (a stacked ``pair`` dimension) are looped over so a whole block
-    goes through one ``apply_ufunc`` call without the planes mixing -- the same
-    batch pattern as :func:`goldstein_filter_planes`.
+    Leading axes (a stacked `pair` dimension) are looped over so a whole block
+    goes through one `apply_ufunc` call without the planes mixing, the same
+    batch pattern as `goldstein_filter_planes`.
     """
     arr = np.asarray(arr)
     if arr.ndim == 2:
@@ -1538,22 +1522,22 @@ def _batch_planes(func, arr, **kwargs):
 
 
 def halo_planes(func, arr, depth, **kwargs):
-    """Apply a 2D-plane ``func`` over ``arr`` with a ``depth``-pixel spatial halo.
+    """Apply a 2D-plane `func` over `arr` with a `depth`-pixel spatial halo.
 
-    Decomposes a *local* plane kernel spatially instead of forcing one whole plane
+    Decomposes a local plane kernel spatially instead of forcing one whole plane
     per dask task, which is what caps a short stack's parallelism at its pair
-    count. ``depth`` has to cover the kernel's support or the chunk seams show, so
+    count. `depth` has to cover the kernel's support or the chunk seams show, so
     each caller derives it from its own footprint. Only the trailing two axes are
-    overlapped -- the leading stack axis never mixes.
+    overlapped; the leading stack axis never mixes.
 
     The global boundary is padded with NaN, i.e. "no data", which is exactly how
-    these kernels already treat everything beyond the raster (``mask_edges`` erodes
-    with ``border_value=0``; the surface fits give a NaN zero weight). Numpy input
+    these kernels already treat everything beyond the raster (`mask_edges` erodes
+    with `border_value=0`; the surface fits give a NaN zero weight). Numpy input
     falls through to the plain whole-plane batch loop.
 
     A halo wider than the raster itself has no decomposition to offer, so that
-    case collapses to one whole plane per task -- which is what a globally
-    supported kernel (``deramp(method="spline")`` at its default scale) always
+    case collapses to one whole plane per task, which is what a globally
+    supported kernel (`deramp(method="spline")` at its default scale) always
     wants anyway.
     """
     if not _is_dask(arr):
@@ -1575,17 +1559,17 @@ def halo_planes(func, arr, depth, **kwargs):
 
 
 def row_planes(func, arr, whole="x", **kwargs):
-    """Apply a 2D-plane ``func`` that needs whole raster *lines*, chunk by chunk.
+    """Apply a 2D-plane `func` that needs whole raster lines, chunk by chunk.
 
-    A halo cannot serve a kernel whose support is the entire line -- a chunk in
+    A halo cannot serve a kernel whose support is the entire line: a chunk in
     the middle of the raster has no way to know whether it holds the row's first
     valid sample. So one axis is gathered into a single chunk and the
     decomposition runs along the other, where the lines are independent. No
     overlap is needed at all, which makes it exact rather than exact-to-a-halo.
 
-    ``whole="x"`` gathers x and splits along y, which is what a *row* scan needs
-    (``mask_edges`` on the left/right sides). ``whole="y"`` is the transpose, for
-    a *column* scan (the top/bottom sides). Numpy input falls through to the
+    `whole="x"` gathers x and splits along y, which is what a row scan needs
+    (`mask_edges` on the left/right sides). `whole="y"` is the transpose, for
+    a column scan (the top/bottom sides). Numpy input falls through to the
     plain whole-plane batch loop.
     """
     if whole not in ("x", "y"):
@@ -1606,12 +1590,12 @@ def remove_outliers_planes(arr, *, scale, threshold, iterations):
 
 
 def remove_outliers_depth(scale, iterations):
-    """Halo needed to decompose :func:`remove_outliers` spatially.
+    """Halo needed to decompose `remove_outliers` spatially.
 
-    The Gaussian's support is nominally infinite, but past ``4*sigma`` its weight
+    The Gaussian's support is nominally infinite, but past `4*sigma` its weight
     is ~1e-4 of the peak, so that is the working radius (the same rule
-    :func:`_overlap_depth` uses for the multilook). Each iteration re-smooths the
-    *previous* iteration's NaN pattern, so the error front advances one radius per
+    `_overlap_depth` uses for the multilook). Each iteration re-smooths the
+    previous iteration's NaN pattern, so the error front advances one radius per
     pass and the halo has to cover all of them.
     """
     return int(math.ceil(4.0 * float(scale))) * max(1, int(iterations))
@@ -1635,20 +1619,19 @@ def remove_unconnected_regions_planes(arr, *, min_size=None, connectivity=1,
 
 
 def unconnected_regions_depth(min_size, ny, nx):
-    """Halo needed to decompose :func:`remove_unconnected_regions` spatially.
+    """Halo needed to decompose `remove_unconnected_regions` spatially.
 
-    With ``min_size=N`` a halo of ``N`` is **exact**, not exact-to-a-halo. A
-    component of at most ``N`` pixels has graph diameter at most ``N-1``, so once
-    it touches a block's interior it lies wholly inside an ``N``-pixel halo and is
-    measured exactly; one that reaches the padded edge must have spanned ``N+1``
-    pixels getting there, so the block keeps it -- which is the same answer the
-    whole plane gives. Verified against whole-plane over blobs straddling chunk
-    seams, and a smaller halo really does break it.
+    With `min_size=N` a halo of `N` is exact, not exact-to-a-halo. A
+    component of at most `N` pixels has graph diameter at most `N-1`, so once
+    it touches a block's interior it lies wholly inside an `N`-pixel halo and is
+    measured exactly; one that reaches the padded edge must have spanned `N+1`
+    pixels getting there, so the block keeps it, which is the same answer the
+    whole plane gives. A smaller halo breaks this.
 
-    ``min_size=None`` (keep the largest component) has **no halo at all**: which
+    `min_size=None` (keep the largest component) has no halo at all: which
     component is largest is a global property and no block can know it. That case
-    returns a depth spanning the raster, which :func:`halo_planes` turns into one
-    whole plane per task -- the same fallback ``deramp(method="spline")`` relies on.
+    returns a depth spanning the raster, which `halo_planes` turns into one
+    whole plane per task, the same fallback `deramp(method="spline")` relies on.
     """
     if min_size is None:
         return max(int(ny), int(nx))
@@ -1666,14 +1649,14 @@ def unconnected_regions_depth(min_size, ny, nx):
 
 
 def poly_normal_equations(field, degree, y_index, x_index, ny, nx, exclude=None):
-    """``(A^T A, A^T b)`` for one block of a global polynomial fit.
+    """`(A^T A, A^T b)` for one block of a global polynomial fit.
 
-    ``y_index``/``x_index`` are the block's *global* row and column indices and
-    ``(ny, nx)`` the full grid shape, so every block builds the same globally
-    normalized basis :func:`_poly_columns` uses. Summing the returned blocks over
+    `y_index`/`x_index` are the block's global row and column indices and
+    `(ny, nx)` the full grid shape, so every block builds the same globally
+    normalized basis `_poly_columns` uses. Summing the returned blocks over
     the spatial chunks reproduces the whole-plane system exactly.
 
-    ``field`` is ``(nplane, bny, bnx)``; ``exclude`` is an optional ``(bny, bnx)``
+    `field` is `(nplane, bny, bnx)`; `exclude` is an optional `(bny, bnx)`
     boolean window of the shared signal mask.
     """
     field = np.asarray(field, dtype=np.float64)
@@ -1706,8 +1689,8 @@ def poly_solve_parts(parts, ncoef):
     """Sum per-block normal equations and solve, per plane.
 
     Returns NaN coefficients for a plane the surviving pixels cannot constrain,
-    matching :func:`poly_surface`'s all-NaN return in that case. ``lstsq`` (SVD)
-    rather than ``solve``, so a deficient system degrades instead of raising.
+    matching `poly_surface`'s all-NaN return in that case. `lstsq` (SVD)
+    rather than `solve`, so a deficient system degrades instead of raising.
     """
     ata = sum(part[0] for part in parts)
     atb = sum(part[1] for part in parts)
@@ -1733,16 +1716,16 @@ def poly_subtract_block(block, coef, y_index, x_index, degree, ny, nx):
 
 
 def deramp_poly_dask(arr, degree, exclude=None):
-    """Chunk-wise ``deramp(method="poly")`` over a dask ``(..., y, x)`` array.
+    """Chunk-wise `deramp(method="poly")` over a dask `(..., y, x)` array.
 
     Two lazy passes: accumulate the normal equations per chunk and solve the small
-    ``ncoef x ncoef`` system once, then evaluate and subtract the surface chunk by
-    chunk. Mathematically the whole-plane fit -- the fit is a sum over pixels -- but
-    it never materialises a full ``(npix, ncoef)`` design matrix, and every chunk
+    `ncoef x ncoef` system once, then evaluate and subtract the surface chunk by
+    chunk. Mathematically the whole-plane fit (the fit is a sum over pixels), but
+    it never materialises a full `(npix, ncoef)` design matrix, and every chunk
     is an independent task.
 
-    The global row/column indices ride along as ``arange`` arrays rather than
-    coming from ``block_info``, so each block can build the globally normalized
+    The global row/column indices ride along as `arange` arrays rather than
+    coming from `block_info`, so each block can build the globally normalized
     basis without depending on how dask reports its position.
     """
     import dask
@@ -1828,11 +1811,11 @@ def snaphu_region_budget(min_region_size):
 
 
 def snaphu_tile_shape(igram_shape, ntiles, tile_overlap):
-    """SNAPHU's own ``(ni, nj)`` tile size, and the size of the last tile.
+    """SNAPHU's own `(ni, nj)` tile size, and the size of the last tile.
 
-    Mirrors ``CheckParams`` in snaphu_io.c: overlap *inflates* each tile rather
+    Mirrors `CheckParams` in snaphu_io.c: overlap inflates each tile rather
     than shrinking the stride, and the ceil means the final tile is up to
-    ``ntiles - 1`` samples shorter than the nominal one.
+    `ntiles - 1` samples shorter than the nominal one.
     """
     nlines, linelen = int(igram_shape[0]), int(igram_shape[1])
     trow, tcol = int(ntiles[0]), int(ntiles[1])
@@ -1846,7 +1829,7 @@ def snaphu_tile_shape(igram_shape, ntiles, tile_overlap):
 
 
 def _overlap_pair(tile_overlap):
-    """Normalize a scalar-or-pair overlap the way ``snaphu.unwrap`` does."""
+    """Normalize a scalar-or-pair overlap the way `snaphu.unwrap` does."""
     try:
         rov, cov = tile_overlap
     except TypeError:
@@ -1859,17 +1842,16 @@ def snaphu_params(igram_shape, nproc=1, *, ntiles=None, tile_overlap=None,
                   min_region_size=100):
     """Pick SNAPHU tile geometry and overlap for a given raster.
 
-    The grid is the coarsest one whose tiles fit inside ``max_tile_pixels`` while
+    The grid is the coarsest one whose tiles fit inside `max_tile_pixels` while
     tracking the raster's aspect ratio, so it is a function of the raster and
-    **not** of ``nproc`` -- changing how many processors you give SNAPHU no longer
-    changes the answer it returns. Pass ``ntiles``/``tile_overlap`` to override
+    not of `nproc`: changing how many processors you give SNAPHU does not
+    change the answer it returns. Pass `ntiles`/`tile_overlap` to override
     either choice.
 
-    ``nproc`` is accepted (and kept positional, as the legacy signature had it)
-    only so a caller can be told when it has asked for more processors than there
-    are tiles to hand them; it never feeds the geometry.
+    `nproc` is accepted (positional, as in the legacy signature) but never
+    feeds the geometry.
 
-    Returns ``(ntiles, tile_overlap)``, with ``tile_overlap`` a scalar applied to
+    Returns `(ntiles, tile_overlap)`, with `tile_overlap` a scalar applied to
     both axes.
     """
     rows, cols = int(igram_shape[0]), int(igram_shape[1])
@@ -1897,14 +1879,14 @@ def snaphu_params(igram_shape, nproc=1, *, ntiles=None, tile_overlap=None,
 
 
 def _tile_grid(rows, cols, max_tile_pixels, overlap_target):
-    """Coarsest ``(tiles_row, tiles_col)`` with tiles under the area budget.
+    """Coarsest `(tiles_row, tiles_col)` with tiles under the area budget.
 
     Grows whichever axis currently has the longer tile side, so the tiles stay as
-    square as the raster allows -- SNAPHU's secondary (tile-assembly) network cost
+    square as the raster allows: SNAPHU's secondary (tile-assembly) network cost
     scales with total seam length, which square tiles minimise.
 
-    The budget is measured against SNAPHU's *own* tile size, which the overlap
-    inflates (see :func:`snaphu_tile_shape`) -- sizing on ``rows/trow * cols/tcol``
+    The budget is measured against SNAPHU's own tile size, which the overlap
+    inflates (see `snaphu_tile_shape`); sizing on `rows/trow * cols/tcol`
     instead would quietly overshoot by the overlap fraction. Growing a tile count
     shrinks both the stride and the overlap it permits, so this terminates.
     """
@@ -1938,12 +1920,12 @@ def _tile_overlap(rows, cols, ntiles, overlap_target):
 
     SNAPHU wants a generous overlap (it warns below TILEOVRLPWARNTHRESH = 400),
     but overlap inflates every tile, so it is capped at 25% of the smaller tile
-    side. The floor is ``min(10, ...)``, never a bare ``max(10, ...)``: on a small
-    raster a hard 10 can exceed what ``CheckParams`` permits and abort the run.
+    side. The floor is `min(10, ...)`, never a bare `max(10, ...)`: on a small
+    raster a hard 10 can exceed what `CheckParams` permits and abort the run.
 
     A single tile gets 0. SNAPHU ignores the overlap there, but it says so on
-    *stderr* ("only one tile--disregarding tile overlap values"), and since
-    ``run_snaphu`` re-raises the whole stderr buffer as the error message, every
+    stderr ("only one tile--disregarding tile overlap values"), and since
+    `run_snaphu` re-raises the whole stderr buffer as the error message, every
     stray line it prints becomes noise on top of a real failure.
     """
     if ntiles[0] == 1 and ntiles[1] == 1:
@@ -1961,18 +1943,17 @@ def snaphu_params_check(igram_shape, ntiles, tile_overlap, min_region_size=100):
     Two kinds of problem, and they get different treatment because they carry
     different certainty:
 
-    * The tile preconditions in ``CheckParams`` (snaphu_io.c) are **deterministic**
-      -- SNAPHU compares the numbers and exits. Those **raise**.
-    * The per-tile region ceiling is **probabilistic**. ``GrowRegions`` aborts once
-      a region label passes ``LARGESHORT``, and the worst case is one region per
-      ``min_region_size`` pixels, so ``tile_area / min_region_size`` bounds it --
+    * The tile preconditions in `CheckParams` (snaphu_io.c) are deterministic:
+      SNAPHU compares the numbers and exits. Those raise.
+    * The per-tile region ceiling is probabilistic. `GrowRegions` aborts once
+      a region label passes `LARGESHORT`, and the worst case is one region per
+      `min_region_size` pixels, so `tile_area / min_region_size` bounds it,
       but the count that actually forms depends on how much the phase fragments,
-      and is usually far lower. Measured: a 600x332 tile with a budget of 32000
-      formed 6566 regions and unwrapped fine. So that one **warns**: refusing it
-      outright would block a deliberately coarse tiling that would have worked.
+      and is usually far lower. So that one warns: refusing it outright would
+      block a deliberately coarse tiling that would have worked.
 
     Either way the numbers are named here rather than arriving as a bare
-    ``RuntimeError`` carrying only the subprocess's stderr.
+    `RuntimeError` carrying only the subprocess's stderr.
     """
     nlines, linelen = int(igram_shape[0]), int(igram_shape[1])
     trow, tcol = int(ntiles[0]), int(ntiles[1])
@@ -2038,8 +2019,8 @@ def snaphu_params_check(igram_shape, ntiles, tile_overlap, min_region_size=100):
 def snaphu_nlooks(looks_az, looks_rg, spacing_az, spacing_rg, res_az, res_rg):
     """Equivalent number of independent looks for SNAPHU. Verbatim.
 
-    From SNAPHU-py: ``n_e = k_r k_a (d_r d_a) / (rho_r rho_a)`` where ``k`` are
-    the looks, ``d`` the single-look sample spacing, and ``rho`` the
+    From SNAPHU-py: `n_e = k_r k_a (d_r d_a) / (rho_r rho_a)` where `k` are
+    the looks, `d` the single-look sample spacing, and `rho` the
     resolution, in range and azimuth.
     """
     n_e = np.abs(

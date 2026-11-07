@@ -65,11 +65,11 @@ def test_water_mask_cache_keyed_on_grid(tmp_path, monkeypatch):
 
 
 def test_mask_water_applies_to_zarr_style_stack(monkeypatch):
-    # Regression test for two bugs in mask_water:
-    #  - the mask's rio ``spatial_ref`` coordinate collided with the
-    #    ``spatial_ref`` data variable in zarr-backed stacks (MergeError);
-    #  - ``.where(mask)`` on a 1/NaN mask was a no-op because NaN is truthy,
-    #    so water pixels were silently kept.
+    # Two traps in mask_water:
+    #  - the mask's rio `spatial_ref` coordinate collides with the
+    #    `spatial_ref` data variable of a zarr-backed stack (MergeError);
+    #  - `.where(mask)` on a 1/NaN mask is a no-op because NaN is truthy,
+    #    so water pixels would be silently kept.
     pytest.importorskip("rioxarray")
     from nisar_tools import mask as mask_mod
     from nisar_tools.unwrap import UnwrappedStack
@@ -119,7 +119,7 @@ def test_water_mask_if_gmt_available():
     assert set(vals.tolist()) <= {1.0}
 
 def test_mask_cache_only_caches_the_mask_not_the_data(tmp_path, monkeypatch):
-    """``mask_cache`` reads like a persist target but is not one.
+    """`mask_cache` reads like a persist target but is not one.
 
     It stores the coastline mask so GMT is not re-run for the same grid; the
     masked values stay lazy until the caller persists them.
@@ -214,10 +214,9 @@ def test_unwrapped_stack_persists_a_masked_result(tmp_path, monkeypatch):
 def test_mask_spacing_tracks_the_grid_not_the_native_pixel():
     """The coastline only has to resolve at the pixel it is sampled onto.
 
-    GMT's ``e`` suffix is *metres*: the old fixed ``"5e"`` default read like
-    "5 arc-seconds" but asked for a 5 m coastline, so a multilooked stack still
-    paid for a full-resolution mask -- ~1000x more nodes than its grid could
-    represent, and about a minute of GMT time on a coastal crop.
+    GMT's `e` suffix is *metres*: a fixed `"5e"` reads like "5 arc-seconds" but
+    asks for a 5 m coastline, so a multilooked stack would pay for a
+    full-resolution mask -- ~1000x more nodes than its grid can represent.
     """
     from nisar_tools.mask import grid_spacing_arg
 
@@ -267,10 +266,10 @@ def test_mask_cache_key_includes_the_derived_spacing(tmp_path, monkeypatch):
 
 
 def test_masks_for_different_grids_coexist(tmp_path, monkeypatch):
-    """A single fixed store name made the cache one slot wide.
+    """Naming the mask store from the grid lets masks for different grids coexist.
 
-    Alternating between two grids recomputed every time, because each mask
-    overwrote the other. Naming the store from the grid lets them coexist.
+    With one fixed store name the cache would be one slot wide: alternating
+    between two grids would recompute every time, each mask overwriting the other.
     """
     from nisar_tools import Workspace, mask as mask_mod
 

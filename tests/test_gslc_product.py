@@ -2,7 +2,7 @@
 
 A synthetic RSLC with the real layout's names and types stands in for a 25 GB
 granule; the grid tests pin the numbers of ASF's reference GSLC
-(``NISAR_L2_PR_GSLC_022_162_A_006_..._P05023``), whose metadata grids the
+(`NISAR_L2_PR_GSLC_022_162_A_006_..._P05023`), whose metadata grids the
 workflow must reproduce exactly.
 """
 

@@ -1,23 +1,23 @@
-"""The :class:`UnwrappedStack`: unwrapped phase + connected components.
+"""The `UnwrappedStack`: unwrapped phase + connected components.
 
 One class covers both provenances of an unwrapped stack:
 
-- **SNAPHU** (:meth:`~UnwrappedStack.from_interferograms`) -- we unwrap an
-  :class:`~nisar_tools.interferogram.InterferogramStack` ourselves. Unwrapping is
+- **SNAPHU** (`UnwrappedStack.from_interferograms`): we unwrap an
+  `nisar_tools.interferogram.InterferogramStack` ourselves. Unwrapping is
   the one non-lazy stage: SNAPHU is a global optimiser that needs a whole raster,
-  so the *pair* is the unit of work. The store is created metadata-only up front,
+  so the pair is the unit of work. The store is created metadata-only up front,
   each pair is unwrapped and written into its own region and flagged done; peak
   memory is one pair and an interrupted run resumes at the first unfinished pair.
-- **NASA GUNW** (:meth:`~UnwrappedStack.from_gunw_files`) -- an already-unwrapped
+- **NASA GUNW** (`UnwrappedStack.from_gunw_files`): an already-unwrapped
   geocoded product we simply read. A GUNW additionally ships an
-  ``ionospherePhaseScreen``, carried here as the optional ``phase_screen`` layer
-  and subtracted on request by :meth:`~UnwrappedStack.remove_phase_screen`.
+  `ionospherePhaseScreen`, carried here as the optional `phase_screen` layer
+  and subtracted on request by `UnwrappedStack.remove_phase_screen`.
 
-After ingestion the two are the *same class*: ``unw`` / ``conncomp`` on
-``(pair, y, x)`` (plus ``coherence`` / ``phase_screen`` for a GUNW), and the same
-downstream operations -- water/edge masking, spline outlier rejection, deramping,
-2*pi cycle shifts, LOS conversion, persistence. ``attrs["source"]`` (``"snaphu"``
-or ``"gunw"``) records which path built it and drives :meth:`to_los`'s geometry.
+After ingestion the two are the same class: `unw` / `conncomp` on
+`(pair, y, x)` (plus `coherence` / `phase_screen` for a GUNW), and the same
+downstream operations: water/edge masking, spline outlier rejection, deramping,
+2*pi cycle shifts, LOS conversion, persistence. `attrs["source"]` (`"snaphu"`
+or `"gunw"`) records which path built it and drives `to_los`'s geometry.
 """
 
 import itertools
@@ -62,8 +62,8 @@ def _decode(value):
 def _as_list(paths):
     """A single path is a scalar; anything else is an iterable of paths.
 
-    ``str``/``os.PathLike`` are iterable, so a bare ``list(path)`` would split a
-    filename into characters -- guard for that explicitly.
+    `str`/`os.PathLike` are iterable, so a bare `list(path)` would split a
+    filename into characters; guard for that explicitly.
     """
     if isinstance(paths, (str, os.PathLike)):
         return [paths]
@@ -92,32 +92,32 @@ class UnwrappedStack(RasterStackMixin):
     ):
         """Unwrap every pair with SNAPHU into a region-written, resumable store.
 
-        ``cost`` is SNAPHU's statistical cost mode: ``"smooth"`` (default) or ``"defo"`` (deformation: phase
-        discontinuities are cheap where coherence is low -- for a pair across a coseismic step). An interferogram
-        formed with a ``phase_model`` carries it as ``phase_model``; it is added back to each pair's unwrapped
+        `cost` is SNAPHU's statistical cost mode: `"smooth"` (default) or `"defo"` (deformation: phase
+        discontinuities are cheap where coherence is low, for a pair across a coseismic step). An interferogram
+        formed with a `phase_model` carries it as `phase_model`; it is added back to each pair's unwrapped
         phase here, so the store holds the full phase.
 
-        **Tiling is a function of the raster, not of ``nproc``.** SNAPHU's tile
+        Tiling is a function of the raster, not of `nproc`. SNAPHU's tile
         grid decides where the 2*pi seams fall, so it is part of the answer, not a
-        performance dial: ``max_tile_pixels`` (and an explicit ``ntiles``) set the
-        geometry, and ``nproc`` only says how many of those tiles may be solved at
-        once. Consequently ``nproc`` is *not* in the params hash -- varying it must
-        not invalidate a finished store -- while the tiling parameters are.
+        performance dial: `max_tile_pixels` (and an explicit `ntiles`) set the
+        geometry, and `nproc` only says how many of those tiles may be solved at
+        once. Consequently `nproc` is not in the params hash (varying it must
+        not invalidate a finished store), while the tiling parameters are.
 
-        Lower ``max_tile_pixels`` for more, smaller tiles (more concurrency inside
+        Lower `max_tile_pixels` for more, smaller tiles (more concurrency inside
         a pair, but more seams); a raster under the budget is unwrapped as a single
         tile, which is the best-quality option and skips the tile-assembly and
-        ``single_tile_reoptimize`` passes entirely. ``single_tile_reoptimize=False``
-        drops a second, fully serial whole-raster SNAPHU pass -- the biggest single
+        `single_tile_reoptimize` passes entirely. `single_tile_reoptimize=False`
+        drops a second, fully serial whole-raster SNAPHU pass, the biggest single
         speed knob for a tiled unwrap.
 
-        Pairs are independent, so ``pairs_in_flight`` unwraps them concurrently.
-        Even at the default 1 the *next* pair's inputs are read while SNAPHU works
+        Pairs are independent, so `pairs_in_flight` unwraps them concurrently.
+        Even at the default 1 the next pair's inputs are read while SNAPHU works
         on the current one, which hides the whole HDF5 -> multilook -> filter chain
         behind the unwrap. Raise it above 1 when SNAPHU cannot use the cores itself
-        -- a single-tile raster, or ``nproc`` above the tile count -- since the
-        process budget is then split ``nproc // pairs_in_flight`` ways. Peak memory
-        is proportional to ``pairs_in_flight``, not to the stack length.
+        (a single-tile raster, or `nproc` above the tile count), since the
+        process budget is then split `nproc // pairs_in_flight` ways. Peak memory
+        is proportional to `pairs_in_flight`, not to the stack length.
         """
         ds = igrams.ds
         npair = ds.sizes["pair"]
@@ -160,7 +160,7 @@ class UnwrappedStack(RasterStackMixin):
             "res_rg": res_rg,
             "pairs": ds.attrs.get("pairs"),
             # Tiling changes the unwrapped phase, so it belongs in the hash.
-            # ``nproc`` deliberately does not: it no longer changes the result.
+            # nproc deliberately does not: it does not change the result.
             "ntiles": list(ntiles),
             "tile_overlap": overlap,
             "min_region_size": int(min_region_size),
@@ -229,26 +229,26 @@ class UnwrappedStack(RasterStackMixin):
     # -- construction: read a NASA GUNW ------------------------------------
     @classmethod
     def from_gunw_file(cls, path, frequency="A", polarization="HH"):
-        """Read a single NASA GUNW ``.h5`` as a one-pair unwrapped stack."""
+        """Read a single NASA GUNW `.h5` as a one-pair unwrapped stack."""
         return cls.from_gunw_files([path], frequency=frequency,
                                    polarization=polarization)
 
     @classmethod
     def from_gunw_files(cls, paths, frequency="A", polarization="HH"):
-        """Read one or more NASA GUNW granules into a ``(pair, y, x)`` stack.
+        """Read one or more NASA GUNW granules into a `(pair, y, x)` stack.
 
         A GUNW arrives already unwrapped, so this reads rather than computes.
-        Layers are mapped onto the same names the SNAPHU path uses --
-        ``unwrappedPhase`` -> ``unw``, ``coherenceMagnitude`` -> ``coherence``,
-        ``connectedComponents`` -> ``conncomp`` (uint32; the 65535 fill and every
-        out-of-swath pixel -> label 0). The GUNW's ``ionospherePhaseScreen`` and
-        its ``mask`` (water + subswath-validity flag) are carried as the optional
-        ``phase_screen`` and ``subswath_mask`` layers, feeding
-        :meth:`remove_phase_screen` and ``mask_edges(use_builtin_mask=True)``.
+        Layers are mapped onto the same names the SNAPHU path uses:
+        `unwrappedPhase` -> `unw`, `coherenceMagnitude` -> `coherence`,
+        `connectedComponents` -> `conncomp` (uint32; the 65535 fill and every
+        out-of-swath pixel -> label 0). The GUNW's `ionospherePhaseScreen` and
+        its `mask` (water + subswath-validity flag) are carried as the optional
+        `phase_screen` and `subswath_mask` layers, feeding
+        `remove_phase_screen` and `mask_edges(use_builtin_mask=True)`.
 
         Every granule must share the same geocoded grid (a single frame's time
         series); a granule on a different grid is rejected. Rasters are modest
-        (tens of MB) so they are read eagerly; :meth:`persist` chunks them.
+        (tens of MB) so they are read eagerly; `persist` chunks them.
         """
         paths = [str(p) for p in _as_list(paths)]
         if not paths:
@@ -360,17 +360,17 @@ class UnwrappedStack(RasterStackMixin):
                    mask_name=None):
         """Lazily mask water on the unwrapped phase. Returns a new stack.
 
-        Lazy: the masked values are **not** written anywhere. Call
-        :meth:`persist` (under a new stage name) if you want them on disk.
+        Lazy: the masked values are not written anywhere. Call
+        `persist` (under a new stage name) if you want them on disk.
 
-        ``mask_cache`` is a :class:`~nisar_tools.workspace.Workspace` used to
-        cache the *coastline mask itself*, keyed on the grid, so GMT is not
+        `mask_cache` is a `nisar_tools.workspace.Workspace` used to
+        cache the coastline mask itself, keyed on the grid, so GMT is not
         re-run for the same crop. It is not where the masked data goes.
 
-        ``resolution`` is the GMT coastline resolution; use a coarser value
-        (e.g. ``"i"``) if the full-resolution GSHHG dataset is unavailable.
-        ``spacing`` defaults to tracking this stack's own pixel size.
-        ``mask_name`` overrides the cache store's name.
+        `resolution` is the GMT coastline resolution; use a coarser value
+        (e.g. `"i"`) if the full-resolution GSHHG dataset is unavailable.
+        `spacing` defaults to tracking this stack's own pixel size.
+        `mask_name` overrides the cache store's name.
         """
         from .mask import grid_spacing_arg, water_mask_for_grid
 
@@ -395,43 +395,43 @@ class UnwrappedStack(RasterStackMixin):
                    edges="along_track"):
         """Mask swath-edge effects. Returns a new stack (lazy).
 
-        Trims ``edge_pixels`` pixels off each pair's swath boundary, removing the
+        Trims `edge_pixels` pixels off each pair's swath boundary, removing the
         decorrelated fringe there. Works for both SNAPHU and GUNW stacks.
-        ``min_coherence`` additionally nulls pixels whose coherence is below that
-        threshold; both provenances carry a ``coherence`` layer (a GUNW's
-        ``coherenceMagnitude``, or the interferogram's carried through the SNAPHU
+        `min_coherence` additionally nulls pixels whose coherence is below that
+        threshold; both provenances carry a `coherence` layer (a GUNW's
+        `coherenceMagnitude`, or the interferogram's carried through the SNAPHU
         unwrap).
 
-        ``edges="along_track"`` (default) trims only the near/far-range
-        boundaries -- the swath edges that run along-track, which are the ones
-        carrying the fringe. ``edges="all"`` instead erodes the whole finite
+        `edges="along_track"` (default) trims only the near/far-range
+        boundaries: the swath edges that run along-track, which are the ones
+        carrying the fringe. `edges="all"` instead erodes the whole finite
         footprint, which also eats a collar around coastlines, water-masked lakes
-        and the frame's azimuth ends: on a coastal descending frame that was
-        nearly half of everything it removed, right where the near-fault signal
-        lives. See :func:`~nisar_tools._kernels.along_track_edge_mask` for the
-        geometry this assumes.
+        and the frame's azimuth ends; on a coastal frame that collar can be much
+        of what it removes, right where near-fault signal lives. See
+        `nisar_tools._kernels.along_track_edge_mask` for the geometry this
+        assumes.
 
-        **The sides can also be named one at a time**, against the grid rather
-        than the orbit (which of them is *near* range depends on the pass and the
-        look direction): ``"left"``, ``"right"``, ``"top"``, ``"bottom"``, or a
-        sequence of them -- so ``edges="left"`` trims one range boundary and
-        leaves the other, and ``edges=["left", "right", "bottom"]`` adds the
+        The sides can also be named one at a time, against the grid rather
+        than the orbit (which of them is near range depends on the pass and the
+        look direction): `"left"`, `"right"`, `"top"`, `"bottom"`, or a
+        sequence of them, so `edges="left"` trims one range boundary and
+        leaves the other, and `edges=["left", "right", "bottom"]` adds the
         azimuth end. Each is found by scanning for the first/last valid sample of
         every line, so naming a side still spares the coastlines and lakes that
-        ``edges="all"`` would eat. Pass a ``{side: pixels}`` mapping when the
-        sides want different depths, e.g. ``edges={"left": 32, "right": 8}``;
-        ``edge_pixels`` is then unused. Prefer one call over chaining several:
+        `edges="all"` would eat. Pass a `{side: pixels}` mapping when the
+        sides want different depths, e.g. `edges={"left": 32, "right": 8}`;
+        `edge_pixels` is then unused. Prefer one call over chaining several:
         the sides are all measured against the same footprint, and
-        ``attrs["edges_masked"]`` records only the last call.
+        `attrs["edges_masked"]` records only the last call.
 
-        ``use_builtin_mask`` (GUNW only) first nulls the pixels the product's own
-        ``subswath_mask`` flags as invalid samples -- an *exact* edge/gap mask
+        `use_builtin_mask` (GUNW only) first nulls the pixels the product's own
+        `subswath_mask` flags as invalid samples: an exact edge/gap mask
         rather than a blunt erosion. The 3-digit flag's two low digits are the
         pixel's subswath number in the reference and secondary RSLC; a 0 in
-        either marks an out-of-subswath sample. It composes with ``edge_pixels``:
-        pass ``edge_pixels=0`` for the mask alone, or a few pixels of extra
+        either marks an out-of-subswath sample. It composes with `edge_pixels`:
+        pass `edge_pixels=0` for the mask alone, or a few pixels of extra
         erosion for a safety margin inside the exact boundary. (The mask's water
-        digit is left to :meth:`mask_water`.)
+        digit is left to `mask_water`.)
         """
         unw = self.ds["unw"]
 
@@ -475,20 +475,20 @@ class UnwrappedStack(RasterStackMixin):
         """Drop the regions the main body cannot reach. Returns a new stack.
 
         The same operation as
-        :meth:`~nisar_tools.interferogram.InterferogramStack.remove_unconnected_regions`,
-        for an already-unwrapped stack -- a NASA GUNW, or a post-hoc clean of a
-        SNAPHU result. On an interferogram it is a *fix*, keeping unreachable
+        `nisar_tools.interferogram.InterferogramStack.remove_unconnected_regions`,
+        for an already-unwrapped stack: a NASA GUNW, or a post-hoc clean of a
+        SNAPHU result. On an interferogram it is a fix, keeping unreachable
         regions away from the unwrapper; here it is tidying, since the unwrapping
         has already happened.
 
-        Worth chaining **before** :meth:`remove_outliers` and
-        ``deramp(method="spline")``: both fit through
-        :func:`~nisar_tools._kernels.smooth_surface`, a normalized convolution that
+        Worth chaining before `remove_outliers` and
+        `deramp(method="spline")`: both fit through
+        `nisar_tools._kernels.smooth_surface`, a normalized convolution that
         fills NaN gaps from their neighbours, so a stranded region pulls the fitted
         surface across the water separating it from the mainland.
 
-        See the interferogram method for ``min_size``, ``connectivity`` and
-        ``max_drop_fraction``.
+        See the interferogram method for `min_size`, `connectivity` and
+        `max_drop_fraction`.
         """
         unw = self.ds["unw"]
         cleaned = _plane_kernel(
@@ -513,10 +513,10 @@ class UnwrappedStack(RasterStackMixin):
     def remove_outliers(self, scale=16.0, threshold=1.0, iterations=2):
         """Reject residual outliers against a smooth spline. Returns a new stack.
 
-        Fits a NaN-aware smooth surface (Gaussian sigma ``scale`` px) to each
-        pair's unwrapped phase, nulls pixels where ``|phase - surface|`` exceeds
-        ``threshold`` radians, and refits ``iterations`` times. This is the
-        tension-spline + residual-mask step of ``filt_gunw.csh``, in scipy.
+        Fits a NaN-aware smooth surface (Gaussian sigma `scale` px) to each
+        pair's unwrapped phase, nulls pixels where `|phase - surface|` exceeds
+        `threshold` radians, and refits `iterations` times: the scipy counterpart
+        of a GMT tension-spline fit with a residual mask.
         """
         # scipy's Gaussian truncates at 4 sigma, so the smooth surface has finite
         # support and a 4*scale halo per iteration reproduces the whole-plane
@@ -539,20 +539,20 @@ class UnwrappedStack(RasterStackMixin):
     def deramp(self, degree=1, method="poly", scale=None, mask=None):
         """Remove a long-wavelength ramp (e.g. ionosphere). Returns a new stack.
 
-        ``method="poly"`` subtracts a total-degree-``degree`` 2D polynomial (the
-        classic InSAR deramp; ``1`` = plane), flattening the far field toward
-        zero. ``method="spline"`` subtracts a NaN-aware smooth surface at Gaussian
-        sigma ``scale`` px (a high-pass for gently curved ionosphere ramps). Best
-        run after :meth:`mask_edges` / :meth:`remove_outliers` so the fit is not
+        `method="poly"` subtracts a total-degree-`degree` 2D polynomial (the
+        classic InSAR deramp; `1` = plane), flattening the far field toward
+        zero. `method="spline"` subtracts a NaN-aware smooth surface at Gaussian
+        sigma `scale` px (a high-pass for gently curved ionosphere ramps). Best
+        run after `mask_edges` / `remove_outliers` so the fit is not
         pulled by edges or spikes.
 
-        ``mask`` optionally excludes a **signal region** from the ramp fit, so
+        `mask` optionally excludes a signal region from the ramp fit, so
         real deformation does not bias the trend: the surface is fit only to the
-        finite pixels *outside* the mask, then subtracted **everywhere** (the
-        signal keeps its data, minus the ramp). Pass either a boolean ``(y, x)``
-        array / DataArray that is ``True`` over the signal, or a
-        ``(lon_min, lon_max, lat_min, lat_max)`` lon/lat bbox for a rectangular
-        region. With ``method="spline"`` keep ``scale`` comfortably larger than
+        finite pixels outside the mask, then subtracted everywhere (the
+        signal keeps its data, minus the ramp). Pass either a boolean `(y, x)`
+        array / DataArray that is `True` over the signal, or a
+        `(lon_min, lon_max, lat_min, lat_max)` lon/lat bbox for a rectangular
+        region. With `method="spline"` keep `scale` comfortably larger than
         the masked gap, or the region's interior fills with NaN.
         """
         exclude, mask_prov = self._deramp_mask(mask)
@@ -581,11 +581,11 @@ class UnwrappedStack(RasterStackMixin):
         return UnwrappedStack(ds)
 
     def _deramp_mask(self, mask):
-        """Resolve a deramp signal ``mask`` to a boolean ``(y, x)`` exclude array
+        """Resolve a deramp signal `mask` to a boolean `(y, x)` exclude array
         plus a JSON-able provenance tag.
 
-        ``mask`` is ``None`` (no exclusion), a boolean grid (``True`` = signal to
-        leave out of the fit), or a ``(lon_min, lon_max, lat_min, lat_max)`` bbox.
+        `mask` is `None` (no exclusion), a boolean grid (`True` = signal to
+        leave out of the fit), or a `(lon_min, lon_max, lat_min, lat_max)` bbox.
         """
         if mask is None:
             return None, None
@@ -613,15 +613,13 @@ class UnwrappedStack(RasterStackMixin):
     def remove_phase_screen(self):
         """Subtract the GUNW's NASA ionosphere phase screen (lazy). Returns a new stack.
 
-        A NASA GUNW ships an ``ionospherePhaseScreen`` (loaded as
-        ``phase_screen``); this subtracts it from the unwrapped phase
-        (``unw - phase_screen``, as in the reference ``h52grd.py``). The screen
-        layer is kept for inspection.
+        A NASA GUNW ships an `ionospherePhaseScreen` (loaded as
+        `phase_screen`); this subtracts it from the unwrapped phase
+        (`unw - phase_screen`). The screen layer is kept for inspection.
 
-        Raises if the stack carries no screen -- a SNAPHU stack has none, and
-        instead flattens long-wavelength trends with the deramp pipeline
-        (:meth:`mask_edges` -> :meth:`remove_outliers` -> :meth:`deramp`) -- or
-        if the screen was already removed.
+        Raises if the stack carries no screen (a SNAPHU stack has none; see
+        `correct_ionosphere`, or the deramp pipeline `mask_edges` ->
+        `remove_outliers` -> `deramp`), or if the screen was already removed.
         """
         if "phase_screen" not in self.ds:
             raise ValueError(
@@ -647,26 +645,26 @@ class UnwrappedStack(RasterStackMixin):
                            time_tolerance=600.0, replace=False):
         """Remove the dual-frequency ionospheric screen (lazy). Returns a new stack.
 
-        ``other`` is the *second sub-band* of the same acquisitions -- band B
-        where this stack is band A -- unwrapped separately. The dispersive part
+        `other` is the second sub-band of the same acquisitions (band B
+        where this stack is band A), unwrapped separately. The dispersive part
         of the two phases is estimated at this stack's own carrier (see
-        :mod:`nisar_tools.ionosphere` for the algebra and for why both inputs
-        have to be unwrapped), kept as the ``phase_screen`` layer, and subtracted
-        from ``unw`` in one call.
+        `nisar_tools.ionosphere` for the algebra and for why both inputs
+        have to be unwrapped), kept as the `phase_screen` layer, and subtracted
+        from `unw` in one call.
 
-        The result is band A's **non-dispersive** phase: still at band A's
-        wavelength, so :meth:`to_los` needs no adjustment. What it is *not* is
-        deramped -- an orbital ramp scales with frequency like the deformation
-        does and comes through untouched, which is what
-        :meth:`deramp` (or the inversion's own ramp columns) is for.
+        The result is band A's non-dispersive phase: still at band A's
+        wavelength, so `to_los` needs no adjustment. It is not deramped: an
+        orbital ramp scales with frequency like the deformation does and comes
+        through untouched, which is what `deramp` (or an inversion's own ramp
+        columns) is for.
 
-        Arguments beyond ``other`` are
-        :func:`~nisar_tools.ionosphere.dual_frequency_screen`'s; ``scale`` is the
+        Arguments beyond `other` are
+        `nisar_tools.ionosphere.dual_frequency_screen`'s; `scale` is the
         one to know about, since the raw estimate amplifies phase noise ~17x and
         the default low-pass is what makes the correction an improvement rather
         than a degradation.
 
-        ``replace=True`` overwrites an existing screen -- a GUNW already carries
+        `replace=True` overwrites an existing screen: a GUNW already carries
         NASA's, and silently replacing it would lose the provenance of whichever
         one the numbers came from.
         """
@@ -706,17 +704,17 @@ class UnwrappedStack(RasterStackMixin):
         """Shift the unwrapped phase by an integer number of 2*pi cycles.
 
         Unwrapping recovers phase only up to a global multiple of 2*pi, and the
-        unwrapper resolves each *connected component* independently, so distinct
+        unwrapper resolves each connected component independently, so distinct
         components can sit whole cycles apart with no way to tell from the data
-        alone. This applies the offset once you know it -- from a GPS station, a
+        alone. This applies the offset once you know it: from a GPS station, a
         known-stable area, or a neighbouring component that should be continuous.
 
-        ``cycles`` is added (negative removes) and must be whole: any other shift
-        changes the wrapped phase. ``pair`` selects pair indices (default all) and
-        ``conncomp`` selects component labels (default the whole raster; label 0
+        `cycles` is added (negative removes) and must be whole: any other shift
+        changes the wrapped phase. `pair` selects pair indices (default all) and
+        `conncomp` selects component labels (default the whole raster; label 0
         is "unassigned", not a real region).
 
-        Lazy, like :meth:`mask_water`. The shift carries into :meth:`to_los`, so
+        Lazy, like `mask_water`. The shift carries into `to_los`, so
         apply it before converting.
         """
         if int(cycles) != cycles:
@@ -755,81 +753,77 @@ class UnwrappedStack(RasterStackMixin):
 
     def merge(self, other, resampling="bilinear", time_tolerance=600.0,
               tie="auto"):
-        """Stitch an adjacent same-track :class:`UnwrappedStack` onto the union grid.
+        """Stitch an adjacent same-track `UnwrappedStack` onto the union grid.
 
-        The same lattice-padding machinery as :meth:`~nisar_tools.stack.GSLCStack.merge`
-        (union grid, no reindex, ``self`` wins in the overlap), plus the one thing
+        The same lattice-padding machinery as `nisar_tools.stack.GSLCStack.merge`
+        (union grid, no reindex, `self` wins in the overlap), plus the one thing
         unwrapped phase needs: each frame was unwrapped independently, so across the
-        seam the two frames' ``unw`` share the *identical wrapped phase* but sit a
+        seam the two frames' `unw` share the identical wrapped phase but sit a
         whole number of 2*pi cycles apart. Per pair, that integer is read from the
-        overlap -- the rounded median of ``(unw_self - unw_other) / 2*pi`` -- and
-        added to ``other``, so the phase is **continuous across the join with no
-        2*pi step**.
+        overlap (the rounded median of `(unw_self - unw_other) / 2*pi`) and
+        added to `other`, so the phase is continuous across the join with no
+        2*pi step.
 
-        When ``other`` is gridded in a **different UTM zone** -- a track crossing a
-        zone boundary -- every one of its layers is first warped onto ``self``'s
-        grid, one pair per dask task, keeping ``self``'s spacing and grid phase so
-        the overlap still lines up exactly. ``resampling`` applies to the continuous
-        layers (``"nearest"`` preserves exact sample values); the label layers
-        (``conncomp``, ``subswath_mask``) are always nearest, since an interpolated
-        label is not a label. The 2*pi offset is read *after* the warp, on the shared
-        grid, so resampling cannot smear the cycle estimate -- the median over the
+        When `other` is gridded in a different UTM zone (a track crossing a
+        zone boundary), every one of its layers is first warped onto `self`'s
+        grid, one pair per dask task, keeping `self`'s spacing and grid phase so
+        the overlap still lines up exactly. `resampling` applies to the continuous
+        layers (`"nearest"` preserves exact sample values); the label layers
+        (`conncomp`, `subswath_mask`) are always nearest, since an interpolated
+        label is not a label. The 2*pi offset is read after the warp, on the shared
+        grid, so resampling cannot smear the cycle estimate: the median over the
         whole overlap is far more robust than the sub-radian resampling error. A
         cross-zone warp leaves rotated nodata wedges, exactly as
-        :meth:`~nisar_tools.stack.GSLCStack.merge` does; :meth:`crop` trims a ragged
+        `nisar_tools.stack.GSLCStack.merge` does; `crop` trims a ragged
         edge if it matters.
 
-        The same warp also rescues two stacks in **one** CRS whose grids are offset
-        by a sub-pixel amount -- which is what an interferogram multilooked before
-        ``align_looks`` existed looks like, since it anchored its grid phase to its
-        own crop origin rather than to the native lattice. That case is a
-        ``RuntimeWarning``, not an error: resampling smooth unwrapped phase is
+        The same warp also rescues two stacks in one CRS whose grids are offset
+        by a sub-pixel amount, as interferograms multilooked with
+        `align_looks=False` are: their grid phase is anchored to their own crop
+        origin rather than to the native lattice. That case is a
+        `RuntimeWarning`, not an error: resampling smooth unwrapped phase is
         harmless, but re-forming both frames' interferograms with
-        ``align_looks=True`` avoids it entirely and is exact. Differing pixel
-        *spacing* (two stages multilooked with different ``looks``) still raises --
+        `align_looks=True` avoids it entirely and is exact. Differing pixel
+        spacing (two stages multilooked with different `looks`) raises:
         no regridding here would make them one product.
 
-        By default the two stacks must cover the **same acquisitions** (pairs are
-        matched by reference/secondary time within ``time_tolerance`` seconds, so
-        per-frame ``zeroDopplerStartTime`` jitter is tolerated). ``coherence`` --
-        and, for a GUNW, ``phase_screen`` / ``subswath_mask`` -- are carried through
-        with the same ``self`` precedence; ``other``'s ``conncomp`` labels are
-        shifted clear of ``self``'s so the two frames' components stay distinct.
+        By default the two stacks must cover the same acquisitions (pairs are
+        matched by reference/secondary time within `time_tolerance` seconds, so
+        per-frame `zeroDopplerStartTime` jitter is tolerated). `coherence`
+        (and, for a GUNW, `phase_screen` / `subswath_mask`) is carried through
+        with the same `self` precedence; `other`'s `conncomp` labels are
+        shifted clear of `self`'s so the two frames' components stay distinct.
 
-        **Different dates.** ``time_tolerance=None`` pairs by position instead of
-        by time, which is how two *independent* interferograms -- neighbouring
-        ground, but different acquisition dates -- are mosaicked into one field.
-        That changes what the overlap means, and so what ``tie`` may be:
+        Different dates: `time_tolerance=None` pairs by position instead of
+        by time, which is how two independent interferograms (neighbouring
+        ground, but different acquisition dates) are mosaicked into one field.
+        That changes what the overlap means, and so what `tie` may be:
 
-        ``"cycles"``
-            the offset is a whole number of 2*pi, read as
-            ``round(median((self - other) / 2*pi))``. Correct **only** for one
-            interferogram unwrapped separately per frame, where the two frames
-            carry the identical wrapped phase in the overlap and can differ by
-            nothing but an integer ambiguity.
-        ``"offset"``
-            the offset is the real-valued ``median(self - other)``. Two different
-            date pairs measure different deformation, so their difference in the
-            overlap is *not* an integer number of cycles -- rounding it to one
-            would leave a residual step up to pi. This ties the two to a common
-            datum; the leftover disagreement is real signal plus atmosphere.
-        ``"none"``
-            leave ``other`` as it is.
-        ``"auto"`` (default)
-            ``"cycles"`` when the pairs matched by time, ``"offset"`` when they
-            did not -- so the existing same-acquisition behaviour is unchanged.
+        - `"cycles"`: the offset is a whole number of 2*pi, read as
+          `round(median((self - other) / 2*pi))`. Correct only for one
+          interferogram unwrapped separately per frame, where the two frames
+          carry the identical wrapped phase in the overlap and can differ by
+          nothing but an integer ambiguity.
+        - `"offset"`: the offset is the real-valued `median(self - other)`. Two
+          different date pairs measure different deformation, so their difference
+          in the overlap is not an integer number of cycles, and rounding it to
+          one would leave a residual step up to pi. This ties the two to a common
+          datum; the leftover disagreement is real signal plus atmosphere.
+        - `"none"`: leave `other` as it is.
+        - `"auto"` (default): `"cycles"` when the pairs matched by time,
+          `"offset"` when they did not.
 
-        A different-dates mosaic is one raster with **one** arbitrary constant and
+        A different-dates mosaic is one raster with one arbitrary constant and
         one ramp, so for a slip inversion prefer keeping the scenes apart and
-        combining them at :meth:`slipsolve.Observations.concat`, which gives
-        each its own nuisance columns via ``SlipInversion(..., ramp=...)``. Merge
+        combining them at `slipsolve.Observations.concat`, which gives
+        each its own nuisance columns via `SlipInversion(..., ramp=...)`. Merge
         them here for a continuous map, an export, or when each frame covers a
         different piece of the fault and there is only one interferogram per frame.
 
-        The offset is one value per pair over the *whole* overlap. If SNAPHU split
+        The offset is one value per pair over the whole overlap. If SNAPHU split
         the overlap into components sitting at different cycle offsets, the median
         aligns the dominant one; correct any stragglers afterwards with
-        :meth:`add_cycles` (``conncomp=``). Lazy, like the other operations.
+        `add_cycles` (`conncomp=`). Lazy, like the other operations.
         """
         from .stack import (
             LATTICE_TOL_PX,
@@ -880,8 +874,8 @@ class UnwrappedStack(RasterStackMixin):
         if cross_zone:
             offsets = ()
         else:
-            # Raises if the spacings differ -- two stages multilooked with
-            # different ``looks`` are not the same product and no regridding
+            # Raises if the spacings differ: two stages multilooked with
+            # different looks are not the same product and no regridding
             # here would make them one.
             offsets = lattice_offset(self.x, self.y, o)
         offset_lattice = any(off > LATTICE_TOL_PX for off in offsets)
@@ -984,17 +978,16 @@ class UnwrappedStack(RasterStackMixin):
             "other_x": [float(np.min(o["x"].values)), float(np.max(o["x"].values))],
         }
         if cross_zone or offset_lattice:
-            # Only recorded when a warp actually ran, so a merge of two stacks
-            # that already shared a lattice keeps the hash it had before
-            # cross-zone (and now off-lattice) support existed.
+            # Recorded only when a warp ran, so a merge of two stacks that
+            # share a lattice keeps a stable hash.
             record["resampling"] = str(resampling)
         if tie != "cycles":
-            # Same reasoning: the default tie stays out of the record, so a
-            # same-acquisition merge keeps its pre-existing hash.
+            # Likewise the default tie stays out of the record, so a
+            # same-acquisition merge keeps a stable hash.
             record["tie"] = tie
         if time_tolerance is None:
             # The merged stack carries self's times, so the other frame's dates
-            # would otherwise be lost -- and they are what makes this a mosaic
+            # would otherwise be lost, and they are what makes this a mosaic
             # of two interferograms rather than one.
             record["other_ref_time"] = [
                 str(t) for t in np.asarray(other.ds["ref_time"].values)
@@ -1010,8 +1003,8 @@ class UnwrappedStack(RasterStackMixin):
     def persist(self, workspace, name=None, overwrite=False, **params):
         """Write the stack to the workspace and return the reopened lazy stack.
 
-        :meth:`from_interferograms` already writes its own store, so this is for a
-        *derived* stack -- masked, cleaned, derampled, cycle-shifted, or a
+        `from_interferograms` already writes its own store, so this is for a
+        derived stack: masked, cleaned, deramped, cycle-shifted, or a
         just-read GUNW. Persist under a new stage name; writing back over the
         store it reads from is refused.
         """
@@ -1041,16 +1034,16 @@ class UnwrappedStack(RasterStackMixin):
                mask_geometry=True):
         """Convert to LOS displacement + per-pixel look geometry.
 
-        The geometry source depends on provenance (``attrs["source"]``):
+        The geometry source depends on provenance (`attrs["source"]`):
 
-        - **GUNW** stacks are self-contained -- the geometry cube and wavelength
-          come from the product's own ``metadata/radarGrid``, so no ``gslc`` is
-          needed (``gslc`` overrides which GUNW file supplies the cube).
-        - **SNAPHU** stacks need a ``gslc`` granule (one per frame for a merged
+        - **GUNW** stacks are self-contained: the geometry cube and wavelength
+          come from the product's own `metadata/radarGrid`, so no `gslc` is
+          needed (`gslc` overrides which GUNW file supplies the cube).
+        - **SNAPHU** stacks need a `gslc` granule (one per frame for a merged
           stack) for the geometry cube.
 
-        ``dem``, ``sign`` and ``mask_geometry`` behave as in
-        :meth:`LOSStack.from_unwrapped <nisar_tools.los.LOSStack.from_unwrapped>`.
+        `dem`, `sign` and `mask_geometry` behave as in
+        `nisar_tools.los.LOSStack.from_unwrapped`.
         """
         from .los import LOSStack
 
@@ -1088,10 +1081,10 @@ class UnwrappedStack(RasterStackMixin):
 
     # -- export -----------------------------------------------------------
     def _grd_specs(self):
-        """Every layer present, per pair: ``unw`` always, then whichever of
-        ``coherence`` / ``phase_screen`` / ``conncomp`` / ``subswath_mask`` the
-        stack carries (a SNAPHU result has only ``unw`` + ``conncomp``; a GUNW
-        adds coherence and, when present, the ionosphere screen and mask)."""
+        """Every layer present, per pair: `unw` always, then whichever of
+        `coherence` / `phase_screen` / `conncomp` / `subswath_mask` the
+        stack carries (a SNAPHU result has `unw`, `conncomp` and `coherence`; a GUNW
+        adds, when present, the ionosphere screen and mask)."""
         specs = [("unw", self.ds["unw"], True)]
         for v in ("coherence", "phase_screen", "conncomp", "subswath_mask"):
             if v in self.ds.data_vars:
@@ -1119,11 +1112,12 @@ class UnwrappedStack(RasterStackMixin):
         )
 
 
-# SNAPHU writes warnings and errors to the same stream (``sp0`` is stderr), and
-# snaphu-py re-raises the whole captured buffer as the exception message. This one
-# is emitted on *every* tiled run -- snaphu warns below TILEOVRLPWARNTHRESH = 400,
-# above any overlap we would sensibly ask for -- so it is always the first line of
-# a failure and always a red herring. Strip it so the real fault is what surfaces.
+# SNAPHU writes warnings and errors to the same stream (sp0 is stderr), and
+# snaphu-py re-raises the whole captured buffer as the exception message. The
+# overlap warning is emitted on every tiled run (snaphu warns below
+# TILEOVRLPWARNTHRESH = 400, above any overlap we would sensibly ask for), so it is
+# always the first line of a failure and always a red herring. Strip these lines
+# so the real fault is what surfaces.
 _SNAPHU_NOISE = (
     "WARNING: Tile overlap is small (may give bad results)",
     "only one tile--disregarding tile overlap values",
@@ -1132,7 +1126,7 @@ _SNAPHU_NOISE = (
 
 
 def _plane_kernel_poly(field, degree, exclude, target_blocks=None):
-    """Polynomial deramp of a ``(pair, y, x)`` DataArray as a chunked reduction."""
+    """Polynomial deramp of a `(pair, y, x)` DataArray as a chunked reduction."""
     if _kernels._is_dask(field.data):
         # No halo here (the fit is a global reduction), so the only floor on the
         # working chunk is not fragmenting the graph: one design-matrix block per
@@ -1155,12 +1149,12 @@ def _plane_kernel_poly(field, degree, exclude, target_blocks=None):
 
 
 def _prefetch(load, items, lookahead=1):
-    """Yield ``(item, load(item))`` with ``lookahead`` loads running ahead.
+    """Yield `(item, load(item))` with `lookahead` loads running ahead.
 
     A bounded sliding window, so peak memory tracks the window rather than
-    ``len(items)`` -- the point of the whole out-of-core design. The loads run on
-    their own threads, which is what lets a pair's read/multilook/filter chain
-    overlap the SNAPHU call on the pair before it.
+    `len(items)`. The loads run on their own threads, which is what lets a
+    pair's read/multilook/filter chain overlap the SNAPHU call on the pair
+    before it.
     """
     lookahead = max(1, int(lookahead))
     pool = ThreadPoolExecutor(lookahead, thread_name_prefix="unwrap-load")
@@ -1195,12 +1189,12 @@ def _unwrap_pair(igram, corr, *, nlooks, ntiles, tile_overlap, nproc, pair=None,
 
     SNAPHU silently substitutes zeros for NaN and returns a finite value
     everywhere, so without a mask the area outside the swath comes back as
-    plausible-looking phase that is indistinguishable downstream. Its ``mask``
+    plausible-looking phase that is indistinguishable downstream. Its `mask`
     argument excludes those pixels properly; we then restore NaN so the invalid
-    footprint survives into :class:`~nisar_tools.los.LOSStack`.
+    footprint survives into `nisar_tools.los.LOSStack`.
 
     The mask is passed only when something is actually invalid, so a fully
-    valid pair takes exactly the call it did before.
+    valid pair takes the plain, unmasked call.
     """
     valid = np.isfinite(igram.real) & np.isfinite(igram.imag)
 

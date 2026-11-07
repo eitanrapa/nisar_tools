@@ -2,10 +2,9 @@
 
 The algebra is pinned against a *forward model*: a non-dispersive field and a
 dispersive one are chosen, the two sub-band phases are synthesized from them
-with the ``f`` / ``1/f`` scaling, and the estimator has to give the dispersive
+with the `f` / `1/f` scaling, and the estimator has to give the dispersive
 one back. That is the only way to catch a sign or a reciprocal being flipped --
-a test that inverts the same expression the code composes would pass either way,
-which is exactly how the LOS sign stayed wrong for months.
+a test that inverts the same expression the code composes would pass either way.
 """
 
 import warnings
@@ -41,7 +40,7 @@ def _sub_bands(nondispersive, dispersive):
 
 
 def _stack(phase, frequency, dx=50.0, dy=50.0, coherence=None, npair=1):
-    """An ``UnwrappedStack`` around a ready-made phase field."""
+    """An `UnwrappedStack` around a ready-made phase field."""
     phase = np.asarray(phase, dtype=np.float32)
     if phase.ndim == 2:
         phase = np.broadcast_to(phase, (npair,) + phase.shape)
@@ -116,9 +115,9 @@ def test_one_carrier_cannot_separate_two_unknowns():
 def test_the_screen_is_what_a_deramp_cannot_reach():
     """A dispersive screen and a non-dispersive ramp are different objects.
 
-    The point of the module: a ramp scales with ``f`` like the deformation, so
+    The point of the module: a ramp scales with `f` like the deformation, so
     it survives the correction untouched -- which is why this is not a slower
-    ``deramp``, and why a deramp is still needed afterwards.
+    `deramp`, and why a deramp is still needed afterwards.
     """
     ny, nx = 40, 60
     yy, xx = np.mgrid[0:ny, 0:nx].astype(float)
@@ -189,9 +188,8 @@ def test_a_coarser_second_band_is_smoothed_before_it_is_resampled():
 
 
 def test_a_narrow_low_pass_against_a_coarse_band_warns():
-    """Below twice the coarse posting the resampling dominates the screen
-    (rms 0.284 vs 0.159 rad, measured); legitimate, so it warns rather than
-    raising."""
+    """Below twice the coarse posting the resampling dominates the screen; that
+    is legitimate, so it warns rather than raising."""
     nondispersive, dispersive = _fields(ny=48, nx=96)
     phase_a, phase_b = _sub_bands(nondispersive, dispersive)
     with pytest.warns(RuntimeWarning, match="narrower than twice"):
@@ -310,8 +308,8 @@ def test_the_estimate_stays_lazy_and_decomposes():
 
 
 def test_the_offset_median_survives_chunking_and_an_all_nan_pair():
-    """``median(dim=("y", "x"))`` is not available on dask at all -- it refuses
-    every two-axis reduction -- and ``np.nanmedian`` warns on a fully masked
+    """`median(dim=("y", "x"))` is not available on dask at all -- it refuses
+    every two-axis reduction -- and `np.nanmedian` warns on a fully masked
     pair, which a water- or edge-masked stack legitimately has.
     """
     da = pytest.importorskip("dask.array")

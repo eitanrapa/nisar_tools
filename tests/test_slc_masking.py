@@ -1,9 +1,9 @@
 """Water and swath-edge masking on the SLC stage.
 
-Both operations already existed downstream (``InterferogramStack.mask_water``,
-``UnwrappedStack.mask_edges``); doing them before multilooking is what keeps the
+Both operations also exist downstream (`InterferogramStack.mask_water`,
+`UnwrappedStack.mask_edges`); doing them before multilooking is what keeps the
 blanked samples out of the *estimate* as well as the product, since
-``form_interferograms`` is NaN-aware.
+`form_interferograms` is NaN-aware.
 """
 
 import warnings
@@ -46,7 +46,7 @@ def _valid(stack, t=0):
 # -- edges --------------------------------------------------------------------
 def test_mask_edges_trims_only_the_range_edges(swath_stack):
     """Each row crosses the swath once, so its first and last valid samples are
-    the two range boundaries -- ``edge_pixels`` off each, and nothing else."""
+    the two range boundaries -- `edge_pixels` off each, and nothing else."""
     before = _valid(swath_stack)
     after = _valid(swath_stack.mask_edges(edge_pixels=3))
 
@@ -197,7 +197,7 @@ def test_igram_mask_edges_reaches_the_stage_hash(swath_stack, tmp_path):
     igrams.mask_edges(edge_pixels=2).persist(ws, "igrams_trimmed")
     assert ws.stored_params_hash("igrams") != ws.stored_params_hash("igrams_trimmed")
 
-    # An untrimmed stack keeps the exact hash it had before this existed.
+    # An untrimmed stack hashes only the multilook keys: no edge-masking key is added.
     attrs = igrams.ds.attrs
     assert ws.stored_params_hash("igrams") == hash_params({
         "stage": "igrams", "epsg": igrams.epsg,
@@ -239,14 +239,14 @@ def test_mask_water_spacing_tracks_the_native_pixel(swath_stack, fake_coastline)
     """Recorded resolved, not as a placeholder None -- it feeds the stage hash.
 
     500 m pixels, 2x oversampled. At a real GSLC's 5 m posting this would read
-    "2.5e", which is what ``make_water_mask`` warns about.
+    "2.5e", which is what `make_water_mask` warns about.
     """
     masked = swath_stack.mask_water(resolution="i")
     assert masked.ds.attrs["water_mask"] == {"resolution": "i", "spacing": "250e"}
 
 
 def test_mask_water_is_lazy(swath_stack, fake_coastline, tmp_path):
-    """``mask_cache`` caches the coastline, not the masked data."""
+    """`mask_cache` caches the coastline, not the masked data."""
     ws = Workspace(tmp_path / "ws")
     masked = swath_stack.mask_water(mask_cache=ws, resolution="i")
     cached = [p.name for p in ws.workdir.iterdir() if p.name.startswith("water_mask")]
@@ -256,9 +256,9 @@ def test_mask_water_is_lazy(swath_stack, fake_coastline, tmp_path):
 
 
 def test_masks_apply_to_a_zarr_reloaded_stack(swath_stack, fake_coastline, tmp_path):
-    """Zarr has no coord/variable distinction, so ``spatial_ref`` comes back as a
-    *data variable*. The mask's own rio bookkeeping then collides with it unless
-    it has been stripped -- the same MergeError the UnwrappedStack path hit."""
+    """Zarr has no coord/variable distinction, so `spatial_ref` comes back as a
+    *data variable*. The mask's own rio bookkeeping then collides with it (a
+    MergeError) unless it has been stripped."""
     ws = Workspace(tmp_path / "ws")
     swath_stack.persist(ws, "slc_stack")
     reloaded = GSLCStack.from_zarr(ws.path("slc_stack"))
@@ -288,13 +288,13 @@ def test_masks_compose_and_both_reach_the_stage_hash(swath_stack, fake_coastline
 
 
 def test_an_unmasked_stack_keeps_the_hash_it_had_before(swath_stack, tmp_path):
-    """The new keys are recorded only once masked, so existing slc_stack stores
-    are not invalidated by this feature merely existing."""
+    """The masking keys are recorded only once a stack is masked, so an unmasked
+    slc_stack store's hash does not depend on them."""
     from nisar_tools.workspace import hash_params
 
     ws = Workspace(tmp_path / "ws")
     swath_stack.persist(ws, "slc_stack")
-    # Exactly the params dict persist() built before water_mask/edges_masked.
+    # Exactly the base params dict, with no water_mask/edges_masked keys.
     assert ws.stored_params_hash("slc_stack") == hash_params(
         {"stage": "slc_stack", "epsg": swath_stack.epsg}
     )
@@ -302,8 +302,8 @@ def test_an_unmasked_stack_keeps_the_hash_it_had_before(swath_stack, tmp_path):
 
 # -- the native-resolution guard ----------------------------------------------
 def test_the_guard_fires_at_a_native_posting_and_not_a_multilooked_one():
-    """A 28 km crop off the Venezuelan coast: 2.7e5 nodes multilooked at 150 m,
-    2.4e8 at the native 5 m. The budget has to separate those two."""
+    """A 28 km coastal crop: 2.7e5 nodes multilooked at 150 m, 2.4e8 at the
+    native 5 m. The budget has to separate those two."""
     from nisar_tools.mask import _warn_if_oversized, grid_spacing_arg
 
     for pixel, should_warn in ((150.0, False), (50.0, False), (5.0, True)):
@@ -357,8 +357,8 @@ def test_make_water_mask_emits_the_guard(monkeypatch):
 
 
 def test_increment_parsing_covers_gmt_unit_suffixes():
-    """``e`` is metres, ``s`` arc-seconds, bare is degrees -- the same suffix
-    confusion that once made the mask 639x too slow."""
+    """`e` is metres, `s` arc-seconds, bare is degrees; confusing the suffixes
+    can ask GMT for a mask far finer than the grid it is sampled onto."""
     from nisar_tools.mask import _parse_increment
 
     assert _parse_increment("250e") == (250.0, "m")

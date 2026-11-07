@@ -1,14 +1,14 @@
-"""The :class:`RSLC` class: one NISAR L1 RSLC granule, and the way to a GSLC.
+"""The `RSLC` class: one NISAR L1 RSLC granule, and the way to a GSLC.
 
 An RSLC is the range-Doppler SLC every other NISAR product is made from; a GSLC
 is that image geocoded onto a map grid. ASF normally ships both, but not always
--- for some acquisitions only the RSLC exists. :meth:`RSLC.to_gslc` makes the
-missing GSLC, as an HDF5 file in the NISAR L2 GSLC layout that :class:`GSLC`
+-- for some acquisitions only the RSLC exists. `RSLC.to_gslc` makes the
+missing GSLC, as an HDF5 file in the NISAR L2 GSLC layout that `GSLC`
 (and so the rest of this package) reads like any ASF granule.
 
 The geocoding is a port of the ISCE3 v0.25.16 GSLC workflow that produces ASF's
-products -- see :mod:`nisar_tools.gslc_geocode` for the algorithm and
-:mod:`nisar_tools.gslc_product` for the file layout. This module holds the
+products -- see `nisar_tools.gslc_geocode` for the algorithm and
+`nisar_tools.gslc_product` for the file layout. This module holds the
 reader and the grid definitions.
 """
 
@@ -31,11 +31,11 @@ POSTING_BY_BANDWIDTH = {5: (40.0, 5.0), 20: (10.0, 5.0), 40: (5.0, 5.0), 77: (2.
 
 @dataclass(frozen=True)
 class GeoGrid:
-    """A north-up map grid: ``start`` is the top-left *corner*, not a centre.
+    """A north-up map grid: `start` is the top-left *corner*, not a centre.
 
-    Same convention as ``isce3::product::GeoGridParameters``: pixel ``(i, j)``
-    is centred at ``(start_x + (j + 0.5) * spacing_x, start_y + (i + 0.5) *
-    spacing_y)`` with ``spacing_y < 0``.
+    Same convention as `isce3::product::GeoGridParameters`: pixel `(i, j)`
+    is centred at `(start_x + (j + 0.5) * spacing_x, start_y + (i + 0.5) * spacing_y)`
+    with `spacing_y < 0`.
     """
 
     start_x: float
@@ -62,7 +62,7 @@ class GeoGrid:
 
     @property
     def x_coordinates(self):
-        """Pixel-centre x (``set_get_geo_info``'s ``linspace``)."""
+        """Pixel-centre x (`set_get_geo_info`'s `linspace`)."""
         x0 = self.start_x + 0.5 * self.spacing_x
         return np.linspace(x0, x0 + (self.width - 1) * self.spacing_x, self.width)
 
@@ -73,12 +73,12 @@ class GeoGrid:
 
 
 def _grid_size(stop, start, size):
-    """``geogrid._grid_size``: ``round(|stop - start| / size)``."""
+    """`geogrid._grid_size`: `round(|stop - start| / size)`."""
     return int(np.round(abs((stop - start) / size)))
 
 
 def snap_geogrid(grid, x_snap, y_snap):
-    """``geogrid.create``'s snapping: start floor/ceil, end ceil/floor."""
+    """`geogrid.create`'s snapping: start floor/ceil, end ceil/floor."""
     if x_snap % grid.spacing_x != 0 or y_snap % abs(grid.spacing_y) != 0:
         raise ValueError("snap values must be exact multiples of the spacing")
     start_x = np.floor(grid.start_x / x_snap) * x_snap
@@ -91,7 +91,7 @@ def snap_geogrid(grid, x_snap, y_snap):
 
 
 def geogrid_from_bounds(x_min, y_max, x_max, y_min, spacing_x, spacing_y, epsg):
-    """A grid from explicit corner bounds (the PGE's ``top_left``/``bottom_right``)."""
+    """A grid from explicit corner bounds (the PGE's `top_left`/`bottom_right`)."""
     spacing_y = -abs(spacing_y)
     return GeoGrid(float(x_min), float(y_max), float(spacing_x), spacing_y,
                    _grid_size(x_max, x_min, spacing_x),
@@ -99,12 +99,12 @@ def geogrid_from_bounds(x_min, y_max, x_max, y_min, spacing_x, spacing_y, epsg):
 
 
 def metadata_geogrid(product_grid, spacing, cube=False):
-    """The ``radarGrid`` (``cube=True``, 500 m) or LUT (1 km) grid of a product.
+    """The `radarGrid` (`cube=True`, 500 m) or LUT (1 km) grid of a product.
 
-    ``RunConfig.prep_geocode_metadata`` + ``geogrid.create`` with the first
+    `RunConfig.prep_geocode_metadata` + `geogrid.create` with the first
     product grid as reference: same extent at the coarser posting, cubes padded
-    by 5 cells (+1), then snapped to the posting. Reproduces ASF's reference
-    GSLC exactly (674 x 690 at 500 m, 332 x 340 at 1 km).
+    by 5 cells (+1), then snapped to the posting. Reproduces the grids of ASF's
+    GSLCs exactly.
     """
     margin = 5
     width = _grid_size(product_grid.end_x, product_grid.start_x, spacing)
@@ -168,11 +168,11 @@ class RSLC:
         return float(self.swath(frequency)["processedCenterFrequency"][()])
 
     def radar_grid(self, frequency):
-        """``RadarGridParameters(product, frequency)``.
+        """`RadarGridParameters(product, frequency)`.
 
-        The range spacing is ``slantRange[1] - slantRange[0]``, **not** the
-        ``slantRangeSpacing`` dataset (they differ in the eleventh digit), and
-        the PRF is ``1 / zeroDopplerTimeSpacing`` -- both as ISCE3 builds it.
+        The range spacing is `slantRange[1] - slantRange[0]`, **not** the
+        `slantRangeSpacing` dataset (they differ in the eleventh digit), and
+        the PRF is `1 / zeroDopplerTimeSpacing` -- both as ISCE3 builds it.
         """
         sw = self.swath(frequency)
         sr = sw["slantRange"]
@@ -198,9 +198,9 @@ class RSLC:
         return radar.LUT2d.from_coords(r, t, group["dopplerCentroid"][()])
 
     def valid_samples(self, frequency):
-        """Per-subswath ``(lines, 2)`` arrays of ``[first, end)`` valid samples.
+        """Per-subswath `(lines, 2)` arrays of `[first, end)` valid samples.
 
-        Loaded exactly as ISCE3's ``Swath`` does: ``numberOfSubSwaths`` arrays,
+        Loaded exactly as ISCE3's `Swath` does: `numberOfSubSwaths` arrays,
         stopping at the first missing one. Half-open, despite the product's
         "first and last valid sample" description.
         """
@@ -219,7 +219,7 @@ class RSLC:
         return self.swath(frequency)[polarization]
 
     def reader(self, frequency, polarization):
-        """A :class:`DirectChunkReader` for one layer, or the dataset itself."""
+        """A `DirectChunkReader` for one layer, or the dataset itself."""
         dset = self.image(frequency, polarization)
         try:
             return DirectChunkReader(dset)
@@ -227,7 +227,7 @@ class RSLC:
             return dset
 
     def data(self, frequency="A", polarization="HH"):
-        """A lazy ``(time, slant_range)`` DataArray of one image layer."""
+        """A lazy `(time, slant_range)` DataArray of one image layer."""
         import dask.array as da
         import xarray as xr
 
@@ -248,8 +248,8 @@ class RSLC:
     def footprint(self, frequency="A", heights=(-500.0, 9000.0), points_per_edge=11):
         """Lon/lat (degrees) perimeter of the swath at each constant height.
 
-        ``getGeoPerimeter`` for each height with a zero-Doppler grid: returns an
-        ``(n_heights, 4 * (points_per_edge - 1), 2)`` array of (lon, lat).
+        `getGeoPerimeter` for each height with a zero-Doppler grid: returns an
+        `(n_heights, 4 * (points_per_edge - 1), 2)` array of (lon, lat).
         """
         grid = self.radar_grid(frequency)
         return np.stack([
@@ -274,10 +274,10 @@ class RSLC:
     def default_geogrid(self, frequency, epsg=None, posting=None, snap=None):
         """ISCE3's default product grid for one frequency, optionally snapped.
 
-        ``bbox2GeoGrid`` over the swath footprint at -500 m and 9000 m with the
+        `bbox2GeoGrid` over the swath footprint at -500 m and 9000 m with the
         bandwidth's posting. ISCE3 does not snap it; ASF's products are made
-        with an explicit frame box instead, whose corners (in every product we
-        have checked) are whole multiples of 240 m. ``snap`` rounds the corners
+        with an explicit frame box instead, whose corners are, in practice,
+        whole multiples of 240 m. `snap` rounds the corners
         outward to such a multiple so the pixel centres land on the same lattice
         as ASF's grids.
         """
@@ -309,7 +309,7 @@ class RSLC:
     def to_gslc(self, output, dem, **kwargs):
         """Geocode this RSLC into a NISAR-format GSLC file. Returns the path.
 
-        See :func:`nisar_tools.gslc_geocode.geocode_rslc` for the parameters.
+        See `nisar_tools.gslc_geocode.geocode_rslc` for the parameters.
         """
         from .gslc_geocode import geocode_rslc
 

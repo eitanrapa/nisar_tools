@@ -18,15 +18,15 @@ SPATIAL_CHUNK = 2048
 def compute_chunks(ny, nx, halo, target_blocks=None):
     """Spatial chunk size for a halo-decomposed compute stage.
 
-    The *disk* chunk (:data:`SPATIAL_CHUNK`) is about write efficiency, and a
+    The *disk* chunk (`SPATIAL_CHUNK`) is about write efficiency, and a
     persisted stage arrives chunked that way -- so a multilooked interferogram,
-    typically well under 2048 px on a side, comes back as a **single** spatial
+    typically well under 2048 px on a side, comes back as a single spatial
     chunk and a halo-decomposed kernel has nothing to spread across cores.
 
     This picks a working chunk that splits the raster into roughly
-    ``target_blocks`` pieces (default two per core, enough to balance without
-    over-fragmenting), floored at ``4 * halo`` so the overlap stays a minority of
-    each block's work. Returns ``None`` when the raster is too small to be worth
+    `target_blocks` pieces (default two per core, enough to balance without
+    over-fragmenting), floored at `4 * halo` so the overlap stays a minority of
+    each block's work. Returns `None` when the raster is too small to be worth
     splitting, meaning "leave the chunking alone".
     """
     if target_blocks is None:
@@ -40,23 +40,23 @@ def compute_chunks(ny, nx, halo, target_blocks=None):
 
 
 def match_pairs(self_ds, other_ds, tolerance_s, action="merge"):
-    """Order ``other``'s pairs to line up with ``self``'s by ref+secondary time.
+    """Order `other`'s pairs to line up with `self`'s by ref+secondary time.
 
     Frames of the same acquisitions define the same pairs, but each frame's
-    ``zeroDopplerStartTime`` can differ by seconds, so pairs are matched by
-    nearest ``(ref_time, sec_time)`` within ``tolerance_s`` rather than by exact
-    time. Returns an index array ``order`` with ``other.isel(pair=order)`` in
-    ``self``'s pair order. Raises if the pair sets do not correspond one-to-one.
+    `zeroDopplerStartTime` can differ by seconds, so pairs are matched by
+    nearest `(ref_time, sec_time)` within `tolerance_s` rather than by exact
+    time. Returns an index array `order` with `other.isel(pair=order)` in
+    `self`'s pair order. Raises if the pair sets do not correspond one-to-one.
 
-    ``tolerance_s=None`` skips the matching entirely and pairs by position --
+    `tolerance_s=None` skips the matching entirely and pairs by position --
     for two stacks built from *different* acquisition dates, which define
     genuinely different interferograms and so have no correspondence to find.
 
-    ``action`` names the operation in the error messages; it serves
-    :meth:`~nisar_tools.unwrap.UnwrappedStack.merge` (two frames of one track)
+    `action` names the operation in the error messages; it serves
+    `nisar_tools.unwrap.UnwrappedStack.merge` (two frames of one track)
     and the dual-frequency ionosphere combination (two sub-bands of one frame)
-    alike, which is why it lives here rather than in ``unwrap`` -- importing it
-    from there would drag that module's top-level ``import snaphu`` into the
+    alike, which is why it lives here rather than in `unwrap` -- importing it
+    from there would drag that module's top-level `import snaphu` into the
     interferogram stage.
     """
     sr = np.asarray(self_ds["ref_time"].values)
@@ -91,10 +91,10 @@ def match_pairs(self_ds, other_ds, tolerance_s, action="merge"):
 
 
 def wrapped_phase(da):
-    """Wrapped phase (radians in ``[-pi, pi]``) of a complex DataArray.
+    """Wrapped phase (radians in `[-pi, pi]`) of a complex DataArray.
 
-    Stays lazy for dask-backed input; ``float32`` output. Used to derive the
-    real ``phase`` field of an SLC or interferogram for ``.grd`` export.
+    Stays lazy for dask-backed input; `float32` output. Used to derive the
+    real `phase` field of an SLC or interferogram for `.grd` export.
     """
     return xr.apply_ufunc(
         lambda z: np.angle(z).astype(np.float32),
@@ -105,22 +105,22 @@ def wrapped_phase(da):
 
 
 def plane_kernel(func, field, depth, target_blocks=None, **kwargs):
-    """Run a 2-D plane kernel over a ``(stack, y, x)`` DataArray, chunk by chunk.
+    """Run a 2-D plane kernel over a `(stack, y, x)` DataArray, chunk by chunk.
 
-    Wraps :func:`_kernels.halo_planes`, which overlaps the spatial axes by
-    ``depth`` so the kernel decomposes across chunks instead of forcing one whole
+    Wraps `_kernels.halo_planes`, which overlaps the spatial axes by
+    `depth` so the kernel decomposes across chunks instead of forcing one whole
     plane per task. Dims, coords and attrs are preserved.
 
     A persisted stack arrives on the 2048-px *disk* chunk, which for a multilooked
     raster is usually the whole plane -- so it is rechunked to a working size first
-    (see :func:`compute_chunks`), or there would be nothing to decompose.
+    (see `compute_chunks`), or there would be nothing to decompose.
 
-    The leading dimension is taken from ``field.dims[0]``, so this serves a
-    ``pair`` axis and a ``GSLCStack``'s ``time`` axis alike.
+    The leading dimension is taken from `field.dims[0]`, so this serves a
+    `pair` axis and a `GSLCStack`'s `time` axis alike.
 
-    Lives here rather than in ``unwrap`` because ``GSLCStack``,
-    ``InterferogramStack`` and ``UnwrappedStack`` all need it, and importing it
-    from ``unwrap`` would drag that module's top-level ``import snaphu`` into the
+    Lives here rather than in `unwrap` because `GSLCStack`,
+    `InterferogramStack` and `UnwrappedStack` all need it, and importing it
+    from `unwrap` would drag that module's top-level `import snaphu` into the
     earlier stages.
     """
     if _kernels._is_dask(field.data):
@@ -139,15 +139,15 @@ def plane_kernel(func, field, depth, target_blocks=None, **kwargs):
 
 
 def row_plane_kernel(func, field, target_blocks=None, whole="x", **kwargs):
-    """Run a line-wise 2-D plane kernel over a ``(stack, y, x)`` DataArray.
+    """Run a line-wise 2-D plane kernel over a `(stack, y, x)` DataArray.
 
-    Wraps :func:`_kernels.row_planes` for a kernel whose support is a whole
-    raster line, so it cannot be given a halo. ``whole="x"`` gathers ``x`` into
-    one chunk and splits the work along ``y`` -- the layout a *row* scan needs;
-    ``whole="y"`` is the transpose, for a *column* scan. Either way it is exact,
+    Wraps `_kernels.row_planes` for a kernel whose support is a whole
+    raster line, so it cannot be given a halo. `whole="x"` gathers `x` into
+    one chunk and splits the work along `y` -- the layout a *row* scan needs;
+    `whole="y"` is the transpose, for a *column* scan. Either way it is exact,
     not exact-to-a-halo. Dims, coords and attrs are preserved.
 
-    Like :func:`plane_kernel`, the leading dimension comes from ``field.dims[0]``.
+    Like `plane_kernel`, the leading dimension comes from `field.dims[0]`.
     """
     if _kernels._is_dask(field.data):
         # Only the split axis is free, so ask compute_chunks for that band and
@@ -169,22 +169,22 @@ def row_plane_kernel(func, field, target_blocks=None, whole="x", **kwargs):
 
 
 def masked_edges(field, edge_pixels, edges, target_blocks=None):
-    """Run :func:`_kernels.mask_edges` over a ``(stack, y, x)`` field.
+    """Run `_kernels.mask_edges` over a `(stack, y, x)` field.
 
-    Shared by all three stages' ``mask_edges`` -- the dispatch below is the same
+    Shared by all three stages' `mask_edges` -- the dispatch below is the same
     wherever the trim is applied, and only the field it runs on differs. Returns
-    ``(masked_field, provenance)``; the second is the ``edge_pixels``/``edges``
-    half of the ``edges_masked`` attribute, which each caller merges its own
-    extras (``min_coherence`` and friends) into.
+    `(masked_field, provenance)`; the second is the `edge_pixels`/`edges`
+    half of the `edges_masked` attribute, which each caller merges its own
+    extras (`min_coherence` and friends) into.
 
     The decomposition follows what the requested sides allow:
 
-    * ``edges="all"`` erodes by ``edge_pixels`` cross iterations, which reach
+    * `edges="all"` erodes by `edge_pixels` cross iterations, which reach
       exactly that far, so a matching halo is *exact* and the work still spreads
       across chunks.
-    * ``left``/``right`` are found by scanning each row, so ``x`` is gathered and
-      the split runs along ``y``, where rows are independent -- exact, not
-      exact-to-a-halo. ``top``/``bottom`` scan columns, the transpose.
+    * `left`/`right` are found by scanning each row, so `x` is gathered and
+      the split runs along `y`, where rows are independent -- exact, not
+      exact-to-a-halo. `top`/`bottom` scan columns, the transpose.
     * Both families at once has no single-axis gather that serves it, and every
       side has to be measured against the *same* footprint rather than what the
       other one left behind, so it falls back to one whole plane per task.
@@ -217,14 +217,14 @@ def masked_edges(field, edge_pixels, edges, target_blocks=None):
 
 
 def _edges_provenance(edge_pixels, edges):
-    """The ``edges_masked`` record of a side selection, in a form whose JSON is
-    stable -- :func:`~nisar_tools.workspace.hash_params` hashes it, so a sequence
+    """The `edges_masked` record of a side selection, in a form whose JSON is
+    stable -- `nisar_tools.workspace.hash_params` hashes it, so a sequence
     is sorted and a mapping keyed in order.
 
-    ``"along_track"`` and ``"all"`` are recorded verbatim, exactly as they were
-    before individual sides existed, so a store written then keeps its hash. A
-    mapping carries its own depths, which is why ``edge_pixels`` is recorded as
-    ``None`` there rather than as the argument that went unused.
+    `"along_track"` and `"all"` are recorded verbatim, so a store written with
+    them keeps its hash. A mapping carries its own depths, which is why
+    `edge_pixels` is recorded as `None` there rather than as the argument that
+    went unused.
     """
     if isinstance(edges, str):
         return {"edge_pixels": int(edge_pixels), "edges": edges}
@@ -243,9 +243,9 @@ def open_stage(path):
     """Open a stage's Zarr store, restoring the CRS coordinate.
 
     Zarr does not distinguish coordinates from data variables, so the
-    ``spatial_ref`` that :meth:`~xarray.Dataset.rio.write_crs` wrote as a
+    `spatial_ref` that `xarray.Dataset.rio.write_crs` wrote as a
     coordinate comes back as a *variable*. rioxarray then stops recognising the
-    CRS, and every field of a reopened stack reports ``rio.crs is None`` --
+    CRS, and every field of a reopened stack reports `rio.crs is None` --
     which surfaces far downstream as "Provide a CRS-aware DataArray" from
     anything that reprojects, such as exporting to lon/lat.
     """
@@ -256,14 +256,14 @@ def open_stage(path):
 
 
 class RasterStackMixin:
-    """Common accessors for objects backed by an ``xr.Dataset``."""
+    """Common accessors for objects backed by an `xr.Dataset`."""
 
     ds: xr.Dataset
 
-    #: Dimension along which :meth:`to_grd` writes one ``.grd`` file per slice.
+    #: Dimension along which `to_grd` writes one `.grd` file per slice.
     GRD_STACK_DIM = "pair"
-    #: Field names :meth:`to_grd` writes when ``fields`` is not given; ``None``
-    #: means every field :meth:`_grd_specs` offers.
+    #: Field names `to_grd` writes when `fields` is not given; `None`
+    #: means every field `_grd_specs` offers.
     GRD_DEFAULT_FIELDS = None
 
     @property
@@ -282,10 +282,10 @@ class RasterStackMixin:
     def crs(self):
         """The grid's CRS, whether or not it has an EPSG code.
 
-        Prefer this to :attr:`epsg` wherever the value is only being handed to
+        Prefer this to `epsg` wherever the value is only being handed to
         rasterio or pyproj. A stack resampled into a
-        :class:`~slipsolve.frame.LocalFrame` for the slip inversion carries
-        a proj4 transverse Mercator with no EPSG code at all, so ``f"EPSG:{...}"``
+        `slipsolve.frame.LocalFrame` for the slip inversion carries
+        a proj4 transverse Mercator with no EPSG code at all, so `f"EPSG:{...}"`
         cannot describe it.
         """
         crs = self.ds.rio.crs
@@ -335,27 +335,27 @@ class RasterStackMixin:
 
     # -- export ------------------------------------------------------------
     def to_grd(self, outdir, fields=None, indices=None, workers=None):
-        """Export this stack's fields to GMT-readable ``.grd`` grids.
+        """Export this stack's fields to GMT-readable `.grd` grids.
 
         Each field is reprojected to lon/lat and written as a single-variable
-        GMT grid (see :func:`nisar_tools.geo.write_grd`). A field carrying the
-        stack dimension is written **one file per slice**, named
-        ``{field}_{dim}{i}.grd`` (``dim`` is ``pair`` or ``time``); a shared 2-D
-        field (e.g. a ``LOSStack``'s look geometry) is written once as
-        ``{field}.grd``. Complex data -- an SLC, an interferogram -- is split
-        into an ``amplitude`` and a wrapped ``phase`` field.
+        GMT grid (see `nisar_tools.geo.write_grd`). A field carrying the
+        stack dimension is written one file per slice, named
+        `{field}_{dim}{i}.grd` (`dim` is `pair` or `time`); a shared 2-D
+        field (e.g. a `LOSStack`'s look geometry) is written once as
+        `{field}.grd`. Complex data -- an SLC, an interferogram -- is split
+        into an `amplitude` and a wrapped `phase` field.
 
-        ``fields`` selects which fields to write by name; the default set is
-        per stage (see each class's :meth:`_grd_specs`), and passing an unknown
-        name raises with the available menu. ``indices`` selects which slices
+        `fields` selects which fields to write by name; the default set is
+        per stage (see each class's `_grd_specs`), and passing an unknown
+        name raises with the available menu. `indices` selects which slices
         along the stack dimension to write for the stacked fields (default:
-        all). ``outdir`` is created if needed. Returns the written paths, in
+        all). `outdir` is created if needed. Returns the written paths, in
         field order.
 
         Each layer is an independent reproject-and-write, so they run on a small
         thread pool -- rasterio's warp releases the GIL (see
-        :mod:`nisar_tools.geo`), and one layer per core beats one at a time once a
-        stack has several pairs. ``workers=1`` restores the serial path.
+        `nisar_tools.geo`), and one layer per core beats one at a time once a
+        stack has several pairs. `workers=1` runs serially.
         """
         from . import geo  # local: geo pulls in rioxarray (registers .rio)
 
@@ -380,7 +380,7 @@ class RasterStackMixin:
             return list(pool.map(_write, layers))
 
     def _grd_layers(self, fields, indices):
-        """Yield ``(filename_stem, 2-D DataArray)`` for each field to export."""
+        """Yield `(filename_stem, 2-D DataArray)` for each field to export."""
         specs = {name: (da, stacked) for name, da, stacked in self._grd_specs()}
         if fields is None:
             fields = self.GRD_DEFAULT_FIELDS
@@ -403,9 +403,9 @@ class RasterStackMixin:
                 yield f"{name}_{dim}{i}", da.isel({dim: i})
 
     def _grd_specs(self):
-        """Return ``(field_name, DataArray, is_stacked)`` for every exportable
-        field. ``is_stacked`` fields carry :attr:`GRD_STACK_DIM` and are written
-        per slice. Subclasses implementing ``.grd`` export override this.
+        """Return `(field_name, DataArray, is_stacked)` for every exportable
+        field. `is_stacked` fields carry `GRD_STACK_DIM` and are written
+        per slice. Subclasses implementing `.grd` export override this.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support .grd export"

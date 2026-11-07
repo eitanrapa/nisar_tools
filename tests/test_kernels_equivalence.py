@@ -1,8 +1,8 @@
 """Equivalence tests: dask kernels vs verbatim numpy vs the legacy module.
 
-These are the load-bearing tests for the refactor. If the lazy ``map_overlap``
-multilook matches the original global-filter result across chunk layouts, the
-rest of the pipeline can rely on the kernels being correct.
+These are load-bearing: if the lazy `map_overlap` multilook matches the
+original global-filter result across chunk layouts, the rest of the pipeline
+can rely on the kernels being correct.
 """
 
 import dask.array as da
@@ -104,18 +104,14 @@ def test_multilook_dask_3d_filters_only_spatial(convolution, downsample):
         np.testing.assert_allclose(out[k], ref, rtol=1e-6, atol=1e-6)
 
 
-# NOTE: ``snaphu_params`` deliberately no longer matches
-# ``legacy._calculate_snaphu_params``, and the assertion that it did has been
-# retired. The legacy formula derived the tile grid from ``nproc``, which conflated
-# two unrelated things: the tiling decides where SNAPHU's 2*pi seams fall, so it is
-# part of the *answer*, while ``nproc`` is only how many tiles may be solved at
-# once. Two consequences, both bugs: the unwrapped phase changed with ``nproc``
-# (while the params hash did not, so a re-run silently reused the other tiling's
-# store), and a small ``nproc`` produced tiles large enough to trip SNAPHU's hard
-# per-tile region ceiling -- ``Number of regions in tile exceeds max allowed``.
-# The sizing rules that replaced it are pinned by ``test_snaphu_params`` in
-# tests/test_unwrap.py; the legacy function stays in the oracle for the multilook
-# tests that still use it.
+# NOTE: `snaphu_params` deliberately does not match
+# `legacy._calculate_snaphu_params`, so it has no equivalence test. The legacy
+# formula derives the tile grid from `nproc`, but the tiling decides where
+# SNAPHU's 2*pi seams fall, so it is part of the *answer*, while `nproc` is only
+# how many tiles may be solved at once. Deriving one from the other makes the
+# unwrapped phase change with `nproc` while the params hash does not, and lets a
+# small `nproc` produce tiles past SNAPHU's per-tile region ceiling. The sizing
+# rules are pinned by the `test_snaphu_params_*` tests in tests/test_unwrap.py.
 
 
 def test_snaphu_nlooks_matches_legacy():
@@ -125,7 +121,7 @@ def test_snaphu_nlooks_matches_legacy():
 
 
 def test_gaussian_sigma_option_defaults_to_looks_and_narrows_the_filter():
-    """``sigma=None`` is the legacy ``sigma=looks``; a smaller sigma keeps more of a steep phase ramp."""
+    """`sigma=None` is the legacy `sigma=looks`; a smaller sigma keeps more of a steep phase ramp."""
     import numpy as np
     from nisar_tools import _kernels as K
     ny, nx, looks = 120, 120, 10

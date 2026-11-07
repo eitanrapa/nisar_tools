@@ -1,12 +1,12 @@
 """NaN-aware multilooking: the invalid-pixel footprint must not spread.
 
-The legacy formula hands NaN straight to ``scipy.ndimage``, whose filters are
+The legacy formula hands NaN straight to `scipy.ndimage`, whose filters are
 not NaN-aware, so a single invalid sample contaminates its whole filter
-footprint -- and for ``uniform_filter``, which is a running sum, everything
+footprint -- and for `uniform_filter`, which is a running sum, everything
 downstream of it along both axes. Real GSLCs are NaN outside the swath and
-every merged union grid is NaN in the corners, so this quietly destroyed data.
+every merged union grid is NaN in the corners, so this would quietly destroy data.
 
-These tests pin the replacement: multilook over the valid samples only, keep an
+These tests pin the NaN-aware form: multilook over the valid samples only, keep an
 output pixel when enough of its filter weight was valid, and carry the
 resulting footprint through unwrapping.
 """
@@ -106,10 +106,11 @@ def test_nan_footprint_is_not_dilated(convolution):
 
 @pytest.mark.parametrize("convolution", CONVOLUTIONS)
 def test_one_bad_pixel_does_not_blank_its_footprint(convolution):
-    """A single invalid sample used to take out its whole filter footprint.
+    """A single invalid sample must not take out its whole filter footprint.
 
-    For Uniform it was worse than the footprint: ``uniform_filter`` is a
-    running sum, so the NaN poisoned every sample after it along both axes.
+    The legacy formula does, and for Uniform worse than the footprint:
+    `uniform_filter` is a running sum, so the NaN poisons every sample after it
+    along both axes.
     """
     ny, nx = 300, 300
     c1, c2 = _pair(ny, nx)
@@ -132,8 +133,8 @@ def test_one_bad_pixel_does_not_blank_its_footprint(convolution):
 def test_nan_aware_is_chunk_independent(convolution):
     """The dask path must agree with numpy even when the input has NaN.
 
-    ``_overlap_depth`` promises chunk-layout independence. The legacy path
-    broke that promise for Uniform, because the halo bounds the running-sum
+    `_overlap_depth` promises chunk-layout independence. The legacy path
+    breaks that promise for Uniform, because the halo bounds the running-sum
     contamination to a block instead of to the whole array.
     """
     ny, nx = 300, 300
@@ -202,8 +203,8 @@ def test_min_valid_fraction_controls_the_edge():
 def test_merge_then_form_interferograms(gslc_factory):
     """The union grid of two frames is NaN in its corners; igrams must survive it.
 
-    No test chained merge -> form_interferograms before, which is exactly the
-    combination that quietly returned an all-NaN interferogram.
+    Chaining merge -> form_interferograms is the combination in which a
+    NaN-blind multilook quietly returns an all-NaN interferogram.
     """
     ny, nx = 80, 60
     common = dict(ny=ny, nx=nx, dx=10.0, dy=10.0)

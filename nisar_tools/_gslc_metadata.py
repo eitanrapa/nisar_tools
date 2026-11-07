@@ -1,10 +1,10 @@
-"""Populate a GSLC's metadata from its RSLC: ``GslcWriter.populate_metadata``.
+"""Populate a GSLC's metadata from its RSLC: `GslcWriter.populate_metadata`.
 
-Split from :mod:`nisar_tools.gslc_geocode` because it is long and has no
-numerics of its own beyond calling :func:`~nisar_tools.gslc_geocode.geocode_lut`.
-Method-by-method port of ISCE3 v0.25.16's ``GslcWriter``,
-``BaseL2WriterSingleInput`` and ``BaseWriterSingleInput``; the comments name
-the method each block reproduces and flag the ISCE3 behaviours kept on purpose.
+Split from `nisar_tools.gslc_geocode` because it is long and has no
+numerics of its own beyond calling `nisar_tools.gslc_geocode.geocode_lut`.
+Method-by-method port of ISCE3 v0.25.16's `GslcWriter`,
+`BaseL2WriterSingleInput` and `BaseWriterSingleInput`; each docstring names
+the method it reproduces, and comments flag the ISCE3 behaviours kept on purpose.
 """
 
 import numpy as np
@@ -45,7 +45,7 @@ def populate_metadata(f, rslc, freq_pols, grids, lut_grid, orbit, dem, *,
 # identification
 # ---------------------------------------------------------------------------
 def _identification_common(f, src, granule_id, processing_datetime):
-    """``populate_identification_common``."""
+    """`populate_identification_common`."""
     gp.set_value(f, f"{I}/productDoi", "(NOT SPECIFIED)")
     gp.copy_from(src, f, f"{I}/absoluteOrbitNumber", format_function=np.uint32)
     gp.copy_from(src, f, f"{I}/trackNumber", format_function=np.uint32)
@@ -78,7 +78,7 @@ def _identification_common(f, src, granule_id, processing_datetime):
 
 
 def _identification_l2(f, src, freq_pols):
-    """``populate_identification_l2_specific``."""
+    """`populate_identification_l2_specific`."""
     gp.copy_from(src, f, f"{I}/zeroDopplerStartTime")
     gp.copy_from(src, f, f"{I}/zeroDopplerEndTime")
     gp.set_value(f, f"{I}/productLevel", "L2")
@@ -94,7 +94,7 @@ def _identification_l2(f, src, freq_pols):
 # grids
 # ---------------------------------------------------------------------------
 def _data_parameters(f, src, freq_pols):
-    """``GslcWriter.populate_data_parameters`` (the exception mask is written
+    """`GslcWriter.populate_data_parameters` (the exception mask is written
     by the block loop, on the first frequency's grid)."""
     for freq in freq_pols:
         rin = f"{R}/swaths/frequency{freq}"
@@ -112,7 +112,7 @@ def _data_parameters(f, src, freq_pols):
 # ceosAnalysisReadyData
 # ---------------------------------------------------------------------------
 def _ceos(f, grids, freq_pols):
-    """``populate_ceos_analysis_ready_data_parameters{_l2_common,}``."""
+    """`populate_ceos_analysis_ready_data_parameters{_l2_common,}`."""
     from osgeo import ogr, osr
 
     ogr.UseExceptions()
@@ -150,12 +150,12 @@ def _ceos(f, grids, freq_pols):
 # calibrationInformation
 # ---------------------------------------------------------------------------
 def _lut_radar_grid(ctx, group_path, names, frequency):
-    """``geocode_metadata_group``'s input radar grid for a LUT group.
+    """`geocode_metadata_group`'s input radar grid for a LUT group.
 
-    Returns ``(grid, arrays)`` or ``None`` when the group is absent. 1-D range
+    Returns `(grid, arrays)` or `None` when the group is absent. 1-D range
     vectors (crosstalk) are expanded along azimuth over the RSLC's time span
-    with 21 lines plus 5 either side; ``referenceTerrainHeight`` takes the 2-D
-    path whenever its group also holds ``slantRange`` -- and then comes out all
+    with 21 lines plus 5 either side; `referenceTerrainHeight` takes the 2-D
+    path whenever its group also holds `slantRange` -- and then comes out all
     NaN, which is what ISCE3 writes (reproduced by returning NaN arrays).
     """
     src, rslc = ctx["src"], ctx["rslc"]
@@ -220,7 +220,7 @@ def _lut_radar_grid(ctx, group_path, names, frequency):
 
 
 def _noise_az_parameters(ctx, group, names):
-    """``get_az_parameters_for_noise_equivalent_backscatter_luts``."""
+    """`get_az_parameters_for_noise_equivalent_backscatter_luts`."""
     zdt = group["zeroDopplerTime"]
     az = zdt[()]
     start, end = float(az[0]), float(az[-1])
@@ -237,7 +237,7 @@ def _noise_az_parameters(ctx, group, names):
 
 
 def _resample_noise(group, pol, grid):
-    """``getResampledNoiseEquivalentBackscatter``: nearest azimuth record,
+    """`getResampledNoiseEquivalentBackscatter`: nearest azimuth record,
     linear along range, onto the grid's lines (float64)."""
     power = group[pol][()]
     sr = group["slantRange"][()]
@@ -257,7 +257,7 @@ def _resample_noise(group, pol, grid):
 
 def _geocode_group(ctx, out_group, in_group, names, frequency=None, compute_stats=False,
                    method=None, out_names=None):
-    """``geocode_lut``: geocode ``names`` from ``in_group`` onto the LUT grid."""
+    """`geocode_lut`: geocode `names` from `in_group` onto the LUT grid."""
     from .gslc_geocode import geocode_lut
 
     frequency = frequency or sorted(ctx["freq_pols"])[0]
@@ -290,7 +290,7 @@ def _lut_method(lines, samples, requested=None):
 
 
 def _calibration_information(ctx):
-    """``populate_calibration_information`` + the GSLC-specific RTC LUTs."""
+    """`populate_calibration_information` + the GSLC-specific RTC LUTs."""
     f, src, freq_pols = ctx["f"], ctx["src"], ctx["freq_pols"]
     all_pols = [p for pols in freq_pols.values() for p in pols]
     if all(p in gp.LEXICOGRAPHIC_BASE_POLS for p in all_pols):
@@ -333,7 +333,7 @@ def _calibration_information(ctx):
 # sourceData
 # ---------------------------------------------------------------------------
 def _near_far_incidence(grid, orbit):
-    """``get_near_and_far_range_incidence_angles``: zero Doppler, zero height."""
+    """`get_near_and_far_range_incidence_angles`: zero Doppler, zero height."""
     t = grid.sensing_time(grid.length // 2)
     out = []
     for r in (grid.starting_range, grid.end_range):
@@ -347,7 +347,7 @@ def _near_far_incidence(grid, orbit):
 
 
 def _source_data(ctx):
-    """``populate_source_data``."""
+    """`populate_source_data`."""
     f, src, rslc, orbit = ctx["f"], ctx["src"], ctx["rslc"], ctx["orbit"]
     sd = f"{P}/metadata/sourceData"
     gp.copy_from(src, f, f"{sd}/productDoi", f"{I}/productDoi", skip_if_not_present=True)
@@ -417,7 +417,7 @@ def _source_data(ctx):
 # processingInformation
 # ---------------------------------------------------------------------------
 def _input_runconfig_value(src, field):
-    """``get_value_from_input_runconfig``: a ``key: value`` line of the RSLC's."""
+    """`get_value_from_input_runconfig`: a `key: value` line of the RSLC's."""
     path = f"{R}/metadata/processingInformation/parameters/runConfigurationContents"
     if path not in src:
         return None
@@ -433,7 +433,7 @@ def _input_runconfig_value(src, field):
 
 def _processing_information_l2_common(ctx, orbit_file, tec_file, dem_path,
                                       dem_description, software_version):
-    """``populate_processing_information_l2_common``."""
+    """`populate_processing_information_l2_common`."""
     f, src, freq_pols = ctx["f"], ctx["src"], ctx["freq_pols"]
     params = f"{P}/metadata/processingInformation/parameters"
     inputs = f"{P}/metadata/processingInformation/inputs"
@@ -463,7 +463,7 @@ def _processing_information_l2_common(ctx, orbit_file, tec_file, dem_path,
 
 
 def _processing_information_gslc(ctx, tec_file, flatten, run_config_text):
-    """``GslcWriter.populate_processing_information``."""
+    """`GslcWriter.populate_processing_information`."""
     f, src = ctx["f"], ctx["src"]
     params = f"{P}/metadata/processingInformation/parameters"
     gp.copy_from(src, f, f"{params}/azimuthChirpWeighting",
@@ -482,7 +482,7 @@ def _processing_information_gslc(ctx, tec_file, flatten, run_config_text):
 
 
 def _attitude(f, src):
-    """``populate_attitude``: the RSLC's attitude group, minus angularVelocity."""
+    """`populate_attitude`: the RSLC's attitude group, minus angularVelocity."""
     in_path = f"{R}/metadata/attitude"
     if in_path not in src:
         return
@@ -494,7 +494,7 @@ def _attitude(f, src):
 
 
 def describe_run(**kwargs):
-    """A YAML-ish record of the parameters, for ``runConfigurationContents``."""
+    """A YAML-ish record of the parameters, for `runConfigurationContents`."""
     lines = ["# written by nisar_tools.gslc_geocode.geocode_rslc", "runconfig:"]
     for key, value in kwargs.items():
         lines.append(f"    {key}: {value}")

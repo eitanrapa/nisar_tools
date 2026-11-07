@@ -1,17 +1,17 @@
 """Geolocation timing corrections for geocoding an RSLC.
 
-A port of ISCE3 v0.25.16's ``nisar.workflows.geocode_corrections.AzSrgCorrections``
+A port of ISCE3 v0.25.16's `nisar.workflows.geocode_corrections.AzSrgCorrections`
 with its two model-driven sources:
 
-- **Solid Earth tides** (``isce3.solid_earth_tides``): pysolid's tidal
+- **Solid Earth tides** (`isce3.solid_earth_tides`): pysolid's tidal
   displacement on a 0.23 deg grid, projected into radar range and azimuth by a
-  ``geo2rdr`` of each point with and without the displacement. A few centimetres
-  of slant range; needs the optional ``pysolid`` package.
-- **Ionosphere** (``isce3.atmosphere.tec_product``): from a NISAR IMAGEN TEC
-  file (``NISAR_ANC_TEC_*.json``). Range delay ``40.31 * TEC_sub / f^2 /
-  cos(inc)`` at near and far range; azimuth shift from the along-track TEC
-  gradient. **Metres** of slant range (2.6-3.2 m in ASF's dawn reference GSLC,
-  7.7-9.7 m for an evening frame) and 0.1-0.2 ms of azimuth time.
+  `geo2rdr` of each point with and without the displacement. A few centimetres
+  of slant range; needs the optional `pysolid` package.
+- **Ionosphere** (`isce3.atmosphere.tec_product`): from a NISAR IMAGEN TEC
+  file (`NISAR_ANC_TEC_*.json`). Range delay `40.31 * TEC_sub / f^2 / cos(inc)`
+  at near and far range; azimuth shift from the along-track TEC
+  gradient. **Metres** of slant range (a few metres for a dawn pass, up to
+  about 10 m for an evening one) and 0.1-0.2 ms of azimuth time.
 
 Both only move *where* a map pixel samples the RSLC: ISCE3 flattens with the
 uncorrected range, so neither enters the GSLC phase through the flattening.
@@ -19,9 +19,9 @@ uncorrected range, so neither enters the GSLC phase through the flattening.
 The ionospheric correction is applied only when a TEC file is supplied --
 exactly what ISCE3 does -- and the product records whether it was. The data
 guide does not list TEC among the supporting products, but ASF distributes the
-files as the ``NISAR_TEC`` collection; :func:`nisar_tools.download.download_tec`
-finds and fetches the one covering an RSLC. Every P05023 GSLC and GUNW checked
-was made with one.
+files as the `NISAR_TEC` collection; `nisar_tools.download.download_tec`
+finds and fetches the one covering an RSLC. The release P05023 GSLCs and GUNWs
+we have checked were all made with one.
 """
 
 import json
@@ -41,7 +41,7 @@ TECU = 1e16
 # Decimated radar grid
 # ---------------------------------------------------------------------------
 def nominal_ground_spacing(grid, orbit):
-    """``get_radar_grid_nominal_ground_spacing``: (azimuth, ground range) metres."""
+    """`get_radar_grid_nominal_ground_spacing`: (azimuth, ground range) metres."""
     pos, vel = orbit.interpolate(np.array(grid.sensing_mid))
     llh, _ = radar.rdr2geo([grid.sensing_mid], [grid.mid_range], orbit, height=0.0,
                            wavelength=grid.wavelength, look_side=grid.look_side)
@@ -55,7 +55,7 @@ def nominal_ground_spacing(grid, orbit):
 
 
 def decimated_radar_grid(grid, orbit, posting=5000.0):
-    """``_get_decimated_radar_grid``: the same corners at ~``posting`` metres."""
+    """`_get_decimated_radar_grid`: the same corners at ~`posting` metres."""
     az_spacing, gr_spacing = nominal_ground_spacing(grid, orbit)
     length = max(int(az_spacing / posting * grid.length), 2)
     width = max(int(gr_spacing / posting * grid.width), 2)
@@ -66,7 +66,7 @@ def decimated_radar_grid(grid, orbit, posting=5000.0):
 # Solid Earth tides
 # ---------------------------------------------------------------------------
 def _enu_vectors(lon_deg, lat_deg):
-    """``get_enu_vec_from_lat_lon``: unit E, N, U in ECEF, each ``(3, ...)``."""
+    """`get_enu_vec_from_lat_lon`: unit E, N, U in ECEF, each `(3, ...)`."""
     lon, lat = np.deg2rad(lon_deg), np.deg2rad(lat_deg)
     vec_u = np.array([np.cos(lon) * np.cos(lat), np.sin(lon) * np.cos(lat), np.sin(lat)])
     vec_n = np.array([-np.cos(lon) * np.sin(lat), -np.sin(lon) * np.sin(lat), np.cos(lat)])
@@ -75,9 +75,9 @@ def _enu_vectors(lon_deg, lat_deg):
 
 
 def solid_earth_tides(grid, lon_deg, lat_deg, hgt, orbit):
-    """``isce3.solid_earth_tides.solid_earth_tides``: ``(set_rg [m], set_az [s])``.
+    """`isce3.solid_earth_tides.solid_earth_tides`: `(set_rg [m], set_az [s])`.
 
-    ``lon_deg``/``lat_deg``/``hgt`` locate the decimated radar grid's pixels on
+    `lon_deg`/`lat_deg`/`hgt` locate the decimated radar grid's pixels on
     the ground (degrees, metres).
     """
     try:
@@ -127,7 +127,7 @@ def solid_earth_tides(grid, lon_deg, lat_deg, hgt, orbit):
 # Ionosphere from an IMAGEN TEC file
 # ---------------------------------------------------------------------------
 def _tec_times(tec, grid, orbit, margin, staggered):
-    """``_get_tec_time``: TEC sample times (s since epoch) and the kept mask."""
+    """`_get_tec_time`: TEC sample times (s since epoch) and the kept mask."""
     utc = np.array([np.datetime64(t.replace("Z", ""), "ns") for t in tec["utc"]])
     t = np.array([radar.seconds_since(grid.ref_epoch, u) for u in utc])
     stagger = 0.0
@@ -151,7 +151,7 @@ def _tec_times(tec, grid, orbit, margin, staggered):
 
 
 def _incidence(t, r, grid, orbit):
-    """``compute_incidence_angle`` on the zero-height ellipsoid, radians."""
+    """`compute_incidence_angle` on the zero-height ellipsoid, radians."""
     sat, _ = orbit.interpolate(np.array(t))
     llh, _ = radar.rdr2geo([t], [r], orbit, height=0.0, wavelength=grid.wavelength,
                            look_side=grid.look_side)
@@ -161,7 +161,7 @@ def _incidence(t, r, grid, orbit):
 
 
 def tec_luts(json_path, center_frequency, orbit, grid, margin=40.0):
-    """``tec_lut2d_from_json_{az,srg}``: ``(azimuth LUT [s], range LUT [m])``."""
+    """`tec_lut2d_from_json_{az,srg}`: `(azimuth LUT [s], range LUT [m])`."""
     with open(json_path) as fh:
         tec = json.load(fh)
     rg_vec = [grid.starting_range, grid.end_range]
@@ -201,7 +201,7 @@ def tec_luts(json_path, center_frequency, orbit, grid, margin=40.0):
 class TimingCorrections:
     """Correction LUTs on the decimated radar grid, plus what to record.
 
-    ``azimuth`` (seconds) and ``slant_range`` (metres) are ``None`` when no
+    `azimuth` (seconds) and `slant_range` (metres) are `None` when no
     correction of that kind was computed -- ISCE3's empty LUT.
     """
 
@@ -223,10 +223,10 @@ class TimingCorrections:
 
 def compute_timing_corrections(radar_grid, orbit, center_frequency, dem=None,
                                tec_file=None, solid_earth_tides=True):
-    """``AzSrgCorrections`` for one frequency's radar grid.
+    """`AzSrgCorrections` for one frequency's radar grid.
 
-    ``dem`` is a :class:`~nisar_tools.dem.DEMInterpolator` for the SET
-    ground positions (``None`` = ellipsoid). Returns :class:`TimingCorrections`.
+    `dem` is a `nisar_tools.dem.DEMInterpolator` for the SET
+    ground positions (`None` = ellipsoid). Returns `TimingCorrections`.
     """
     scaled = decimated_radar_grid(radar_grid, orbit)
     out = TimingCorrections(grid=scaled, tec_file=str(tec_file) if tec_file else None,
@@ -241,8 +241,8 @@ def compute_timing_corrections(radar_grid, orbit, center_frequency, dem=None,
     set_rg = None
     if solid_earth_tides:
         tt, rr = np.meshgrid(out.az_vec, out.rg_vec, indexing="ij")
-        # the box in the DEM's own CRS: a projected DEM (the polar EPSG:3031/3413 ones) would otherwise be read at
-        # the lon/lat numbers taken as metres (2026-10-26, Antarctica t094 f129)
+        # The box in the DEM's own CRS: a projected DEM (the polar EPSG:3031/3413 ones) would otherwise be read at
+        # the lon/lat numbers taken as metres.
         dem_fn = None if dem is None else dem.coarse_sampler(
             radar.geo_bounding_box(scaled, orbit, dem.epsg, margin=0.1))
         llh, _ = radar.rdr2geo(tt.ravel(), rr.ravel(), orbit, height=0.0,

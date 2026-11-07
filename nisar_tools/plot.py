@@ -26,7 +26,7 @@ def _to_latlon(data, epsg_code):
 
 
 def plot_wrapped_phase(igram, epsg_code=None):
-    """Plot wrapped interferogram phase on a cyclic colormap, ``[-pi, pi]``."""
+    """Plot wrapped interferogram phase on a cyclic colormap, `[-pi, pi]`."""
     phase = np.angle(igram)
     if isinstance(igram, xr.DataArray):
         phase = igram.copy(data=phase)
@@ -91,25 +91,25 @@ def plot_offsets(x_offset, y_offset, correlation=None, epsg_code=None,
                  vmax=None, centred=False, cmap="RdBu_r", nan_color=NAN_COLOR):
     """Plot a pixel-offset field as two panels, x beside y.
 
-    Both panels share **one** symmetric diverging scale, taken from the 98th
-    percentile of the two together unless ``vmax`` sets it: the components are
+    Both panels share one symmetric diverging scale, taken from the 98th
+    percentile of the two together unless `vmax` sets it: the components are
     meant to be compared by eye, which fails if each picks its own range.
-    ``min_correlation`` blanks locations below that correlation, and
-    ``quiver=True`` overlays the offsets as arrows on the second panel.
+    `min_correlation` blanks locations below that correlation, and
+    `quiver=True` overlays the offsets as arrows on the second panel.
 
-    ``centred`` only labels the panels -- pass it when the fields have already had
+    `centred` only labels the panels: pass it when the fields have already had
     their median removed (see
-    :meth:`~nisar_tools.offsets.PixelOffsetStack.robust_offsets`), so the plot
+    `nisar_tools.offsets.PixelOffsetStack.robust_offsets`), so the plot
     says which quantity is on screen.
 
-    ``nan_color`` is not cosmetic on an offset field. A diverging colormap is
+    `nan_color` is not cosmetic on an offset field. A diverging colormap is
     near-white at its midpoint and matplotlib leaves invalid samples transparent,
-    so on a white figure **a zero offset and a dropped location are the same
-    pixel** -- and after :meth:`robust_offsets` most of the field is near zero
-    while a third of it can be dropped. Painting the invalid samples a neutral grey
-    is what separates "measured, and it did not move" from "not measured".
+    so on a white figure a zero offset and a dropped location look the same, and
+    after `robust_offsets` most of the field is near zero. Painting the invalid
+    samples a neutral grey separates "measured, and it did not move" from
+    "not measured".
 
-    Returns ``(fig, axes)``, with ``axes`` a length-2 array.
+    Returns `(fig, axes)`, with `axes` a length-2 array.
     """
     x_field = _to_latlon(x_offset, epsg_code)
     y_field = _to_latlon(y_offset, epsg_code)

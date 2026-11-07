@@ -132,8 +132,8 @@ def test_merge_does_not_warn_at_granule_scale():
     It only fires once the unified grid reaches ten times the largest input's
     partition count, so a small stack cannot exercise it -- hence the granule
     dimensions here (lazy zeros, so this costs nothing). Reaching the union by
-    reindexing used to trip it: xarray builds a per-element boolean mask for
-    the missing positions, and broadcasting that mask is what blew up the grid.
+    reindexing trips it: xarray builds a per-element boolean mask for the
+    missing positions, and broadcasting that mask is what blows up the grid.
     """
     step = 10.0
     a = _lazy_stack(400000.0, 4_000_000.0)
@@ -193,7 +193,7 @@ def test_merge_overlap_prefers_self(gslc_factory):
 
 
 def test_merge_preserves_axis_direction(gslc_factory):
-    """The reversing slice must land the axes the same way sortby did."""
+    """The reversing slice must land the axes the way a sort by coordinate would."""
     p1 = gslc_factory(ny=64, nx=64, x0=400000.0, seed=4)
     p2 = gslc_factory(ny=64, nx=64, x0=400000.0 + 64 * 10.0, seed=5)
     g1, g2 = GSLC(p1), GSLC(p2)
@@ -267,13 +267,13 @@ def test_merge_across_epsg(gslc_factory):
 
 
 def test_multilook_grid_is_lattice_anchored(gslc_factory):
-    """The multilooked grid must depend on the native lattice and ``looks``
+    """The multilooked grid must depend on the native lattice and `looks`
     only -- never on where the crop that fed it began.
 
     Multilooking block-means from index 0 of whatever array it is given, so
     without anchoring, two frames of one track cropped to different extents come
-    out a fraction of a multilooked pixel apart and no longer share a lattice.
-    That is what made `UnwrappedStack.merge` refuse them downstream.
+    out a fraction of a multilooked pixel apart and no longer share a lattice,
+    and `UnwrappedStack.merge` downstream has to resample one of them.
     """
     looks = 10
     grid = dict(ny=64, nx=64, x0=400000.0, y0=4_000_000.0, dx=10.0, dy=10.0)
@@ -297,8 +297,7 @@ def test_multilook_grid_is_lattice_anchored(gslc_factory):
         assert np.all(np.isin(np.round(ax, 6), np.round(ref_x, 6)))
         assert np.all(np.isin(np.round(ay, 6), np.round(ref_y, 6)))
 
-        # Unanchored: offset by exactly lead/looks of a multilooked pixel --
-        # which at looks=10 is the 0.3 px that made merge refuse the real frames.
+        # Unanchored: offset by exactly lead/looks of a multilooked pixel.
         ux, _ = grids[(lead, False)]
         off = (float(ux[0]) - float(ref_x[0])) / (10.0 * looks) % 1.0
         assert np.isclose(off, lead / looks, atol=1e-9)

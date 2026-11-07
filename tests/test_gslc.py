@@ -27,8 +27,8 @@ def test_metadata_and_lazy_data(gslc_factory):
 
 def test_read_chunks_targets_a_block_count_and_stays_aligned(gslc_factory):
     """The read-block size is chosen for the *region*, so a small crop still has
-    enough dask tasks to keep every core inflating -- it used to inherit the
-    granule's fixed 2048, which made the notebook's bbox 2x2 blocks."""
+    enough dask tasks to keep every core inflating; a block size inherited from
+    the whole granule would leave a small bbox only a few blocks."""
     path = gslc_factory(ny=512, nx=512)   # conftest writes 64x64 HDF5 chunks
     g = GSLC(path)
     try:

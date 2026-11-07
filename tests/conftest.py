@@ -8,14 +8,14 @@ y-spacing, descending y axis) are exercised without needing multi-GB files.
 import os
 
 # Must be set before any OpenMP-linked library (numpy/scipy/pygmt) initialises;
-# this conda env ships duplicate libomp copies that otherwise abort the process.
+# some conda environments ship duplicate libomp copies, which otherwise abort the process.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import h5py
 import numpy as np
 import pytest
 
-# The equivalence-test oracle lives beside the tests as ``legacy_reference``;
+# The equivalence-test oracle lives beside the tests as `legacy_reference`;
 # pytest's default import mode puts this directory on sys.path, so no manual
 # path manipulation is needed.
 
@@ -29,16 +29,16 @@ PLATFORM_ALT = 747_000.0         # m, NISAR's nominal orbit altitude
 
 
 def _write_synthetic_geometry(f, grid, ident, x_coords, y_coords, dx, dy, epsg):
-    """Write a minimal ``metadata/radarGrid`` geometry cube + ``centerFrequency``.
+    """Write a minimal `metadata/radarGrid` geometry cube + `centerFrequency`.
 
     Incidence angle rises linearly across x (near->far range) from 30 to 45 deg,
     independent of y and height; the LOS unit vector is
-    ``(east=-sin(inc), north=0, up=cos(inc))``. Being analytically known, tests
+    `(east=-sin(inc), north=0, up=cos(inc))`. Being analytically known, tests
     can check the trilinear interpolation exactly.
 
-    ``elevationAngle`` (the off-nadir look angle, which the reader exposes as
-    ``look_angle``) follows the spherical-Earth relation
-    ``sin(look) = Re/(Re+h) sin(incidence)`` at a NISAR-like altitude, so it is
+    `elevationAngle` (the off-nadir look angle, which the reader exposes as
+    `look_angle`) follows the spherical-Earth relation
+    `sin(look) = Re/(Re+h) sin(incidence)` at a NISAR-like altitude, so it is
     always the smaller of the two, as in a real product.
     """
     ident.create_dataset("lookDirection", data=np.bytes_("Left"))
@@ -102,15 +102,15 @@ def write_synthetic_gslc(
 ):
     """Write a minimal but structurally faithful GSLC HDF5 file.
 
-    ``x`` is ascending; ``y`` is descending for a ``Descending`` pass and
+    `x` is ascending; `y` is descending for a `Descending` pass and
     ascending otherwise (matching how NISAR stores geocoded grids). The
-    ``yCoordinateSpacing`` is stored signed, as in real products.
+    `yCoordinateSpacing` is stored signed, as in real products.
 
-    ``compressed`` (default, matching real products) writes the image gzip+
-    shuffle filtered with a NaN fill value. Pass ``False`` for a plain
+    `compressed` (default, matching real products) writes the image gzip+
+    shuffle filtered with a NaN fill value. Pass `False` for a plain
     uncompressed dataset, which exercises the h5py fallback read path.
 
-    ``frequency`` picks the sub-band group; ``"B"`` defaults to the second
+    `frequency` picks the sub-band group; `"B"` defaults to the second
     carrier, which is what makes a pair of these usable for the dual-frequency
     ionosphere correction. Real granules carry both bands in one file at
     different postings; a fixture writes one band per file, which is all any
@@ -169,7 +169,7 @@ def write_synthetic_gslc(
 
 @pytest.fixture
 def gslc_factory(tmp_path):
-    """Return a factory that writes synthetic GSLC files into ``tmp_path``."""
+    """Return a factory that writes synthetic GSLC files into `tmp_path`."""
     counter = {"n": 0}
 
     def _make(**kwargs):
@@ -209,23 +209,23 @@ def write_synthetic_gunw(
     """Write a minimal but faithful NISAR L2 GUNW HDF5 file.
 
     Mirrors the real product's layout: the grid coordinates and projection sit
-    on the ``unwrappedInterferogram`` group (not the frequency group, which
-    holds only ``centerFrequency``), and a ``metadata/radarGrid`` cube provides
-    the geometry so ``to_los`` is self-contained. ``unwrappedPhase`` is a smooth
-    ramp in x with a ``nan_border`` of out-of-swath NaNs; ``connectedComponents``
+    on the `unwrappedInterferogram` group (not the frequency group, which
+    holds only `centerFrequency`), and a `metadata/radarGrid` cube provides
+    the geometry so `to_los` is self-contained. `unwrappedPhase` is a smooth
+    ramp in x with a `nan_border` of out-of-swath NaNs; `connectedComponents`
     is 1 in the valid interior and the product's 65535 fill in the border, so
     the reader's fill -> 0 normalisation is exercised.
 
-    A smooth ``ionospherePhaseScreen`` (a gentle plane in y, amplitude
-    ``iono_amp``) is written so ``phase_screen`` / ``remove_phase_screen`` can be
-    tested; ``spikes`` injects that many large isolated outliers into the
-    interior for ``remove_outliers`` tests. The 3-digit ``mask`` layer is valid
-    land (11) everywhere except the out-of-swath border (255); ``mask_invalid_cols``
+    A smooth `ionospherePhaseScreen` (a gentle plane in y, amplitude
+    `iono_amp`) is written so `phase_screen` / `remove_phase_screen` can be
+    tested; `spikes` injects that many large isolated outliers into the
+    interior for `remove_outliers` tests. The 3-digit `mask` layer is valid
+    land (11) everywhere except the out-of-swath border (255); `mask_invalid_cols`
     flags that many interior columns as out-of-subswath (10, secondary digit 0)
-    to exercise ``mask_edges(use_builtin_mask=True)``.
+    to exercise `mask_edges(use_builtin_mask=True)`.
 
-    The geometry cube matches ``_write_synthetic_geometry``: incidence rises
-    linearly 30 -> 45 deg across x, and ``elevationAngle`` (the look angle)
+    The geometry cube matches `_write_synthetic_geometry`: incidence rises
+    linearly 30 -> 45 deg across x, and `elevationAngle` (the look angle)
     follows the spherical-Earth relation, always smaller than the incidence.
     """
     path = str(path)
@@ -318,7 +318,7 @@ def write_synthetic_gunw(
 
 @pytest.fixture
 def gunw_factory(tmp_path):
-    """Return a factory that writes synthetic GUNW files into ``tmp_path``."""
+    """Return a factory that writes synthetic GUNW files into `tmp_path`."""
     counter = {"n": 0}
 
     def _make(**kwargs):

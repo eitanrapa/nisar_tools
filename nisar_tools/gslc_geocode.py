@@ -1,37 +1,35 @@
 """Geocode a NISAR RSLC into a NISAR-format GSLC: ISCE3's GSLC workflow, ported.
 
-:func:`geocode_rslc` is ``nisar.workflows.gslc.run`` followed by
-``GslcWriter.populate_metadata``, reimplemented on this package's numpy
-kernels (:mod:`nisar_tools._geocode_kernels`, :mod:`nisar_tools.radar`). The
-output reads with :class:`nisar_tools.GSLC` like any granule from ASF.
+`geocode_rslc` is `nisar.workflows.gslc.run` followed by
+`GslcWriter.populate_metadata`, reimplemented on this package's numpy
+kernels (`nisar_tools._geocode_kernels`, `nisar_tools.radar`). The
+output reads with `nisar_tools.GSLC` like any granule from ASF.
 
-What is reproduced, and verified against ASF's own products (a P05023 GSLC
-and the RSLC it was made from):
+What is reproduced, checked against an ASF GSLC and the RSLC it was made from:
 
 - **Pixels** -- 99.8% bit-identical (frequency A; 99.87% B), the rest one
-  truncation step apart; NaN pattern and subswath ``mask`` identical. DEM
-  heights with ISCE3's float32 spline, zero-Doppler ``geo2rdr`` from mid-swath,
+  truncation step apart; NaN pattern and subswath `mask` identical. DEM
+  heights with ISCE3's float32 spline, zero-Doppler `geo2rdr` from mid-swath,
   8-tap sinc with Doppler baseband/re-ramp in ISCE3's float32 operation order,
   flattening by the *uncorrected* range, 10-bit mantissa truncation.
-- **Geometry** -- ``geo2rdr`` slant range to 6.4 nm; every ``radarGrid`` cube
+- **Geometry** -- `geo2rdr` slant range to 6.4 nm; every `radarGrid` cube
   layer equal to float32 rounding.
 - **Timing corrections** -- ionosphere from the NISAR TEC file identical, solid
-  Earth tides to 0.2 mm, against the GSLC's stored LUTs. Substituting ASF's own
-  LUTs closes up to half of the remaining pixel differences.
+  Earth tides to 0.2 mm, against the GSLC's stored LUTs.
 - **Format** -- every dataset, dtype, filter and attribute of the L2 GSLC spec
-  1.5.0 as ISCE3 writes it (``scripts/gslc_format_diff.py`` checks it).
+  1.5.0 as ISCE3 writes it (`tests/gslc_format_diff.py` checks it).
 
 Departures, each deliberate:
 
 - The mean in each image's statistics is float64 (ISCE3's float32 running mean
   over ~10^9 samples is mostly rounding error).
-- ``geo2rdr`` seeds every pixel at mid-swath, as ``geocodeSlc`` does, but the
+- `geo2rdr` seeds every pixel at mid-swath, as `geocodeSlc` does, but the
   cube seeds per node rather than from the previous node (<1e-8 s apart).
 - Without a frame database the output box is the swath footprint snapped
-  outward to ``snap`` metres. ASF's frame boxes are larger; ``like=`` a GUNW or
-  GSLC of the same frame reuses its box exactly (:func:`product_bounds`).
-- ``softwareVersion``, ``processingType`` ("Custom"), ``processingCenter`` and
-  ``runConfigurationContents`` describe this run, not an SDS one.
+  outward to `snap` metres. ASF's frame boxes are larger; `like=` a GUNW or
+  GSLC of the same frame reuses its box exactly (`product_bounds`).
+- `softwareVersion`, `processingType` ("Custom"), `processingCenter` and
+  `runConfigurationContents` describe this run, not an SDS one.
 """
 
 import datetime as _dt
@@ -56,10 +54,10 @@ _INTERP_MARGIN = {"nearest": 0, "bilinear": 0, "biquintic": 5}
 
 
 def default_gslc_name(rslc_granule_id):
-    """The GSLC granule name for an RSLC, marked as Science On-Demand (``OD``).
+    """The GSLC granule name for an RSLC, marked as Science On-Demand (`OD`).
 
-    NISAR's naming convention: ``L1``->``L2``, ``RSLC``->``GSLC``, processing
-    type ``OD`` rather than ``PR``/``UR`` so the file cannot be mistaken for an
+    NISAR's naming convention: `L1`->`L2`, `RSLC`->`GSLC`, processing
+    type `OD` rather than `PR`/`UR` so the file cannot be mistaken for an
     SDS product; every other field (track, frame, mode, times, CRID, counter)
     stays that of the source RSLC.
     """
@@ -74,10 +72,10 @@ def default_gslc_name(rslc_granule_id):
 # Orbit
 # ---------------------------------------------------------------------------
 def load_orbit(rslc, orbit_file=None):
-    """``nisar.products.readers.orbit.load_orbit``: embedded, or external cropped.
+    """`nisar.products.readers.orbit.load_orbit`: embedded, or external cropped.
 
     An external XML is referenced to the radar grid's epoch and cropped to the
-    RSLC orbit's span plus ``max(120 s / spacing, 7)`` state vectors.
+    RSLC orbit's span plus `max(120 s / spacing, 7)` state vectors.
     """
     internal = rslc.orbit
     if orbit_file is None:
@@ -92,12 +90,12 @@ def load_orbit(rslc, orbit_file=None):
 # ---------------------------------------------------------------------------
 def geocode_lut(data, lut_grid, geogrid, dem, orbit, method="biquintic",
                 threshold=1e-8, maxiter=25):
-    """Geocode a radar-coordinate LUT onto a map grid, ``geocodeInterp``-style.
+    """Geocode a radar-coordinate LUT onto a map grid, `geocodeInterp`-style.
 
-    ``lut_grid`` is the :class:`~nisar_tools.radar.RadarGrid` the LUT is sampled
-    on. Each node: DEM height, zero-Doppler ``geo2rdr``, reject outside the grid
+    `lut_grid` is the `nisar_tools.radar.RadarGrid` the LUT is sampled
+    on. Each node: DEM height, zero-Doppler `geo2rdr`, reject outside the grid
     (or within the interpolator's margin of its edge), interpolate. Returns an
-    array of ``data``'s dtype on the grid, NaN where not geocoded.
+    array of `data`'s dtype on the grid, NaN where not geocoded.
     """
     from pyproj import Transformer
 
@@ -137,7 +135,7 @@ def geocode_lut(data, lut_grid, geogrid, dem, orbit, method="biquintic",
 
 
 def _lut_method(lines, samples, requested=None):
-    """``geocode_metadata_group``'s default interpolator choice."""
+    """`geocode_metadata_group`'s default interpolator choice."""
     if requested is not None:
         return requested
     if lines == 1 or samples == 1:
@@ -151,10 +149,10 @@ def _lut_method(lines, samples, requested=None):
 # Secondary registration
 # ---------------------------------------------------------------------------
 class RegistrationField:
-    """Extra radar-position shifts for :func:`geocode_rslc`'s ``registration``.
+    """Extra radar-position shifts for `geocode_rslc`'s `registration`.
 
-    A regular map grid (``x``, ``y`` in the output projection, ``y`` may
-    descend) carrying, per node, the fractional ``lines`` and ``samples`` to
+    A regular map grid (`x`, `y` in the output projection, `y` may
+    descend) carrying, per node, the fractional `lines` and `samples` to
     add to an output pixel's radar position before it is interpolated.
     Evaluated bilinearly; beyond the grid, the nearest edge node. The field
     must be finite everywhere -- fill gaps before building one.
@@ -164,8 +162,8 @@ class RegistrationField:
     geolocation correction (from the global TEC map) can disagree with the
     radar by metres -- about a resolution cell, which halves the pair's
     coherence. Because NISAR keeps the ~950 Hz Doppler carrier in its SLCs,
-    an along-track misregistration of ``dt`` also biases the interferogram's
-    phase by ``-2 pi f_dc dt``, ~1.7 cm of LOS per metre at L-band. The GUNW
+    an along-track misregistration of `dt` also biases the interferogram's
+    phase by `-2 pi f_dc dt`, ~1.7 cm of LOS per metre at L-band. The GUNW
     avoids both by resampling its secondary to offsets ("rubbersheeting": a
     dense field, or, in the solid-earth PR products, one quadratic per frame
     fitted to the dense offsets); this is the same thing for a GSLC: geocode
@@ -174,7 +172,7 @@ class RegistrationField:
 
     The carrier is re-ramped at the shifted position. That avoids the bias for
     geolocation, timing and motion, but not for the ionosphere's along-track
-    shift: the part of the field that follows it leaves ``-2 pi f_dc dt`` in
+    shift: the part of the field that follows it leaves `-2 pi f_dc dt` in
     the phase, as it does in the GUNW (Joughin's "carrier error"). The term
     scales with frequency, so no split-spectrum screen removes it.
     """
@@ -201,9 +199,11 @@ class RegistrationField:
     @classmethod
     def from_offsets(cls, x, y, along_track, slant_range, along_track_spacing,
                      range_spacing, description=None):
-        """From offsets in metres: ``along_track / along_track_spacing`` lines
-        and ``slant_range / range_spacing`` samples (e.g. a GUNW's
-        ``pixelOffsets``, with the RSLC's ground-track metres per line)."""
+        """A field from offsets in metres, e.g. a GUNW's `pixelOffsets`.
+
+        `along_track / along_track_spacing` lines and `slant_range / range_spacing`
+        samples, with `along_track_spacing` the RSLC's ground-track metres per line.
+        """
         return cls(x, y, np.asarray(along_track, dtype=np.float64) / along_track_spacing,
                    np.asarray(slant_range, dtype=np.float64) / range_spacing,
                    description=description)
@@ -227,13 +227,13 @@ class RegistrationField:
 
 def pixel_radar_indices(x, y, epsg, dem, grid, orbit, doppler, valid, corrections=None,
                         registration=None):
-    """Steps 1-5 of the geocoding for output pixels at map ``x``, ``y`` (1-D).
+    """Steps 1-5 of the geocoding for output pixels at map `x`, `y` (1-D).
 
-    The DEM height, zero-Doppler ``geo2rdr``, the timing ``corrections`` and,
-    last, the ``registration`` shifts (see :class:`RegistrationField`). Returns
-    ``(lon, lat, h, az_index, rg_index, flatten_range, mask)``, lon/lat in
-    radians. ``flatten_range`` is the geometric range in every case, and the
-    subswath ``mask`` is that of the position *before* registration -- a shift
+    The DEM height, zero-Doppler `geo2rdr`, the timing `corrections` and,
+    last, the `registration` shifts (see `RegistrationField`). Returns
+    `(lon, lat, h, az_index, rg_index, flatten_range, mask)`, lon/lat in
+    radians. `flatten_range` is the geometric range in every case, and the
+    subswath `mask` is that of the position *before* registration -- a shift
     of a line or two does not change it except at a subswath edge.
     """
     lon, lat = _to_lonlat(epsg, x, y)
@@ -253,12 +253,11 @@ def pixel_radar_indices(x, y, epsg, dem, grid, orbit, doppler, valid, correction
 # The workflow
 # ---------------------------------------------------------------------------
 def product_bounds(path):
-    """``((x_min, y_max, x_max, y_min), epsg)`` of a NISAR L2 product's map box.
+    """`((x_min, y_max, x_max, y_min), epsg)` of a NISAR L2 product's map box.
 
     Any geocoded product works (GSLC, GUNW, GCOV, GOFF): ASF grids every L2
-    product of a track/frame on the same box -- a P05023 GSLC and GUNW of frame
-    022_162_A_006 share it to the metre -- so this is how to put a GSLC made
-    here on the grid ASF uses for that frame.
+    product of a track/frame on the same box, so this is how to put a GSLC
+    made here on the grid ASF uses for that frame.
     """
     import h5py
 
@@ -296,40 +295,40 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
     ----------
     rslc : str, Path or RSLC
     output : str or Path
-        Output ``.h5``. A directory writes :func:`default_gslc_name` into it.
+        Output `.h5`. A directory writes `default_gslc_name` into it.
     dem : str or Path
         Heights above the WGS84 ellipsoid. Use the NISAR DEM v1.2
-        (:func:`nisar_tools.dem.stage_nisar_dem`) to flatten against the same
+        (`nisar_tools.dem.stage_nisar_dem`) to flatten against the same
         surface as ASF's products -- a different DEM changes the phase by
         ~0.4 rad per centimetre of height difference.
     frequencies, polarizations
-        Subsets to process (default: everything in the RSLC). ``polarizations``
-        is a list applied to every frequency or a ``{freq: [pols]}`` dict.
+        Subsets to process (default: everything in the RSLC). `polarizations`
+        is a list applied to every frequency or a `{freq: [pols]}` dict.
     epsg : int, optional
         Output projection (default: the UTM zone of the swath centre).
     bounds : (x_min, y_max, x_max, y_min), optional
-        Explicit output box in ``epsg`` units -- the SDS's
-        ``top_left``/``bottom_right``. Default: swath footprint snapped to
-        ``snap``.
+        Explicit output box in `epsg` units -- the SDS's
+        `top_left`/`bottom_right`. Default: swath footprint snapped to
+        `snap`.
     like : str or Path, optional
         A NISAR L2 product (GSLC, GUNW, ...) of the same track and frame whose
-        box and projection to use instead (:func:`product_bounds`) -- the way to
-        land on ASF's frame grid. Excludes ``bounds`` and ``epsg``.
+        box and projection to use instead (`product_bounds`) -- the way to
+        land on ASF's frame grid. Excludes `bounds` and `epsg`.
     orbit_file : optional
         NISAR orbit-ephemeris XML (MOE/POE) instead of the embedded orbit.
     tec_file : optional
-        NISAR IMAGEN TEC JSON (``NISAR_ANC_TEC_*``) for the ionospheric
-        geolocation correction; see :func:`nisar_tools.download.download_tec`.
+        NISAR IMAGEN TEC JSON (`NISAR_ANC_TEC_*`) for the ionospheric
+        geolocation correction; see `nisar_tools.download.download_tec`.
     solid_earth_tides : bool
-        Apply the solid Earth tide correction (needs ``pysolid``).
+        Apply the solid Earth tide correction (needs `pysolid`).
     registration : callable, optional
-        ``registration(x, y) -> (lines, samples)``: extra fractional radar
-        shifts for output pixels at map ``x``, ``y`` (output projection),
+        `registration(x, y) -> (lines, samples)`: extra fractional radar
+        shifts for output pixels at map `x`, `y` (output projection),
         added after the timing corrections and before interpolation; the
-        flattening range is not changed. Usually a :class:`RegistrationField`
+        flattening range is not changed. Usually a `RegistrationField`
         built from dense offsets, to make this GSLC the coregistered
         secondary of a reference GSLC -- see that class for why ASF's GSLCs
-        need it. Recorded in ``runConfigurationContents``.
+        need it. Recorded in `runConfigurationContents`.
     block_size : int
         Output block edge in pixels; rounded to a multiple of the 512 chunk.
     workers : int, optional
@@ -467,7 +466,7 @@ def _has_input_data_exception(src):
 
 
 def _create_exception_mask(f, freq, first_grid):
-    """``inputDataExceptionMask``: uint8 on the *first* frequency's grid."""
+    """`inputDataExceptionMask`: uint8 on the *first* frequency's grid."""
     root = f"{gp.PRODUCT}/grids/frequency{freq}"
     group = f[root]
     shape = (first_grid.length, first_grid.width)
@@ -483,7 +482,7 @@ def _create_exception_mask(f, freq, first_grid):
 
 
 def _write_timing_corrections(f, freq, corr):
-    """``AzSrgCorrections.write_corrections_hdf5``."""
+    """`AzSrgCorrections.write_corrections_hdf5`."""
     if not corr.arrays:
         return
     group = f.require_group(f"{gp.PRODUCT}/metadata/processingInformation/timingCorrections/frequency{freq}")
@@ -628,7 +627,7 @@ def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
 
 
 def _exception_mask_block(f, rslc, freq_pols, lon, lat, h, grid, orbit, row0, col0, shape):
-    """Nearest-neighbour ``inputDataExceptionMask`` on the first frequency's grid.
+    """Nearest-neighbour `inputDataExceptionMask` on the first frequency's grid.
 
     GeocodeCov with a Byte raster: zero-Doppler geo2rdr without timing
     corrections, nearest sample, 0 where not geocoded.
@@ -658,7 +657,7 @@ def _exception_mask_block(f, rslc, freq_pols, lon, lat, h, grid, orbit, row0, co
 
 
 def _write_cubes(f, rslc, freq, cube_grid, orbit, workers):
-    """``add_radar_grid_cubes_to_hdf5`` with the RSLC's (first) frequency grid."""
+    """`add_radar_grid_cubes_to_hdf5` with the RSLC's (first) frequency grid."""
     from pyproj import Transformer
 
     root = f"{gp.PRODUCT}/metadata/radarGrid"
@@ -681,11 +680,12 @@ def _write_cubes(f, rslc, freq, cube_grid, orbit, workers):
 
 
 def _dem_description(dem, rslc):
-    """The RSLC's own DEM description when ``dem`` was staged from NISAR DEM v1.2.
+    """The RSLC's own DEM description when `dem` was staged from NISAR DEM v1.2.
 
-    :func:`nisar_tools.dem.stage_nisar_dem` tags its output; an RSLC processed
+    `nisar_tools.dem.stage_nisar_dem` tags its output; an RSLC processed
     by the SDS records the same DEM's description, so reusing it states the
-    truth in the mission's words. Anything else is "(NOT SPECIFIED)".
+    truth in the mission's words. Otherwise None, which is written as
+    "(NOT SPECIFIED)".
     """
     import rasterio
 

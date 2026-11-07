@@ -1,16 +1,16 @@
-"""The :class:`GSLC` class: one NISAR GSLC HDF5 granule, read lazily.
+"""The `GSLC` class: one NISAR GSLC HDF5 granule, read lazily.
 
-A ``GSLC`` keeps its HDF5 file open for its whole lifetime and exposes the
-complex image as a chunked, dask-backed :class:`xarray.DataArray`. Nothing is
+A `GSLC` keeps its HDF5 file open for its whole lifetime and exposes the
+complex image as a chunked, dask-backed `xarray.DataArray`. Nothing is
 read from disk until the graph is computed or persisted, so cropping a tiny
 region out of a multi-GB granule only ever reads that region.
 
-Lifetime note: because the dask graph holds references to the open ``h5py``
-dataset, you must keep the ``GSLC`` (and thus its file handle) alive until the
+Lifetime note: because the dask graph holds references to the open `h5py`
+dataset, you must keep the `GSLC` (and thus its file handle) alive until the
 data is computed or persisted. Persisting a stack reopens it from Zarr and
 severs this dependency, after which the granules can be closed.
 
-Reads go through :class:`DirectChunkReader` where the granule's layout allows
+Reads go through `DirectChunkReader` where the granule's layout allows
 it, because h5py serialises every call on one global lock and NISAR GSLCs are
 gzip-compressed: decoding through h5py is single-core no matter how many threads
 (or granules) are in play. See that class for the details.
@@ -32,19 +32,19 @@ from .geometry import SPEED_OF_LIGHT
 GRID_PATH = "science/LSAR/GSLC/grids/frequency{frequency}"
 IDENT_PATH = "science/LSAR/identification"
 
-# HDF5 filter codes, in the order they are applied on write.
+# h5py's name for the deflate filter.
 _H5_DEFLATE = "gzip"
 
 
 def _decode(value):
-    """Decode an HDF5 scalar that may be ``bytes`` into a ``str``."""
+    """Decode an HDF5 scalar that may be `bytes` into a `str`."""
     if isinstance(value, bytes):
         return value.decode()
     return str(value)
 
 
 def _is_directly_decodable(dset):
-    """True if ``dset``'s filter pipeline is one :class:`DirectChunkReader` inverts.
+    """True if `dset`'s filter pipeline is one `DirectChunkReader` inverts.
 
     Deliberately narrow: anything unexpected falls back to plain h5py rather
     than risking a wrong decode.
@@ -65,15 +65,14 @@ class DirectChunkReader:
 
     Exists purely for speed. h5py holds a single global lock across every call,
     including calls on different file handles and different files, so the gzip
-    inflate that dominates a GSLC read is effectively single-core: measured on a
-    real granule, eight threads read at 429 MB/s versus 398 MB/s for one, and
-    three *different* granules read concurrently gained 1%.
+    inflate that dominates a GSLC read is effectively single-core: more threads,
+    or several granules read at once, gain almost nothing.
 
-    The fix is to keep only the I/O inside h5py. ``read_direct_chunk`` hands back
+    This keeps only the I/O inside h5py. `read_direct_chunk` hands back
     a chunk's raw compressed bytes without decoding them, and both
-    ``zlib.decompress`` and the unshuffle release the GIL, so dask's own worker
-    threads parallelise the expensive part. No thread pool is needed here — one
-    dask task decodes its own blocks. Measured 3.2x end to end.
+    `zlib.decompress` and the unshuffle release the GIL, so dask's own worker
+    threads parallelise the expensive part (about 3x faster end to end). No
+    thread pool is needed here — one dask task decodes its own blocks.
 
     Output is byte-identical to indexing the dataset through h5py.
     """
@@ -98,8 +97,8 @@ class DirectChunkReader:
     def _read_chunk(self, cy, cx):
         """Decode one whole HDF5 chunk, or synthesise it if never written."""
         offset = (cy * self._cy, cx * self._cx)
-        # Outside the swath (~45% of a granule) chunks are never allocated;
-        # read_direct_chunk raises for those, so test before asking.
+        # Chunks outside the swath (a large part of a granule) are never
+        # allocated; read_direct_chunk raises for those, so test before asking.
         if self._dset.id.get_chunk_info_by_coord(offset).byte_offset is None:
             return np.full((self._cy, self._cx), self._fill, dtype=self.dtype)
         raw = self._dset.id.read_direct_chunk(offset)[1]
@@ -133,7 +132,12 @@ class DirectChunkReader:
 
 
 class GSLC:
-    """A single GSLC granule (lazy)."""
+    """A single GSLC granule (lazy).
+
+    Opens one `frequency` ("A" or "B") and `polarization` of the granule at
+    `path`; `chunks` is the dask read-block size, aligned to the file's HDF5
+    chunking.
+    """
 
     def __init__(self, path, frequency="A", polarization="HH", chunks=(2048, 2048)):
         self.path = str(path)
@@ -155,8 +159,8 @@ class GSLC:
         # The sub-band's own carrier. Real granules always carry it; a stripped
         # test fixture may not, so an absent one is None rather than an error --
         # only the dual-frequency ionosphere correction needs it, and that says
-        # so itself. Frequency A and B differ (1.239 vs 1.2935 GHz on a real
-        # product), which is exactly what makes that correction possible.
+        # so itself. Frequencies A and B differ (e.g. 1.239 vs 1.2935 GHz),
+        # which is what makes that correction possible.
         self.center_frequency = (
             float(grid["centerFrequency"][()]) if "centerFrequency" in grid else None
         )
@@ -171,7 +175,6 @@ class GSLC:
         if self.direction not in ("Ascending", "Descending"):
             raise ValueError(f"Unexpected orbitPassDirection: {self.direction!r}")
 
-        # x must be ascending; y monotonic in the expected pass direction.
         if not _strictly_monotonic(self.x_coords):
             raise ValueError("xCoordinates are not strictly monotonic")
         if not _strictly_monotonic(self.y_coords):
@@ -194,7 +197,7 @@ class GSLC:
         return SPEED_OF_LIGHT / self.center_frequency
 
     def _reader(self):
-        """A :class:`DirectChunkReader` for this granule, or None to use h5py.
+        """A `DirectChunkReader` for this granule, or None to use h5py.
 
         Cached, because the reader holds the unshuffle codec. Any granule whose
         filter pipeline we cannot invert falls back to plain h5py indexing.
@@ -207,21 +210,19 @@ class GSLC:
         return self._direct or None
 
     def read_chunks(self, ny, nx, target_blocks=None):
-        """Read-block size for an ``(ny, nx)`` region of this granule.
+        """Read-block size for an `(ny, nx)` region of this granule.
 
         How much one HDF5 read task decompresses is a *separate* question from how
-        the result is stored, but both numbers used to be 2048 (``chunks`` here and
-        ``SPATIAL_CHUNK`` in ``_base``). Since :meth:`crop` slices the
-        already-chunked array, a modest crop -- the notebook's bbox is about
-        2750x2220 px -- came out as 2x2 dask blocks, so at most four of ten cores
-        ran the gzip inflate. That is why the direct-chunk reader measures ~3x on a
-        raw read but 2.66x end to end.
+        the result is stored (`SPATIAL_CHUNK` in `_base`). `crop` slices an
+        already-chunked array, so with 2048-px read blocks a crop a few thousand
+        pixels across would be only a few dask blocks, and most cores would sit
+        idle while others ran the gzip inflate.
 
-        The block is sized to give ``target_blocks`` of them over the region
+        The block is sized to give `target_blocks` of them over the region
         (default four per core), rounded *down* to a multiple of the file's own
-        chunking and never above ``self.chunks``. Not smaller than that: the
-        downstream multilook overlaps by ``4 * looks`` (see
-        ``_kernels._overlap_depth``), so at ``looks=30`` a 512-px block does 2.2x
+        chunking and never above `self.chunks`. Not smaller than that: the
+        downstream multilook overlaps by `4 * looks` (see
+        `_kernels._overlap_depth`), so at `looks=30` a 512-px block does 2.2x
         the work of its interior against 1.25x for a 2048-px one. Enough blocks to
         fill the cores, no more.
         """
@@ -239,14 +240,14 @@ class GSLC:
 
     @property
     def data(self):
-        """Lazy, CRS-aware DataArray ``(y, x)`` of the complex image."""
+        """Lazy, CRS-aware DataArray `(y, x)` of the complex image."""
         return self.data_chunked(self.chunks)
 
     def data_chunked(self, chunks):
-        """:attr:`data` with an explicit read-block size.
+        """`data` with an explicit read-block size.
 
-        Separate from :attr:`data` because the block size has to be fixed at
-        ``da.from_array`` time -- rechunking afterwards only splits blocks that
+        Separate from `data` because the block size has to be fixed at
+        `da.from_array` time -- rechunking afterwards only splits blocks that
         have already been read whole, so it buys no read parallelism.
         """
         reader = self._reader()
@@ -272,7 +273,7 @@ class GSLC:
         """Lazily crop to a lon/lat bounding box. Returns a DataArray.
 
         The read blocks are sized for the *crop*, not the granule (see
-        :meth:`read_chunks`), so a small bbox still splits into enough dask tasks
+        `read_chunks`), so a small bbox still splits into enough dask tasks
         to keep every core inflating.
         """
         x_min, x_max, y_min, y_max = geo.bbox_to_native(

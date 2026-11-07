@@ -2,19 +2,19 @@
 plus the phase -> line-of-sight-displacement conversion.
 
 A NISAR GSLC granule embeds an ISCE3-computed geometry cube under
-``metadata/radarGrid``: the incidence angle and the target->sensor line-of-sight
+`metadata/radarGrid`: the incidence angle and the target->sensor line-of-sight
 (LOS) unit vector (East/North components) tabulated on a coarse map grid at a
 stack of reference heights above the WGS84 ellipsoid. Per output pixel we
-trilinearly interpolate that cube in ``(x, y, terrain-height)`` -- the terrain
+trilinearly interpolate that cube in `(x, y, terrain-height)` -- the terrain
 height from a user-supplied DEM -- to get the incidence angle and the full ENU
 LOS unit vector. The cube already encodes the zero-Doppler geometry (from the
 product's own orbit), so the orbit ephemeris is not needed for this path.
 
 Sign convention for the phase conversion: LOS displacement is **positive toward
-the sensor** (range decrease), ``d = -(lambda / 4pi) * unwrapped_phase``, under
-this package's ``ref * conj(sec)`` interferogram convention -- see
-:data:`PHASE_RANGE_SIGN` for where that minus comes from. Pass ``sign=-1`` to
-:func:`phase_to_los` if your fringe sense is inverted.
+the sensor** (range decrease), `d = -(lambda / 4pi) * unwrapped_phase`, under
+this package's `ref * conj(sec)` interferogram convention -- see
+`PHASE_RANGE_SIGN` for where that minus comes from. Pass `sign=-1` to
+`phase_to_los` if your fringe sense is inverted.
 """
 
 import os
@@ -37,7 +37,7 @@ _LOOK_DIR = "science/LSAR/identification/lookDirection"
 _GEOM_VARS = ("incidence_angle", "look_angle", "los_east", "los_north")
 # HDF5 cube dataset names for each output variable.
 #
-# ``look_angle`` is the product's ``elevationAngle``, which it defines as "the
+# `look_angle` is the product's `elevationAngle`, which it defines as "the
 # angle between the LOS vector and the normal to the ellipsoid at the sensor" --
 # i.e. the off-nadir look angle, measured at the spacecraft. It is always
 # smaller than the incidence angle (measured at the target, against the local
@@ -49,9 +49,9 @@ _CUBE_DATASETS = {
     "los_north": "losUnitVectorY",
 }
 # The along-track unit vector at the target: the direction an along-track pixel
-# offset measures. Read on request only (``read_geometry_cube(along_track=True)``).
-# In the products it is horizontal -- east**2 + north**2 = 1 to 1e-6 on D141 and
-# A061 -- so its up component is zero.
+# offset measures. Read on request only (`read_geometry_cube(along_track=True)`).
+# In the products it is horizontal (east**2 + north**2 = 1 to about 1e-6), so its
+# up component is zero.
 _ALONG_DATASETS = {
     "along_east": "alongTrackUnitVectorX",
     "along_north": "alongTrackUnitVectorY",
@@ -65,9 +65,9 @@ def _decode(value):
 def radar_wavelength(path, frequency="A", product="GSLC"):
     """Radar wavelength (m) = c / centerFrequency, read from a NISAR granule.
 
-    ``product`` selects the L2 product group holding the ``grids`` tree:
-    ``"GSLC"`` for a GSLC granule, ``"GUNW"`` for a NASA GUNW, which stores the
-    same ``centerFrequency`` under its own group.
+    `product` selects the L2 product group holding the `grids` tree:
+    `"GSLC"` for a GSLC granule, `"GUNW"` for a NASA GUNW, which stores the
+    same `centerFrequency` under its own group.
     """
     grid = _FREQ_GRID.format(product=product, f=frequency)
     with h5py.File(str(path), "r") as f:
@@ -76,16 +76,16 @@ def radar_wavelength(path, frequency="A", product="GSLC"):
 
 
 def read_geometry_cube(path, frequency="A", product="GSLC", along_track=False):
-    """Load a NISAR ``metadata/radarGrid`` geometry cube as an xarray Dataset.
+    """Load a NISAR `metadata/radarGrid` geometry cube as an xarray Dataset.
 
-    Returns dims ``(height, y, x)`` with ``incidence_angle`` (degrees) and the
-    ``los_east`` / ``los_north`` LOS-unit-vector components; attrs carry the
-    cube's ``epsg``, the ``wavelength``, and the ``look_direction``.
-    ``along_track=True`` adds ``along_east`` / ``along_north``, the along-track
+    Returns dims `(height, y, x)` with `incidence_angle` (degrees) and the
+    `los_east` / `los_north` LOS-unit-vector components; attrs carry the
+    cube's `epsg`, the `wavelength`, and the `look_direction`.
+    `along_track=True` adds `along_east` / `along_north`, the along-track
     unit vector (horizontal, toward the flight direction), which
-    :func:`sample_look_geometry` then carries too.
+    `sample_look_geometry` then carries too.
 
-    ``product`` picks the product group: a ``"GSLC"`` granule or a ``"GUNW"``,
+    `product` picks the product group: a `"GSLC"` granule or a `"GUNW"`,
     which embeds a cube of the same layout (the two differ only in the number of
     reference heights, read here from the file, not assumed).
     """
@@ -127,11 +127,11 @@ def _open_dem(dem):
 
 
 def dem_heights_on_grid(dem, x, y, epsg):
-    """Sample a DEM onto the ``(x, y)`` output grid. Returns a 2D height array.
+    """Sample a DEM onto the `(x, y)` output grid. Returns a 2D height array.
 
-    ``dem`` is a GeoTIFF path or a CRS-aware DataArray. It is reprojected and
+    `dem` is a GeoTIFF path or a CRS-aware DataArray. It is reprojected and
     bilinearly resampled onto the output grid; pixels with no DEM coverage come
-    back ``0.0`` (ellipsoid height). ``None`` yields all-zero heights (sea-level
+    back `0.0` (ellipsoid height). `None` yields all-zero heights (sea-level
     geometry), a reasonable fallback when no DEM is supplied.
     """
     ny, nx = len(y), len(x)
@@ -154,28 +154,25 @@ def dem_heights_on_grid(dem, x, y, epsg):
 
 
 def sample_look_geometry(cube, x, y, epsg, height=None, workers=None):
-    """Trilinearly interpolate a geometry ``cube`` onto the ``(x, y)`` grid.
+    """Trilinearly interpolate a geometry `cube` onto the `(x, y)` grid.
 
-    ``height`` is a scalar or a 2D ``(ny, nx)`` array of terrain heights above
-    the ellipsoid (default 0). Returns a CRS-aware Dataset on dims ``(y, x)``
-    with ``incidence_angle`` (deg), the ENU LOS unit vector ``los_east`` /
-    ``los_north`` / ``los_up``, and the sampled ``height``. ``los_up`` is
-    reconstructed as ``sqrt(1 - east^2 - north^2)`` (the LOS points up toward the
-    sensor), which equals ``cos(incidence)``. A cube read with
-    ``along_track=True`` also gives ``along_east`` / ``along_north`` /
-    ``along_up``: the along-track unit vector, renormalised in the horizontal
-    after interpolation (``along_up`` is zero).
+    `height` is a scalar or a 2D `(ny, nx)` array of terrain heights above
+    the ellipsoid (default 0). Returns a CRS-aware Dataset on dims `(y, x)`
+    with `incidence_angle` (deg), the ENU LOS unit vector `los_east` /
+    `los_north` / `los_up`, and the sampled `height`. `los_up` is
+    reconstructed as `sqrt(1 - east^2 - north^2)` (the LOS points up toward the
+    sensor), which equals `cos(incidence)`. A cube read with
+    `along_track=True` also gives `along_east` / `along_north` /
+    `along_up`: the along-track unit vector, renormalised in the horizontal
+    after interpolation (`along_up` is zero).
 
     Sampled a band of rows at a time on a thread pool rather than the whole grid
-    at once. The interpolation is pointwise in ``(x, y, height)``, so banding
-    cannot change the answer -- the result is bit-identical -- but it turns the
-    largest single-threaded memory spike in the pipeline into a bounded one. The
-    whole-grid version allocated two float64 meshgrids and an ``(ny*nx, 3)``
-    float64 point list, then ran four ``RegularGridInterpolator`` calls over them
-    back to back. Measured on a 3000x3000 grid: peak **202 -> 71 bytes/pixel**
-    (1818 -> 636 MB), and 2.1x faster on ten cores, since both pyproj's transform
-    and the interpolator release the GIL. ``workers=1`` runs the bands serially;
-    the banding alone still bounds the memory.
+    at once. The interpolation is pointwise in `(x, y, height)`, so banding
+    cannot change the answer, but it bounds the memory: the whole grid at once
+    needs two float64 meshgrids and an `(ny*nx, 3)` float64 point list. pyproj's
+    transform and the interpolator both release the GIL, so the bands also run
+    in parallel. `workers=1` runs the bands serially; the banding alone still
+    bounds the memory.
     """
     x = np.asarray(x, float)
     y = np.asarray(y, float)
@@ -227,8 +224,8 @@ def sample_look_geometry(cube, x, y, epsg, height=None, workers=None):
         for var, interp in interps.items():
             sampled[var] = interp(pts).reshape(shape)
             out[var][rows] = sampled[var]
-        # From the float64 samples, as the whole-grid version did -- deriving it
-        # from the float32 output would round twice.
+        # From the float64 samples: deriving it from the float32 output would
+        # round twice.
         out["los_up"][rows] = np.sqrt(np.clip(
             1.0 - sampled["los_east"] ** 2 - sampled["los_north"] ** 2, 0.0, 1.0
         ))
@@ -273,32 +270,25 @@ def sample_look_geometry(cube, x, y, epsg, height=None, workers=None):
 
 #: Sign relating this package's interferogram phase to *range change*.
 #:
-#: Interferograms are formed as ``ref * conj(sec)`` (``_kernels.py``), so the
-#: phase is ``phi = phi_ref - phi_sec``. With ISCE3's ``exp(-j 4 pi r / lambda)``
-#: SLC phase that is::
+#: Interferograms are formed as `ref * conj(sec)` (`_kernels.py`), so the
+#: phase is `phi = phi_ref - phi_sec`. With ISCE3's `exp(-j 4 pi r / lambda)`
+#: SLC phase that is:
 #:
 #:     phi = -(4 pi / lambda) (r_ref - r_sec) = (4 pi / lambda) (r_sec - r_ref)
 #:
-#: Ground moving *toward* the sensor shortens the range (``r_sec < r_ref``), so
+#: Ground moving *toward* the sensor shortens the range (`r_sec < r_ref`), so
 #: the phase **decreases**. Displacement positive toward the sensor is therefore
-#: ``-(lambda / 4pi) * phi``, not ``+``.
-#:
-#: This was wrong (``+1``) until 2026-07-28, which mirrored every LOS product:
-#: the Venezuela inversion of the dextral San Sebastian recovered *sinistral*
-#: slip, and forcing the correct ``polarity=(-1, 0, 0)`` pinned 86% of the mesh
-#: onto a bound and never converged. Verified against the geometry cube, whose
-#: ``los_east`` is +0.68 ascending / -0.61 descending -- correct for left-looking
-#: NISAR -- so the look vectors were never the problem.
+#: `-(lambda / 4pi) * phi`, not `+`.
 PHASE_RANGE_SIGN = -1
 
 
 def phase_to_los(unwrapped, wavelength, sign=1):
     """Convert unwrapped phase (radians) to LOS displacement (metres).
 
-    ``d = -sign * (wavelength / 4pi) * phase``; see :data:`PHASE_RANGE_SIGN` for
-    the derivation of the sign. The default ``sign=+1`` makes displacement
-    positive toward the sensor under this package's ``ref * conj(sec)``
-    interferogram convention; pass ``sign=-1`` for data whose fringe sense is
+    `d = -sign * (wavelength / 4pi) * phase`; see `PHASE_RANGE_SIGN` for
+    the derivation of the sign. The default `sign=+1` makes displacement
+    positive toward the sensor under this package's `ref * conj(sec)`
+    interferogram convention; pass `sign=-1` for data whose fringe sense is
     inverted, which makes the *returned* values positive toward the sensor
     again. Nothing downstream re-applies it -- what comes back is always in the
     package's canonical convention.

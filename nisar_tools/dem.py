@@ -1,20 +1,20 @@
 """DEM staging and ISCE3-exact DEM interpolation for geocoding RSLCs.
 
-Two jobs, both in service of :mod:`nisar_tools.rslc`:
+Two jobs, both in service of `nisar_tools.rslc`:
 
-- :func:`stage_nisar_dem` fetches the **NISAR DEM v1.2** (the modified Copernicus
+- `stage_nisar_dem` fetches the **NISAR DEM v1.2** (the modified Copernicus
   GLO-30 on the WGS84 ellipsoid that every NISAR product is processed with)
   over a lon/lat box, through its global VRT on Earthdata. It is a pure pixel
   copy -- nearest-neighbour onto bounds snapped to source pixel edges, the trick
   sardem uses -- so the heights are the mission's heights, bit for bit. Only the
   on-disk compression differs.
-- :class:`DEMInterpolator` evaluates heights the way ISCE3's
-  ``DEMInterpolator::interpolateLonLat`` does: its "biquintic" spline in
+- `DEMInterpolator` evaluates heights the way ISCE3's
+  `DEMInterpolator::interpolateLonLat` does: its "biquintic" spline in
   float32, reference height 0 m off the DEM.
 
 Why exactness matters here and not in most DEM uses: a GSLC's phase is
-*flattened* by the range to the DEM surface, so a height error ``dh`` becomes a
-phase error of ``4 pi / lambda * dh * cos(inc)`` -- about **0.4 rad per cm** at
+*flattened* by the range to the DEM surface, so a height error `dh` becomes a
+phase error of `4 pi / lambda * dh * cos(inc)` -- about **0.4 rad per cm** at
 L-band. A GSLC flattened against a different DEM, or the same DEM interpolated
 differently, is not interferometrically compatible with ASF's.
 """
@@ -33,7 +33,7 @@ NISAR_DEM_VRT = "https://nisar.asf.earthdatacloud.nasa.gov/NISAR/DEM/v1.2/{epsg}
 #: Source pixel size of the WGS84 NISAR DEM, degrees.
 _DEM_RES = 1.0 / 3600.0
 
-#: ``DEMRasterToInterpolator``'s margin, in DEM pixels, around the region.
+#: `DEMRasterToInterpolator`'s margin, in DEM pixels, around the region.
 DEM_MARGIN_PIXELS = 50
 
 
@@ -51,11 +51,11 @@ def _snap_bounds(west, south, east, north, res=_DEM_RES):
 
 
 def stage_nisar_dem(dest, bbox, *, margin_deg=0.1, overwrite=False):
-    """Write the NISAR DEM v1.2 over ``bbox`` to a compressed GeoTIFF.
+    """Write the NISAR DEM v1.2 over `bbox` to a compressed GeoTIFF.
 
-    ``bbox`` is this package's ``(lon_min, lon_max, lat_min, lat_max)``;
-    ``margin_deg`` pads it on every side. Needs Earthdata credentials in
-    ``~/.netrc`` (GDAL reads them itself). Returns ``dest``.
+    `bbox` is this package's `(lon_min, lon_max, lat_min, lat_max)`;
+    `margin_deg` pads it on every side. Needs Earthdata credentials in
+    `~/.netrc` (GDAL reads them itself). Returns `dest`.
 
     Polar products use the EPSG:3413/3031 DEMs; this helper covers the WGS84
     one, which spans 60 S - 60 N where every UTM-projected NISAR frame lies.
@@ -100,15 +100,15 @@ def stage_nisar_dem(dest, bbox, *, margin_deg=0.1, overwrite=False):
     return dest
 
 
-#: Version of the NISAR DEM that :func:`stage_nisar_dem` fetches.
+#: Version of the NISAR DEM that `stage_nisar_dem` fetches.
 NISAR_DEM_VERSION = "1.2"
 
 
 def tag_nisar_dem(path, version=NISAR_DEM_VERSION):
-    """Record in a GeoTIFF's metadata that it is the NISAR DEM ``version``.
+    """Record in a GeoTIFF's metadata that it is the NISAR DEM `version`.
 
     Lets a GSLC made against it state its DEM source in the mission's own words
-    (see ``gslc_geocode._dem_description``) instead of "(NOT SPECIFIED)".
+    (see `gslc_geocode._dem_description`) instead of "(NOT SPECIFIED)".
     """
     from osgeo import gdal
 
@@ -121,14 +121,14 @@ def tag_nisar_dem(path, version=NISAR_DEM_VERSION):
 class DEMInterpolator:
     """Heights above the WGS84 ellipsoid from a DEM raster, ISCE3-style.
 
-    Port of ``isce3::geometry::DEMInterpolator`` with ``BIQUINTIC_METHOD``: the
-    raster is read a window at a time (:meth:`load`, the ``loadDEM`` index
-    arithmetic plus ``DEMRasterToInterpolator``'s 50-pixel margin), and
-    :meth:`interpolate_lonlat` / :meth:`interpolate_xy` return the reference
-    height wherever the 6x6 spline window would leave the loaded raster.
+    Port of `isce3::geometry::DEMInterpolator` with `BIQUINTIC_METHOD`: the
+    raster is read a window at a time (`load`, the `loadDEM` index
+    arithmetic plus `DEMRasterToInterpolator`'s 50-pixel margin), and
+    `heights` returns the reference height wherever the 6x6 spline window
+    would leave the loaded raster.
 
-    ``dem`` is a path to anything rasterio opens (GeoTIFF, VRT), in EPSG:4326 or
-    a projected CRS. Thread-safe for concurrent :meth:`heights` calls: each
+    `dem` is a path to anything rasterio opens (GeoTIFF, VRT), in EPSG:4326 or
+    a projected CRS. Thread-safe for concurrent `heights` calls: each
     call reads its own window through its own dataset handle.
     """
 
@@ -157,7 +157,7 @@ class DEMInterpolator:
 
     @property
     def bounds_lonlat(self):
-        """``(lon_min, lon_max, lat_min, lat_max)`` of the raster (EPSG:4326 only)."""
+        """`(lon_min, lon_max, lat_min, lat_max)` of the raster (EPSG:4326 only)."""
         if self.epsg != 4326:
             raise ValueError("bounds_lonlat is only defined for EPSG:4326 DEMs")
         return (self.x0, self.x0 + self.width * self.dx,
@@ -172,9 +172,9 @@ class DEMInterpolator:
         return self._to_dem.transform(lon, lat)
 
     def load(self, min_x, max_x, min_y, max_y, margin_pixels=DEM_MARGIN_PIXELS):
-        """Read the window covering a DEM-coordinate box (``loadDEM``).
+        """Read the window covering a DEM-coordinate box (`loadDEM`).
 
-        Returns ``(array_float32, xstart, ystart)`` where the starts are the
+        Returns `(array_float32, xstart, ystart)` where the starts are the
         *centres* of the first loaded pixel, as ISCE3 stores them.
         """
         import rasterio
@@ -204,13 +204,13 @@ class DEMInterpolator:
         return arr, xstart, ystart
 
     def coarse_sampler(self, bbox_lonlat, max_pixels=2048):
-        """A ``(lon_rad, lat_rad) -> height`` callable over a decimated DEM read.
+        """A `(lon_rad, lat_rad) -> height` callable over a decimated DEM read.
 
         For corrections whose sensitivity to height is negligible (the solid
         Earth tide range change moves by micrometres for tens of metres of
         height error): one decimated read instead of a full-resolution window
-        per ``rdr2geo`` iteration. Heights use the same spline on the coarse
-        grid. ``bbox_lonlat`` is ``(lon_min, lon_max, lat_min, lat_max)`` in the
+        per `rdr2geo` iteration. Heights use the same spline on the coarse
+        grid. `bbox_lonlat` is `(lon_min, lon_max, lat_min, lat_max)` in the
         DEM's own coordinates (degrees for EPSG:4326).
         """
         import rasterio
@@ -262,11 +262,11 @@ class DEMInterpolator:
 
 
 def interpolate_dem_window(arr, xstart, ystart, dx, dy, x, y, ref_height=0.0):
-    """``DEMInterpolator::interpolateXY`` over a loaded window.
+    """`DEMInterpolator::interpolateXY` over a loaded window.
 
-    ``(xstart, ystart)`` is the centre of ``arr[0, 0]``. A point whose floor row
+    `(xstart, ystart)` is the centre of `arr[0, 0]`. A point whose floor row
     or column is within 2 of the top/left edge, or within 1 of the bottom/right,
-    returns ``ref_height`` -- ISCE3's bounds test, reproduced exactly because it
+    returns `ref_height` -- ISCE3's bounds test, reproduced exactly because it
     decides which pixels near a DEM edge fall back to the ellipsoid.
     """
     x = np.asarray(x, float)

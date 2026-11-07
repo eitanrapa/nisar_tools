@@ -28,8 +28,8 @@ def _phi(y, x, y0=1000.0):
 def _frame(row_shift=0, cycle_offset=0, coh=0.8, cc=1, ny=8, nx=6, dx=10.0,
            dy=10.0, y0=1000.0, direction="Descending", epsg=32611,
            phase_screen=False, source_files=None):
-    """A one-pair UnwrappedStack on a north-down grid shifted ``row_shift`` rows
-    south, its ``unw`` offset by ``cycle_offset`` whole 2*pi cycles."""
+    """A one-pair UnwrappedStack on a north-down grid shifted `row_shift` rows
+    south, its `unw` offset by `cycle_offset` whole 2*pi cycles."""
     x = np.arange(nx) * dx
     y = (y0 - row_shift * dy) - dy * np.arange(ny)
     unw = (_phi(y, x, y0) + cycle_offset * TWO_PI)[None].astype(np.float32)
@@ -118,10 +118,10 @@ def _zone_frames(row_shift=20, cycle_offset=3, ny=48, nx=40, step=100.0):
     """Two overlapping frames of the same ground strip, one per UTM zone.
 
     Frame A is a regular zone-11 grid. Frame B is a regular *zone-12* grid over
-    the same strip shifted ``row_shift`` rows south, filled by evaluating the same
+    the same strip shifted `row_shift` rows south, filled by evaluating the same
     ground-referenced phase at each of its pixels -- so warping B back into zone 11
     must reproduce A's field in the overlap, up to resampling error and the
-    injected ``cycle_offset``.
+    injected `cycle_offset`.
     """
     import pyproj
 
@@ -204,8 +204,8 @@ def test_cross_zone_merge_removes_the_2pi_step():
     assert np.abs(residual).max() < 0.5 * TWO_PI, (
         f"max |residual| = {np.abs(residual).max():.2f} rad -- a 2*pi step survived"
     )
-    # Tighter: the residual is bilinear resampling error only (measured ~0.19 rad
-    # max, 0.016 rms). Without the cycle fix the warped rows would be ~18.8 rad off.
+    # Tighter: the residual is bilinear resampling error only (~0.19 rad max,
+    # 0.016 rms). Without the cycle fix the warped rows would be ~18.8 rad off.
     assert np.abs(residual).max() < 0.5
 
     # Non-vacuous: rows the warped frame alone supplies must be there and correct.
@@ -314,7 +314,7 @@ def test_different_dates_merge_then_to_los(gslc_factory):
 
 def test_same_zone_merge_records_no_resampling():
     """A same-zone merge runs no warp, so its provenance -- and therefore its
-    persist hash -- is unchanged from before cross-zone support existed."""
+    persist hash -- records no resampling."""
     m = _frame().merge(_frame(row_shift=4, cycle_offset=3))
     assert "resampling" not in m.ds.attrs["merged"][-1]
 
@@ -322,7 +322,7 @@ def test_same_zone_merge_records_no_resampling():
 def test_merge_resamples_an_off_lattice_frame_instead_of_refusing():
     """Two frames in one CRS whose grids are offset by a fraction of a pixel.
 
-    That is what an interferogram multilooked without ``align_looks`` looks like:
+    That is what an interferogram multilooked without `align_looks` looks like:
     it anchored its grid phase to its own crop origin, so two frames of one track
     can land a sub-pixel amount apart. Merge warns and resamples rather than
     refusing, since resampling smooth unwrapped phase is harmless.
@@ -373,7 +373,7 @@ def test_merge_different_dates_ties_by_real_offset():
 
     Their overlap difference is *not* an integer number of cycles -- they measure
     different intervals -- so rounding it to one would leave a residual step of up
-    to pi. ``tie="auto"`` picks the real-valued median instead.
+    to pi. `tie="auto"` picks the real-valued median instead.
     """
     a = _frame(ny=16, nx=12)
     # Same ground phase, different dates, plus a non-integer-cycle datum shift.
@@ -397,7 +397,7 @@ def test_merge_different_dates_ties_by_real_offset():
 
 
 def test_merge_different_dates_can_still_force_whole_cycles():
-    """``tie="cycles"`` stays available for a mosaic known to differ by an
+    """`tie="cycles"` stays available for a mosaic known to differ by an
     integer ambiguity only -- and then it must round, leaving the sub-cycle
     part of a deliberately non-integer shift behind."""
     a = _frame(ny=16, nx=12)
@@ -430,7 +430,7 @@ def test_merge_rejects_an_unknown_tie():
 
 def test_merge_still_rejects_differing_spacing():
     """A grid-phase offset is regriddable; a different pixel size is not -- it
-    means the two stacks were multilooked with different ``looks``."""
+    means the two stacks were multilooked with different `looks`."""
     a = _frame(ny=16, nx=12, dx=10.0)
     b = _frame(ny=16, nx=12, dx=20.0, row_shift=8)
     with pytest.raises(ValueError, match="spacings differ"):

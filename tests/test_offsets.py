@@ -1,7 +1,7 @@
-"""Tests for sub-pixel pixel offsets (the GMTSAR ``xcorr`` port).
+"""Tests for sub-pixel pixel offsets (the GMTSAR `xcorr` port).
 
 The kernel has no legacy oracle, so it is pinned three ways: against the
-brute-force time-domain correlator in ``offset_reference.py`` (the ``-time`` mode
+brute-force time-domain correlator in `offset_reference.py` (the `-time` mode
 that is deliberately not shipped), against planted integer and sub-pixel shifts
 it must recover, and by its behaviour on invalid and decorrelated data.
 
@@ -51,10 +51,10 @@ def _texture(ny, nx, seed=0, scale=1.5):
 
 
 def _fft_shift(field, dy, dx):
-    """Shift a real field so its content moves to *larger* indices by ``(dy, dx)``.
+    """Shift a real field so its content moves to *larger* indices by `(dy, dx)`.
 
-    Real in, real out: the kernel correlates ``abs()`` of its inputs, and
-    ``abs()`` of a complex-valued shift is not the shift of ``abs()``.
+    Real in, real out: the kernel correlates `abs()` of its inputs, and
+    `abs()` of a complex-valued shift is not the shift of `abs()`.
     """
     fy = np.fft.fftfreq(field.shape[0])[:, None]
     fx = np.fft.fftfreq(field.shape[1])[None, :]
@@ -78,7 +78,7 @@ def _shifted_gslcs(gslc_factory, dy=2, dx=-3, ny=320, nx=320, seed=0):
 
 
 def _offsets_in_memory(gslc_factory, **kwargs):
-    """A computed :class:`PixelOffsetStack`, with the granules already closed.
+    """A computed `PixelOffsetStack`, with the granules already closed.
 
     The dask graph holds live HDF5 handles, so anything that closes the granules
     has to force the compute first -- exactly the rule the pipeline follows when
@@ -246,11 +246,10 @@ def test_the_wider_subpixel_window_trades_bias_for_scatter():
     The refinement FFT-interpolates the window, i.e. treats it as periodic, and at
     8 samples the correlation peak has not decayed by its edges, so ringing drags
     the interpolated maximum around. That is a bias, and a wider window does cut
-    it. At the old ``nx_corr=128, xsearch=64`` defaults it cut it for free, which
-    is why 16 was the default then; at a 64 px template it is not free, and the
-    scatter is what survives ``robust_offsets``' median removal while the bias does
-    not. Both halves are asserted, so neither can be "fixed" without the other
-    being noticed.
+    it. With `nx_corr=128, xsearch=64` it cuts it for free; at a 64 px template it
+    is not free, and the scatter is what survives `robust_offsets`' median removal
+    while the bias does not. Both halves are asserted, so neither can be "fixed"
+    without the other being noticed.
     """
     field = _texture(768, 768, seed=7)
     window = 64 + 2 * 16
@@ -276,9 +275,9 @@ def test_the_wider_subpixel_window_trades_bias_for_scatter():
 def test_a_subpixel_window_wider_than_the_correlation_surface_raises():
     """It would be clipped and zero-padded, biasing every off-centre peak.
 
-    Silent before: the window is cut from the ``2*ysearch x 2*xsearch`` surface,
-    so one wider than that can never be centred on a peak and the overhang is
-    filled with zeros. Reachable at the default ``xsearch=16``, hence the guard.
+    The window is cut from the `2*ysearch x 2*xsearch` surface, so one wider
+    than that can never be centred on a peak and the overhang is filled with
+    zeros. Reachable at the default `xsearch=16`, hence the guard.
     """
     yo, xo = _lattice(320, 320, SMALL_WINDOW, step=64)
     field = _texture(320, 320, seed=1)
@@ -288,10 +287,10 @@ def test_a_subpixel_window_wider_than_the_correlation_surface_raises():
 
 
 def test_offset_sign_is_secondary_minus_reference():
-    """A feature at a LARGER index in the secondary gives a POSITIVE offset.
+    """A feature at a *larger* index in the secondary gives a *positive* offset.
 
     The bright squares are placed inside the *secondary's template* -- the
-    central ``ny_corr x nx_corr`` of the patch -- because everything outside it is
+    central `ny_corr x nx_corr` of the patch -- because everything outside it is
     masked to zero before the correlation and simply does not participate.
     """
     origin, half = 16, SMALL_WINDOW // 2
@@ -786,14 +785,14 @@ def test_robust_offsets_applies_the_correlation_cut(gslc_factory):
 def test_robust_offsets_keeps_the_few_that_differ_in_a_uniform_field(gslc_factory):
     """A zero MAD is real, not a fixture artefact, and must not blank the field.
 
-    The two D_071 granules are co-registered to the whole pixel and their measured
-    offset is uniform to an IQR of 0.000, so over half the locations hold exactly
-    the median and the MAD is 0. Reading that as "no scale" and keeping only the
-    median would throw away every location that carries a signal.
+    Two granules co-registered to the whole pixel can give an offset uniform to
+    an IQR of 0.000, so over half the locations hold exactly the median and the
+    MAD is 0. Reading that as "no scale" and keeping only the median would throw
+    away every location that carries a signal.
     """
     offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
     shape = offsets.ds["x_offset"].isel(pair=0).shape
-    x = np.full(shape, -0.125)                # the real pair's uniform offset
+    x = np.full(shape, -0.125)                # a co-registered pair's uniform offset
     x[0, 0] = -0.130                          # a few that genuinely differ
     x[1, 1] = -0.121
     x[2, 2] = SMALL["xsearch"] - 0.5          # and one real false peak
@@ -830,8 +829,7 @@ def test_robust_offsets_computes_statistics_per_pair(gslc_factory):
 def test_robust_offsets_survives_a_degenerate_scale(gslc_factory):
     """A granule against itself gives an identical offset everywhere, so MAD is 0.
 
-    Rejecting at ``|x - median| < 0`` would then blank the entire plane. Real case:
-    correlating a real granule against itself returns 0.000 at every location.
+    Rejecting at `|x - median| < 0` would then blank the entire plane.
     """
     offsets = _offsets_in_memory(gslc_factory, dy=2, dx=-3)
     flat = np.zeros(offsets.ds["x_offset"].isel(pair=0).shape)
@@ -903,7 +901,7 @@ def test_plot_offsets_distinguishes_a_zero_offset_from_no_data(gslc_factory):
     """A diverging colormap is near-white at 0 and matplotlib leaves NaN clear.
 
     On a white figure that makes "measured, and it did not move" and "not
-    measured" the same pixel -- and after ``robust_offsets`` most of the field is
+    measured" the same pixel -- and after `robust_offsets` most of the field is
     near zero while a third of it can be dropped. Both halves are needed: the
     colormap paints invalid samples, the axes paint the reprojection's own margin,
     which imshow does not draw at all.

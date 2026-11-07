@@ -1,12 +1,12 @@
-"""Pins :func:`nisar_tools.geo.read_grd` and :meth:`LOSStack.from_grd`.
+"""Pins `nisar_tools.geo.read_grd` and `LOSStack.from_grd`.
 
 The route in for LOS products this package did not make -- GMTSAR, ISCE, an ALOS
-``los_cm.grd`` from a colleague. Three things such a file cannot record have to
+`los_cm.grd` from a colleague. Three things such a file cannot record have to
 be declared (units, sign, look-vector direction), and each of them is silently
 plausible when wrong, so most of what is pinned here is that the declarations are
 applied and that a contradicted one raises.
 
-The acceptance test is :func:`test_recovers_slip_from_alos_style_grids`: write
+The acceptance test is `test_recovers_slip_from_alos_style_grids`: write
 the three departures a NISAR product does *not* have -- lon/lat axes,
 centimetres, a right-looking pass -- and require the planted slip back.
 """
@@ -17,12 +17,11 @@ import xarray as xr
 
 from nisar_tools import LOSStack
 
-# ⚠️ These tests are an **optional integration check**, not a core one.
-# `LOSStack.from_grd` exists to feed a slip inversion -- that is why it was
-# written -- so the honest way to test it end to end is against the inversion,
-# which now lives in its own package. `nisar-tools[slip]` installs it; without
-# it the whole file skips rather than failing, because nothing here is testing
-# this package in isolation.
+# These tests are an optional integration check, not a core one.
+# `LOSStack.from_grd` exists to feed a slip inversion, so it is tested end to end
+# against the inversion, which lives in its own package (`slipsolve`).
+# `nisar-tools[slip]` installs it; without it the whole file skips rather than
+# failing.
 slipsolve = pytest.importorskip(
     "slipsolve", reason="grd import is tested end-to-end against the slip "
                         "inversion; pip install 'nisar-tools[slip]'")
@@ -37,8 +36,8 @@ def tapered_slip(mesh, peak=-2.0, along_centre=0.55, along_width=40e3,
     """A single slip patch: Gaussian along strike, tapering with depth.
 
     Copied from `slipsolve`'s test oracle, which is not installed with the
-    package. Negative `peak` is right-lateral, the sense of the San Sebastian
-    system these ALOS-style fixtures imitate.
+    package. Negative `peak` is right-lateral, the sense of the fault these
+    ALOS-style fixtures imitate.
     """
     s, z = mesh.element_params[:, 0], mesh.element_params[:, 1]
     length = s.max() - s.min()
@@ -52,7 +51,7 @@ def tapered_slip(mesh, peak=-2.0, along_centre=0.55, along_width=40e3,
 _LON = np.array([-68.681, -68.300, -67.900, -67.500, -67.100, -66.700, -66.523])
 _LAT = np.array([10.410, 10.490, 10.540, 10.565, 10.595, 10.620, 10.630])
 
-# ALOS is **right**-looking, where NISAR is left, so the sign of ``los_east``
+# ALOS is right-looking, where NISAR is left, so the sign of `los_east`
 # reverses between the two missions on the same pass direction.
 _GEOMETRIES = {"asc": (34.0, -10.0), "desc": (38.0, 190.0)}
 
@@ -65,7 +64,7 @@ def _right_looking(incidence_deg, heading_deg):
 
 
 def _write_grd(arr, lon, lat, path):
-    """A lon/lat GMT grid, as ``grdproject``/``proj_ra2ll`` leaves one."""
+    """A lon/lat GMT grid, as `grdproject`/`proj_ra2ll` leaves one."""
     xr.DataArray(
         np.asarray(arr, np.float32), coords={"lat": lat, "lon": lon},
         dims=["lat", "lon"], name="z",
@@ -75,11 +74,11 @@ def _write_grd(arr, lon, lat, path):
 
 @pytest.fixture(scope="module")
 def alos_scenes(tmp_path_factory):
-    """Two right-looking scenes over a planted right-lateral patch, as ``.grd``.
+    """Two right-looking scenes over a planted right-lateral patch, as `.grd`.
 
     Written in centimetres and positive *away* from the sensor -- the opposite of
     this package's convention on both counts -- so that loading them correctly
-    exercises ``units`` and ``sign`` rather than passing by coincidence.
+    exercises `units` and `sign` rather than passing by coincidence.
     """
     out = tmp_path_factory.mktemp("alos")
     trace = FaultTrace(_LON, _LAT, name="san_sebastian")
@@ -122,7 +121,7 @@ def _load(scene, **kwargs):
 # -- the reader ---------------------------------------------------------------
 
 def test_read_grd_round_trips_write_grd(tmp_path):
-    """``read_grd`` is the inverse of ``write_grd``, coordinates included."""
+    """`read_grd` is the inverse of `write_grd`, coordinates included."""
     lon = np.linspace(-70.0, -68.0, 24)
     lat = np.linspace(11.0, 10.0, 17)
     values = np.outer(np.sin(lat), np.cos(lon)).astype(np.float32)
@@ -139,9 +138,9 @@ def test_read_grd_round_trips_write_grd(tmp_path):
 
 
 def test_utm_epsg_picks_the_containing_zone():
-    assert utm_epsg(-67.5, 10.5) == 32619        # Venezuela, north
+    assert utm_epsg(-67.5, 10.5) == 32619        # zone 19, north
     assert utm_epsg(-67.5, -10.5) == 32719       # same zone, south
-    assert utm_epsg(95.9, 21.9) == 32646         # Sagaing, Myanmar
+    assert utm_epsg(95.9, 21.9) == 32646         # just west of a zone edge
     assert utm_epsg(96.0, 21.9) == 32647         # a zone starts at its west edge
     assert utm_epsg(-180.0, 0.0) == 32601
     assert utm_epsg(179.9, 0.0) == 32660
@@ -150,7 +149,7 @@ def test_utm_epsg_picks_the_containing_zone():
 # -- the declarations ---------------------------------------------------------
 
 def test_units_and_sign_are_applied_on_load(alos_scenes):
-    """``los_cm.grd`` positive-away becomes metres positive-toward the sensor."""
+    """`los_cm.grd` positive-away becomes metres positive-toward the sensor."""
     *_, scenes = alos_scenes
     raw = read_grd(scenes["desc"]["los"]).values
     los = _load(scenes["desc"]).ds["los"].values
@@ -167,7 +166,7 @@ def test_units_and_sign_are_applied_on_load(alos_scenes):
 
 
 def test_units_and_sign_are_exactly_the_declared_factors(alos_scenes):
-    """Nothing in a ``.grd`` records units or sign, so a wrong declaration is
+    """Nothing in a `.grd` records units or sign, so a wrong declaration is
     silent -- the load succeeds and only the recovered slip gives it away.
 
     Pinned as an exact relation between two loads of the same file, which is what
@@ -230,8 +229,8 @@ def test_bad_declarations_raise(alos_scenes, bad):
 # -- the grid -----------------------------------------------------------------
 
 def test_geographic_grids_are_reprojected_to_metres(alos_scenes):
-    """The quadtree measures ``width_min`` in metres, so degrees cannot be fed to
-    it: ``width_min=1000`` on a lon/lat lattice is a million columns."""
+    """The quadtree measures `width_min` in metres, so degrees cannot be fed to
+    it: `width_min=1000` on a lon/lat lattice is a million columns."""
     *_, scenes = alos_scenes
     stack = _load(scenes["asc"])
     assert stack.epsg == 32619                       # UTM 19N, from the centre
@@ -247,7 +246,7 @@ def test_explicit_epsg_and_resolution_are_honoured(alos_scenes):
 
 
 def test_look_grids_on_a_coarser_lattice_are_resampled(alos_scenes, tmp_path):
-    """``SAT_look`` is often run on a decimated grid, so the components need not
+    """`SAT_look` is often run on a decimated grid, so the components need not
     arrive on the displacement's lattice."""
     *_, scenes = alos_scenes
     coarse = {}
@@ -264,7 +263,7 @@ def test_look_grids_on_a_coarser_lattice_are_resampled(alos_scenes, tmp_path):
 
 
 def test_look_vector_is_unit_length_and_gives_the_incidence_angle(alos_scenes):
-    """``los_up == cos(incidence)`` is the invariant the rest of the package
+    """`los_up == cos(incidence)` is the invariant the rest of the package
     leans on, and only holds for a renormalised vector."""
     *_, scenes = alos_scenes
     ds = _load(scenes["desc"]).ds
@@ -279,8 +278,8 @@ def test_look_vector_is_unit_length_and_gives_the_incidence_angle(alos_scenes):
 
 
 def test_right_looking_passes_reverse_los_east(alos_scenes):
-    """ALOS is right-looking, so ascending ``los_east`` is **negative** -- the
-    opposite of NISAR. ``scene_report``'s geometry check has to agree, which is
+    """ALOS is right-looking, so ascending `los_east` is *negative* -- the
+    opposite of NISAR. `scene_report`'s geometry check has to agree, which is
     what makes it useful on a non-NISAR scene at all."""
     *_, scenes = alos_scenes
     asc = _load(scenes["asc"], direction="ascending", look_direction="right")
@@ -294,7 +293,7 @@ def test_right_looking_passes_reverse_los_east(alos_scenes):
 # -- end to end ---------------------------------------------------------------
 
 def test_recovers_slip_from_alos_style_grids(alos_scenes):
-    """The acceptance test: ``.grd`` files in, the planted slip out.
+    """The acceptance test: `.grd` files in, the planted slip out.
 
     Two right-looking scenes on a lon/lat lattice in centimetres, positive away
     from the sensor. Getting any one of the three declarations wrong changes the

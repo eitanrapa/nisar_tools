@@ -1,26 +1,26 @@
 """Write NISAR L2 GSLC products (spec 1.5.0) as ISCE3 0.25.16 lays them out.
 
 The layout is not guessed: every dataset path, dtype, filter pipeline, fill value
-and attribute type here reproduces what ISCE3's GSLC workflow and ``GslcWriter``
-write, and :func:`decorate_from_spec` applies the official product
-specification XML (``data/nisar_L2_GSLC.xml``, copied verbatim from ISCE3
-v0.25.16, Apache-2.0) exactly as ``check_and_decorate_product_using_specs_xml``
-does. ``scripts/gslc_format_diff.py`` checks a product written here against an
+and attribute type here reproduces what ISCE3's GSLC workflow and `GslcWriter`
+write, and `decorate_from_spec` applies the official product
+specification XML (`data/nisar_L2_GSLC.xml`, copied verbatim from ISCE3
+v0.25.16, Apache-2.0) exactly as `check_and_decorate_product_using_specs_xml`
+does. `tests/gslc_format_diff.py` checks a product written here against an
 ASF-distributed GSLC.
 
 Traps this reproduces on purpose, because a reader may depend on them:
 
-- Every string attribute is fixed-length ``bytes``, never ``str``.
-- The image and ``mask`` datasets carry a real HDF5 fill value (NaN / 255);
-  metadata LUTs carry only a ``_FillValue`` *attribute* over a zero fill.
-- ``frequencyB/inputDataExceptionMask`` is on **frequency A's** grid: ISCE3's
+- Every string attribute is fixed-length `bytes`, never `str`.
+- The image and `mask` datasets carry a real HDF5 fill value (NaN / 255);
+  metadata LUTs carry only a `_FillValue` *attribute* over a zero fill.
+- `frequencyB/inputDataExceptionMask` is on **frequency A's** grid: ISCE3's
   writer geocodes it without a frequency, which defaults to the first one.
-- Cube layers get a float64 NaN ``_FillValue`` whatever their dtype, and
-  float32 ``valid_min``/``valid_max`` (the spec writes those in the dataset's
+- Cube layers get a float64 NaN `_FillValue` whatever their dtype, and
+  float32 `valid_min`/`valid_max` (the spec writes those in the dataset's
   own type).
 
-Image chunks are written with ``write_direct_chunk`` after shuffle + deflate in
-the caller's thread -- the mirror image of :class:`nisar_tools.gslc.DirectChunkReader`
+Image chunks are written with `write_direct_chunk` after shuffle + deflate in
+the caller's thread -- the mirror image of `nisar_tools.gslc.DirectChunkReader`
 -- because h5py compresses under its global lock and a frame is ~10 GB of
 compressed data per polarization.
 """
@@ -48,7 +48,7 @@ COMPACT_POLS = ["RH", "RV"]
 CROSSTALK_DATASETS = ["txHorizontalCrosspol", "txVerticalCrosspol",
                       "rxHorizontalCrosspol", "rxVerticalCrosspol"]
 
-#: ``cf_units_dict`` in ISCE3's writer: spec units -> CF/UDUNITS spelling.
+#: `cf_units_dict` in ISCE3's writer: spec units -> CF/UDUNITS spelling.
 CF_UNITS = {
     "1": "1", "DN": "1", "unitless": "1", "seconds": "seconds", "meters": "meters",
     "degrees": "degrees", "hertz": "hertz", "radians": "radians",
@@ -65,8 +65,8 @@ CF_UNITS = {
 def create_product_file(path):
     """Open a new product with ISCE3's paged file-space strategy (4 MiB pages).
 
-    Also commits the ``complex64`` named datatype at the root, as
-    ``get_complex_output_dtype`` does "to teach tools like GDAL/netCDF" about it.
+    Also commits the `complex64` named datatype at the root, as
+    `get_complex_output_dtype` does "to teach tools like GDAL/netCDF" about it.
     """
     f = h5py.File(str(path), "w", fs_strategy="page", fs_persist=True,
                   fs_threshold=1, fs_page_size=PAGE_SIZE)
@@ -82,7 +82,7 @@ def _to_bytes(value):
 
 
 def set_value(f, path, data, format_function=None):
-    """``BaseWriterSingleInput.set_value``: strings/bools become fixed bytes."""
+    """`BaseWriterSingleInput.set_value`: strings/bools become fixed bytes."""
     if isinstance(data, (np.bytes_, np.ndarray)) and getattr(data, "dtype", None) is not None \
             and data.dtype.char == "S" and data.shape == ():
         data = np.bytes_(data).decode(errors="replace").rstrip("\x00")
@@ -105,7 +105,7 @@ def set_value(f, path, data, format_function=None):
 
 def copy_from(src, f, dst_path, src_path=None, default=None,
               skip_if_not_present=False, format_function=None):
-    """``copy_from_input``: value and every attribute (str attributes -> bytes)."""
+    """`copy_from_input`: value and every attribute (str attributes -> bytes)."""
     src_path = src_path or dst_path
     if src_path not in src:
         if default is None:
@@ -127,7 +127,7 @@ def copy_from(src, f, dst_path, src_path=None, default=None,
 
 
 def projection_attrs(epsg):
-    """``build_projection_dataset_attrs_dict`` (UTM, polar stereographic, 4326)."""
+    """`build_projection_dataset_attrs_dict` (UTM, polar stereographic, 4326)."""
     from osgeo import osr
 
     osr.UseExceptions()
@@ -168,9 +168,9 @@ def projection_attrs(epsg):
 
 
 def set_geo_info(f, root, grid, heights=None, cube=False, save_spacing=True):
-    """``set_get_geo_info``: coordinates, spacings and the projection dataset.
+    """`set_get_geo_info`: coordinates, spacings and the projection dataset.
 
-    Returns ``(yds, xds)``, or ``(zds, yds, xds)`` with ``heights``.
+    Returns `(yds, xds)`, or `(zds, yds, xds)` with `heights`.
     """
     group = f.require_group(root)
     units = "meters" if grid.epsg != 4326 else None
@@ -239,7 +239,7 @@ def _chunks(shape, chunk=CHUNK):
 
 
 def create_image_datasets(f, frequency, grid, polarizations, compression_level=1):
-    """``prep_gslc_dataset`` for one frequency: images, mask, coordinates."""
+    """`prep_gslc_dataset` for one frequency: images, mask, coordinates."""
     root = f"{PRODUCT}/grids/frequency{frequency}"
     yds, xds = set_geo_info(f, root, grid)
     group = f[root]
@@ -277,7 +277,7 @@ def create_image_datasets(f, frequency, grid, polarizations, compression_level=1
 
 
 class ChunkWriter:
-    """Compress 2-D chunks off the h5py lock, then ``write_direct_chunk`` them.
+    """Compress 2-D chunks off the h5py lock, then `write_direct_chunk` them.
 
     HDF5 applies shuffle (by element size) then deflate on write; a chunk is
     always stored at full chunk size, so edge chunks are padded with the
@@ -308,7 +308,7 @@ class ChunkWriter:
         return bool((block == self.fill).all())
 
     def write(self, row, col, block):
-        """Write the chunk whose top-left pixel is ``(row, col)``."""
+        """Write the chunk whose top-left pixel is `(row, col)`."""
         cy, cx = self.chunks
         if row % cy or col % cx:
             raise ValueError("ChunkWriter.write needs chunk-aligned offsets")
@@ -334,7 +334,7 @@ _H5_WRITE_LOCK = threading.RLock()
 
 
 class ComplexStats:
-    """``StatsRealImagFloat32``, mergeable across chunks.
+    """`StatsRealImagFloat32`, mergeable across chunks.
 
     Min, max and the sample standard deviation follow ISCE3 exactly. The mean
     is accumulated in float64: ISCE3's is a float32 running mean, which over a
@@ -384,11 +384,11 @@ class ComplexStats:
 # Metadata LUT datasets (save_hdf5_dataset)
 # ---------------------------------------------------------------------------
 def write_lut(f, root, name, data, grid, compute_stats=False, fill_value=None):
-    """``save_hdf5_dataset`` for one geocoded LUT band.
+    """`save_hdf5_dataset` for one geocoded LUT band.
 
-    gzip 9, no shuffle, chunks ``min(512, dim)``; attributes ``grid_mapping``,
-    ``_FillValue`` (NaN for float, NaN+NaNj for complex, none for integers) and,
-    with ``compute_stats``, ISCE3's stats cast to the dataset's own type.
+    gzip 9, no shuffle, chunks `min(512, dim)`; attributes `grid_mapping`,
+    `_FillValue` (NaN for float, NaN+NaNj for complex, none for integers) and,
+    with `compute_stats`, ISCE3's stats cast to the dataset's own type.
     """
     yds, xds = set_geo_info(f, root, grid, save_spacing=False)
     group = f[root]
@@ -427,9 +427,9 @@ def write_lut(f, root, name, data, grid, compute_stats=False, fill_value=None):
 
 
 def create_cube_datasets(f, root, grid, heights, epoch, compression_level=1):
-    """``add_radar_grid_cubes_to_hdf5``'s dataset creation. Returns name -> dataset.
+    """`add_radar_grid_cubes_to_hdf5`'s dataset creation. Returns name -> dataset.
 
-    ``epoch`` is the radar grid's reference epoch, for the azimuth-time units.
+    `epoch` is the radar grid's reference epoch, for the azimuth-time units.
     """
     zds, yds, xds = set_geo_info(f, root, grid, heights=heights, cube=True)
     group = f[root]
@@ -486,7 +486,7 @@ def create_cube_datasets(f, root, grid, heights, epoch, compression_level=1):
 # Orbit
 # ---------------------------------------------------------------------------
 def write_orbit(f, orbit, root=f"{PRODUCT}/metadata/orbit"):
-    """``isce3::core::saveToH5(Orbit)`` + the spec's descriptions."""
+    """`isce3::core::saveToH5(Orbit)` + the spec's descriptions."""
     group = f.require_group(root)
     for name in ("time", "position", "velocity", "orbitType", "interpMethod"):
         if name in group:
@@ -506,7 +506,7 @@ def write_orbit(f, orbit, root=f"{PRODUCT}/metadata/orbit"):
 # Specification decoration
 # ---------------------------------------------------------------------------
 def decorate_from_spec(f, spec_path=SPEC_XML):
-    """``check_and_decorate_product_using_specs_xml``: root attributes, then
+    """`check_and_decorate_product_using_specs_xml`: root attributes, then
     units / long_name / standard_name / valid range / description per dataset.
     """
     spec = ET.ElementTree(file=str(spec_path))

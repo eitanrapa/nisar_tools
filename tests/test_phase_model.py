@@ -1,4 +1,4 @@
-"""A phase model taken out before multilooking and added back after unwrapping (2026-10-14).
+"""A phase model taken out before multilooking and added back after unwrapping.
 
 For a coseismic pair the near-fault fringes are so dense that they cancel inside the looks and leave SNAPHU a step
 to jump; a model from pixel offsets removed at full resolution keeps the looks coherent and the residual smooth.
@@ -69,4 +69,4 @@ def test_cost_mode_is_checked_and_defo_runs(tmp_path):
     import json
 
     assert json.loads(defo.ds.attrs["params"])["cost"] == "defo"
-    assert "cost" not in json.loads(smooth.ds.attrs["params"])          # the default keeps old stores' hashes
+    assert "cost" not in json.loads(smooth.ds.attrs["params"])          # the default is not recorded in the hash

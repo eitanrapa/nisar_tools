@@ -2,12 +2,10 @@
 
 An unwrapper propagates phase along arcs between adjacent pixels, so a region
 with no path to the main body carries no recoverable ambiguity however large it
-is -- the criterion is connectivity, not size. On the real coastal frame that
-motivated this, a 4-connected labelling found 29 components: one mainland of
-36,018,513 px and 28 strays of 16..1530 px totalling 6,369 px (0.018% of valid).
-The distribution is bimodal with a four-order-of-magnitude gap, which is why
-keep-the-largest is unambiguous there and why a size threshold was the wrong
-instrument (a threshold of 32 would have removed 4 components and 80 pixels).
+is -- the criterion is connectivity, not size. On a coastal frame the components
+are typically one mainland and strays several orders of magnitude smaller, so
+keep-the-largest is unambiguous, while a size threshold small enough to be safe
+leaves most of the strays in.
 """
 
 import numpy as np
@@ -89,9 +87,9 @@ def test_single_component_is_an_exact_no_op():
 
 def test_a_lone_component_below_min_size_is_still_dropped():
     """"Only one component" short-circuits keep-largest, where the sole component
-    is trivially the largest -- but under ``min_size`` it still has to clear the
+    is trivially the largest -- but under `min_size` it still has to clear the
     threshold. Under a halo each block sees only its own fragment, so a shortcut
-    taken here silently keeps everything (it did, until this test)."""
+    taken here would silently keep everything."""
     field = np.full((20, 20), np.nan, np.float32)
     field[5:8, 5:8] = 1.0  # a single 9-px component
 
@@ -223,7 +221,7 @@ def test_a_smaller_halo_really_does_break_it():
 
 def test_keep_largest_depth_spans_the_raster():
     """Which component is largest is global, so there is no halo that works --
-    the depth has to collapse ``halo_planes`` to one whole plane per task."""
+    the depth has to collapse `halo_planes` to one whole plane per task."""
     assert unconnected_regions_depth(None, 120, 140) >= 140
     assert unconnected_regions_depth(32, 120, 140) == 32
 
@@ -265,7 +263,7 @@ def test_interferogram_method_is_chunk_independent(chunks):
 
 
 def test_interferogram_method_masks_coherence_with_the_igram():
-    """Both variables have to follow one footprint, as ``mask_water`` does --
+    """Both variables have to follow one footprint, as `mask_water` does --
     coherence carries no NaN of its own (it is exactly 0.0 outside the swath),
     so it follows the igram rather than being labelled separately."""
     out = _igram_stack().remove_unconnected_regions()
@@ -324,8 +322,8 @@ def test_params_reach_the_attrs():
 
 
 def test_untouched_stack_keeps_its_persist_hash(tmp_path):
-    """Backward compatibility: the provenance is folded into the hash only once
-    applied, so every existing igrams store stays readable."""
+    """The provenance is folded into the hash only once applied, so an untouched
+    stack lands on the same store."""
     ws = Workspace(tmp_path)
     stack = _igram_stack()
     assert "unconnected_removed" not in stack.ds.attrs

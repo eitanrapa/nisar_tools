@@ -1,9 +1,9 @@
-"""The numpy port of ISCE3's PyCuAmpcor (``nisar_tools.ampcor``).
+"""The numpy port of ISCE3's PyCuAmpcor (`nisar_tools.ampcor`).
 
 Each stage is checked against a direct evaluation of what the CUDA kernel computes, and the
 whole correlator against a known sub-pixel shift of band-limited speckle. The end-to-end
 agreement with a real NISAR ROFF (99.7-99.9% of windows bit-identical in pixels, the rest
-one 1/64-pixel step apart) is in the docstring of ``nisar_tools.roff``; it needs the granules.
+one 1/64-pixel step apart) needs the granules, so it is not tested here.
 """
 
 import numpy as np
@@ -39,7 +39,7 @@ def test_normalise_is_the_ncc():
 
 
 def test_adjust_offset_follows_dev_adjustOffset():
-    # cuOffset.cu's examples (old range 32, new range 4); note the CODE gives shift +2 at the
+    # cuOffset.cu's examples (old range 32, new range 4); note the code gives shift +2 at the
     # left edge where its comment says -2 -- the port keeps the code.
     start, shift = ac._adjust(np.array([40, 2, 64]), 32, 4)
     assert start.tolist() == [36, 0, 56]

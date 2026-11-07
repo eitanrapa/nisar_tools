@@ -4,7 +4,7 @@ The mask is computed once per grid (it is small at the multilooked
 resolution), optionally cached in the workspace, and applied lazily by
 broadcasting over the pair/time dimension.
 
-``pygmt`` is an optional dependency (it needs the GMT native library), so it is
+`pygmt` is an optional dependency (it needs the GMT native library), so it is
 imported lazily inside the function rather than at module load.
 """
 
@@ -23,21 +23,20 @@ from . import geo
 _MASK_OVERSAMPLE = 2
 
 #: Warn above this many GMT nodes (~200 MB of float32, plus a reproject of the
-#: same order). The mask tracks the *target* pixel, so this is only reachable at
-#: or near a GSLC's native posting -- see :func:`_warn_if_oversized`.
+#: same order). The mask tracks the target pixel, so this is only reachable at
+#: or near a GSLC's native posting; see `_warn_if_oversized`.
 _MASK_NODE_BUDGET = 5e7
 
 
 def grid_spacing_arg(x_coords, y_coords, epsg_code, oversample=_MASK_OVERSAMPLE):
-    """GMT ``-I`` increment that resolves the coastline at this grid's pixel.
+    """GMT `-I` increment that resolves the coastline at this grid's pixel.
 
-    **GMT's ``e`` suffix means metres, not arc-seconds** — a plain number is
-    degrees, ``s`` is arc-seconds. Getting that wrong is expensive: the old
-    default of ``"5e"`` read as "5 arc-seconds" but asked GMT for a *5 metre*
-    coastline, so the mask was built at the GSLC's native resolution however
-    much the interferogram had been multilooked. On a coastal crop that was
-    ~1000x more nodes than the grid could represent, and about a minute of
-    GMT time per call.
+    The increment is the grid's smaller pixel side over `oversample`. GMT's `e`
+    suffix means metres, not arc-seconds (a plain number is degrees, `s` is
+    arc-seconds), so a projected grid gets `"<step>e"` and a geographic one a
+    bare number of degrees. Tracking the target pixel matters: a coastline built
+    at a GSLC's native posting for a multilooked stack has orders of magnitude
+    more nodes than the grid can represent.
     """
     import pyproj
 
@@ -61,10 +60,10 @@ _M_PER_DEG = 111_000.0
 
 
 def _parse_increment(spacing):
-    """GMT ``-I`` increment as ``(value, unit)``, or ``None`` if not a length.
+    """GMT `-I` increment as `(value, unit)`, or `None` if not a length.
 
-    A bare number is degrees, ``s`` is arc-seconds and ``e`` is metres. Anything
-    else (``m``, ``k``, GMT's ``+n`` node counts) is left alone rather than
+    A bare number is degrees, `s` is arc-seconds and `e` is metres. Anything
+    else (`m`, `k`, GMT's `+n` node counts) is left alone rather than
     guessed at.
     """
     text = str(spacing).strip()
@@ -81,16 +80,16 @@ def _parse_increment(spacing):
 def _warn_if_oversized(region, spacing):
     """Warn before asking GMT for a coastline far finer than it carries.
 
-    :func:`grid_spacing_arg` tracks the *target* pixel, which is the right rule
-    for a multilooked stack and an expensive one at a GSLC's native posting: the
-    node count goes as the inverse square of the increment, so the same crop that
-    needs 2.7e5 nodes at 150 m needs **2.4e8** at 5 m, and a whole frame needs
-    1.1e10 (~44 GB of float32). GSHHG carries nothing like that much shoreline
-    detail, so the extra nodes buy no accuracy at all.
+    `grid_spacing_arg` tracks the target pixel, which is the right rule for a
+    multilooked stack and an expensive one at a GSLC's native posting: the node
+    count goes as the inverse square of the increment (900x from 150 m to 5 m),
+    and a whole frame at 5 m needs ~1e10 nodes (~44 GB of float32). GSHHG
+    carries nothing like that much shoreline detail, so the extra nodes buy no
+    accuracy.
 
     A warning rather than a floor: masking at native resolution is a legitimate
     thing to ask for, and quietly coarsening it would move the coastline by up to
-    half a pixel with nothing to show for it. The fix is to pass ``spacing``.
+    half a pixel. The fix is to pass `spacing`.
     """
     parsed = _parse_increment(spacing)
     if parsed is None:
@@ -126,17 +125,17 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
                     resolution="f", spacing=None):
     """Build a land=1 / water=NaN mask aligned to the given native grid.
 
-    Returns a 2D :class:`xarray.DataArray` on ``(y, x)``.
+    Returns a 2D `xarray.DataArray` on `(y, x)`.
 
-    ``resolution`` is the GMT/GSHHG coastline resolution
-    (``"f"``/``"h"``/``"i"``/``"l"``/``"c"``, full→crude). ``"f"`` is the most
+    `resolution` is the GMT/GSHHG coastline resolution
+    (`"f"`/`"h"`/`"i"`/`"l"`/`"c"`, full to crude). `"f"` is the most
     accurate but needs the large full-resolution GSHHG dataset downloaded; if
     that download is unavailable or its cache is corrupt, pass a coarser
-    resolution such as ``"i"`` (intermediate), which is more than adequate for
+    resolution such as `"i"` (intermediate), which is more than adequate for
     masking geocoded SAR and downloads reliably.
 
-    ``spacing`` is the GMT increment for the coastline grid. Leave it ``None``
-    to track the target grid (see :func:`grid_spacing_arg`) — the mask only has
+    `spacing` is the GMT increment for the coastline grid. Leave it `None`
+    to track the target grid (see `grid_spacing_arg`): the mask only has
     to resolve the coastline at the pixel size it will be sampled onto, so a
     multilooked stack needs a far coarser mask than a full-resolution one.
     """
@@ -162,9 +161,8 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
     _warn_if_oversized(region_latlon, spacing)
 
     # maskvalues=[wet, dry]: ocean -> NaN, land -> 1, so multiplying a raster
-    # by this mask keeps land and blanks water. (pygmt >= 0.12 renamed
-    # mask_values -> maskvalues and split border handling into bordervalues;
-    # the default bordervalues treats coastline nodes as land.)
+    # by this mask keeps land and blanks water. The default bordervalues
+    # (pygmt >= 0.12) treats coastline nodes as land.
     mask_latlon = pygmt.grdlandmask(
         region=region_latlon,
         spacing=spacing,
@@ -194,15 +192,13 @@ def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
                         name=None, resolution="f", spacing=None):
     """Return a water mask, computing and caching it in the workspace if given.
 
-    ``resolution``/``spacing`` are forwarded to :func:`make_water_mask`. The
+    `resolution`/`spacing` are forwarded to `make_water_mask`. The
     cache is keyed on the full grid identity (EPSG, shape, origin) and the
     mask parameters, so a different crop or resolution never reuses a stale
     mask.
 
-    ``name`` defaults to one derived from that same key, so masks for different
-    grids coexist instead of evicting each other. A single fixed name made the
-    cache one slot wide: alternating between two grids recomputed every time,
-    because each store overwrote the other.
+    `name` defaults to one derived from that same key, so masks for different
+    grids coexist instead of evicting each other.
     """
     from .workspace import hash_params
 
@@ -225,8 +221,8 @@ def water_mask_for_grid(x_coords, y_coords, epsg_code, workspace=None,
         name = f"water_mask_{hash_params(key)[:12]}"
     params = {"stage": name, **key}
     if workspace is not None and workspace.has(name, params):
-        # ``reset_coords`` also cleans masks cached before ``make_water_mask``
-        # stripped the ``spatial_ref`` coordinate.
+        # reset_coords also strips the spatial_ref coordinate from masks cached
+        # by versions that kept it.
         return workspace.load(name)["mask"].reset_coords(drop=True)
 
     mask = make_water_mask(

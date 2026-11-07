@@ -1,8 +1,8 @@
 """Tests for the unwrapped-phase cleaning pipeline and its kernels.
 
-Covers the scipy port of ``filt_gunw.csh`` / ``h52grd.py``: edge masking,
+Covers the scipy port of a GMT-based GUNW cleaning recipe: edge masking,
 tension-spline residual outlier rejection, polynomial/spline deramping, and
-phase-screen (ionosphere) subtraction -- all as lazy ``UnwrappedStack`` methods,
+phase-screen (ionosphere) subtraction -- all as lazy `UnwrappedStack` methods,
 plus the underlying numpy kernels.
 """
 
@@ -30,10 +30,9 @@ from nisar_tools._kernels import (
 
 # -- chunk decomposition ---------------------------------------------------
 #
-# These kernels used to force chunk({"pair": 1, "y": -1, "x": -1}), so a stack ran
-# on as many cores as it had pairs -- one or two, typically -- and each task held a
-# whole plane. They now decompose spatially; these tests pin that the answer did
-# not move when they did.
+# These kernels decompose spatially instead of taking one whole plane per task,
+# which would run a stack on as many cores as it has pairs -- one or two,
+# typically. These tests pin that the decomposed answer is the whole-plane one.
 
 def _ragged_field(shape=(3, 64, 80), seed=0):
     """A stack with a sheared invalid footprint and an interior hole."""
@@ -49,7 +48,7 @@ def _ragged_field(shape=(3, 64, 80), seed=0):
 @pytest.mark.parametrize("edge_pixels", [0, 1, 3, 8])
 @pytest.mark.parametrize("chunks", [(1, 16, 20), (1, 64, 80), (1, 13, 11)])
 def test_mask_edges_halo_is_exact(edge_pixels, chunks):
-    """``edge_pixels`` cross erosions reach exactly ``edge_pixels`` px, so a
+    """`edge_pixels` cross erosions reach exactly `edge_pixels` px, so a
     matching halo gives the identical result, seams and all."""
     da = pytest.importorskip("dask.array")
     field = _ragged_field()
@@ -65,7 +64,7 @@ def test_mask_edges_halo_is_exact(edge_pixels, chunks):
 @pytest.mark.parametrize("scale,iterations", [(4.0, 1), (4.0, 2), (8.0, 2)])
 def test_remove_outliers_halo_is_exact(scale, iterations):
     """scipy's Gaussian truncates at 4 sigma, so the smooth surface has *finite*
-    support and ``remove_outliers_depth`` covers it exactly -- per iteration,
+    support and `remove_outliers_depth` covers it exactly -- per iteration,
     because each pass re-smooths the previous pass's NaN pattern."""
     da = pytest.importorskip("dask.array")
     field = _ragged_field(shape=(2, 96, 96), seed=1) * 0.2
@@ -124,7 +123,7 @@ def test_deramp_poly_chunked_matches_whole_plane(degree, chunks, masked):
 
 def test_deramp_poly_chunked_handles_an_unconstrainable_plane():
     """Fewer valid pixels than coefficients gives an all-NaN plane, matching
-    ``poly_surface``'s whole-plane guard."""
+    `poly_surface`'s whole-plane guard."""
     da = pytest.importorskip("dask.array")
     field = np.full((1, 20, 20), np.nan)
     field[0, 0, 0] = 1.0
@@ -139,7 +138,7 @@ def test_cleaning_methods_do_not_collapse_spatial_chunks():
     A whole-plane input is the realistic case -- a persisted stack arrives on the
     2048-px disk chunk, and a multilooked raster is smaller than that -- so this
     starts from one chunk and checks the stage splits it. The exact block count is
-    a function of ``os.cpu_count()``, so only "more than one" is asserted.
+    a function of `os.cpu_count()`, so only "more than one" is asserted.
     """
     da = pytest.importorskip("dask.array")
     ny = nx = 512
@@ -227,7 +226,7 @@ def test_mask_edges_along_track_handles_empty_and_ragged_rows():
 def _sheared_swath(ny=12, nx=20, run=12, step=-1):
     """A swath whose valid run walks across the grid as the row index grows.
 
-    ``step=-1`` walks it *left*, which is what makes a row scan and a column scan
+    `step=-1` walks it *left*, which is what makes a row scan and a column scan
     interact: trimming the left edge moves where each column's data starts.
     """
     field = np.full((ny, nx), np.nan, np.float32)
@@ -243,7 +242,7 @@ def _finite_columns(row):
 
 def test_mask_edges_takes_the_sides_one_at_a_time():
     """The point of naming a side: trim the near-range boundary and leave the
-    far one, or reach an azimuth end that ``along_track`` never touches."""
+    far one, or reach an azimuth end that `along_track` never touches."""
     field = _sheared_swath()
     ref = _finite_columns(field[4])
 
@@ -436,8 +435,8 @@ def test_mask_edges_trims_one_named_side(gunw_factory):
 
 
 def test_mask_edges_records_the_sides_it_trimmed(gunw_factory):
-    """Provenance feeds the persist hash, so it has to name the sides -- and
-    still record the two original modes exactly as it did before they existed."""
+    """Provenance feeds the persist hash, so it has to name the sides exactly as
+    they were given."""
     u = UnwrappedStack.from_gunw_file(gunw_factory(ny=40, nx=40, nan_border=2))
 
     for edges in ("along_track", "all", "left"):

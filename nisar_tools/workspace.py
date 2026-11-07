@@ -1,6 +1,6 @@
 """Zarr-backed workspace: stage persistence, parameter-hashed resume.
 
-A :class:`Workspace` owns a directory of Zarr stores, one per pipeline stage.
+A `Workspace` owns a directory of Zarr stores, one per pipeline stage.
 Each store records the parameters that produced it, hashed, so a re-run can
 cheaply decide whether a finished stage can be reused or must be recomputed.
 
@@ -23,7 +23,7 @@ import xarray as xr
 
 
 def _atomic_write_text(path, text):
-    """Replace ``path``'s contents in one step, never leaving it half-written."""
+    """Replace `path`'s contents in one step, never leaving it half-written."""
     path = Path(path)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
     try:
@@ -48,12 +48,12 @@ except Exception:  # pragma: no cover - zarr always present in practice
 
 
 def _missing_chunks(path):
-    """``{array: (missing, expected)}`` for the arrays of a store whose chunk files are absent.
+    """`{array: (missing, expected)}` for the arrays of a store whose chunk files are absent.
 
     zarr-python 2 writes every chunk, empty ones included, so an absent chunk is a write that never
     got there -- and reads back as the fill value, or as junk where there is none (a complex64
-    ``igram`` read as 1.4e-45+0j, A004 2026-10-14). zarr-python 3 skips chunks equal to the fill
-    value, so there an absent chunk proves nothing and this returns ``{}``.
+    `igram` of 1.4e-45+0j, for example). zarr-python 3 skips chunks equal to the fill
+    value, so there an absent chunk proves nothing and this returns `{}`.
     """
     if _ZARR_MAJOR is None or _ZARR_MAJOR >= 3:
         return {}
@@ -74,10 +74,10 @@ def _missing_chunks(path):
 def _default_compressor():
     """Codec for stage data variables.
 
-    Zarr v2's default is ``Blosc(lz4, clevel=5, shuffle)``, which on SAR data
-    earns almost nothing — measured 1.07:1 on a complex64 stack — while costing
-    about 2.5x the write time. Dropping to ``clevel=1`` measured roughly twice
-    the throughput at the same ratio. ``shuffle`` is kept because the float32
+    Zarr v2's default is `Blosc(lz4, clevel=5, shuffle)`, which on SAR data
+    earns almost nothing (about 1.07:1 on a complex64 stack) while costing
+    about 2.5x the write time. `clevel=1` gives roughly twice the throughput
+    at the same ratio. `shuffle` is kept because the float32
     stages (unwrapped phase, coherence) do compress, even though complex64
     noise does not.
     """
@@ -89,11 +89,11 @@ def _default_compressor():
 
 
 def _encoding_for(ds):
-    """Per-data-variable compressor encoding for ``to_zarr``.
+    """Per-data-variable compressor encoding for `to_zarr`.
 
     Coordinates are left alone (they are tiny), and the codec is deliberately
     absent from the params hash: it does not change the data, so switching it
-    must not invalidate a finished stage. Stores written with the old default
+    must not invalidate a finished stage. Stores written with another codec
     stay readable — Zarr records the codec per array.
     """
     compressor = _default_compressor()
@@ -122,8 +122,8 @@ def _json_default(obj):
 
 
 # Attributes that lead from a dask task down to the array it reads. Covers the
-# xarray lazy-indexing wrappers (``array``), xarray's ZarrArrayWrapper
-# (``_array``) and dask's task objects (``func``/``args``/``kwargs``).
+# xarray lazy-indexing wrappers (`array`), xarray's ZarrArrayWrapper
+# (`_array`) and dask's task objects (`func`/`args`/`kwargs`).
 _SOURCE_ATTRS = ("array", "_array", "func", "args", "kwargs")
 
 # Scalars and buffers that can never contain a store reference.
@@ -133,7 +133,7 @@ _LEAF_TYPES = (str, bytes, int, float, bool, complex, type(None), slice)
 def _resolve_store_path(store):
     """Filesystem path behind a Zarr store, unwrapping wrapper stores.
 
-    ``open_zarr(consolidated=True)`` hands back a ConsolidatedMetadataStore
+    `open_zarr(consolidated=True)` hands back a ConsolidatedMetadataStore
     wrapping the real one, so follow the chain a few links.
     """
     for _ in range(6):
@@ -156,16 +156,16 @@ def _resolve_store_path(store):
 
 
 def _zarr_source_paths(ds, per_layer=8, max_nodes=20000):
-    """Resolved paths of the Zarr stores ``ds`` would still read from lazily.
+    """Resolved paths of the Zarr stores `ds` would still read from lazily.
 
     A dataset opened from Zarr keeps that store alive inside its lazy data — in
     a dask graph when chunked, in xarray's indexing wrappers when not — so
     deleting the store before the write computes silently corrupts the result.
 
-    Only *lazy* data counts. ``ds.encoding["source"]`` survives
-    :meth:`~xarray.Dataset.compute`, so it would flag an in-memory dataset that
+    Only *lazy* data counts. `ds.encoding["source"]` survives
+    `xarray.Dataset.compute`, so it would flag an in-memory dataset that
     is perfectly safe to write back; conversely xarray drops encoding whenever a
-    dataset is rebuilt from its variables, which :meth:`GSLCStack.merge` and
+    dataset is rebuilt from its variables, which `GSLCStack.merge` and
     interferogram formation both do. The data itself is the reliable signal.
 
     Dask graphs are sampled a few tasks per layer rather than walked in full: a
@@ -173,7 +173,7 @@ def _zarr_source_paths(ds, per_layer=8, max_nodes=20000):
     fraction of the work on a large stack.
 
     Best effort by design. Any failure returns what was found so far, because a
-    missed source only restores the old (silently lossy) behaviour, whereas a
+    missed source only leaves that write unguarded, whereas a
     false positive would refuse a write that is perfectly safe.
     """
     import numpy as np
@@ -199,7 +199,7 @@ def _zarr_source_paths(ds, per_layer=8, max_nodes=20000):
                     paths.add(resolved)
                 continue
             # Real buffers are leaves. Note that xarray's lazy wrappers also
-            # expose ``shape``, so only concrete arrays may be skipped here.
+            # expose `shape`, so only concrete arrays may be skipped here.
             if isinstance(obj, (np.ndarray, np.generic)) or isinstance(obj, _LEAF_TYPES):
                 continue
             if isinstance(obj, (list, tuple, set, frozenset)):
@@ -245,9 +245,9 @@ def _zarr_source_paths(ds, per_layer=8, max_nodes=20000):
 
 
 def _check_not_reading_target(ds, target, name):
-    """Refuse to delete a store that ``ds`` is still lazily reading from.
+    """Refuse to delete a store that `ds` is still lazily reading from.
 
-    :meth:`Workspace.store` removes the target directory *before* ``to_zarr``
+    `Workspace.store` removes the target directory *before* `to_zarr`
     computes, so if the dataset's graph reads from that same store the delete
     races the reads. That does not raise on its own — it yields a
     correctly-shaped array with a varying fraction of pixels silently turned to
@@ -291,7 +291,7 @@ class Workspace:
 
     # -- paths -------------------------------------------------------------
     def path(self, name):
-        """Filesystem path of the Zarr store for stage ``name``."""
+        """Filesystem path of the Zarr store for stage `name`."""
         return self.workdir / f"{name}.zarr"
 
     def _done_path(self, name):
@@ -311,7 +311,7 @@ class Workspace:
             ds.close()
 
     def has(self, name, params):
-        """True if stage ``name`` exists, was built with ``params`` and is complete."""
+        """True if stage `name` exists, was built with `params` and is complete."""
         if not self.exists(name):
             return False
         if self.stored_params_hash(name) != hash_params(params):
@@ -320,9 +320,9 @@ class Workspace:
 
     # -- whole-dataset store / load ---------------------------------------
     def store(self, name, ds, params, overwrite=False):
-        """Write ``ds`` to the stage store and return the reopened lazy dataset.
+        """Write `ds` to the stage store and return the reopened lazy dataset.
 
-        Reopening from Zarr (rather than returning ``ds``) severs any upstream
+        Reopening from Zarr (rather than returning `ds`) severs any upstream
         dependency, e.g. open HDF5 file handles, and gives downstream stages
         well-chunked local reads.
         """
@@ -351,8 +351,8 @@ class Workspace:
         ds.attrs["params_hash"] = hash_params(params)
         encoding = _encoding_for(ds)
         # Written beside the target and renamed into place once complete: to_zarr writes the
-        # metadata -- params_hash included -- before the chunks, so a write killed midway used to
-        # leave a store the next run took as finished. A leftover .partial is an abandoned write.
+        # metadata -- params_hash included -- before the chunks, so a write killed midway in place
+        # would leave a store the next run takes as finished. A leftover .partial is an abandoned write.
         partial = target.with_name(target.name + ".partial")
         if partial.exists():
             shutil.rmtree(partial)
@@ -365,12 +365,12 @@ class Workspace:
         return self.load(name)
 
     def load(self, name):
-        """Open stage ``name`` lazily, with its CRS coordinate restored.
+        """Open stage `name` lazily, with its CRS coordinate restored.
 
-        Goes through :func:`~nisar_tools._base.open_stage` rather than
-        ``xr.open_zarr`` because ``store`` returns ``load``'s result -- so this
+        Goes through `nisar_tools._base.open_stage` rather than
+        `xr.open_zarr` because `store` returns `load`'s result -- so this
         is the one place every persisted stage is reopened, including the one
-        handed straight back from ``persist``.
+        handed straight back from `persist`.
         """
         from ._base import open_stage
 
@@ -391,12 +391,12 @@ class Workspace:
     def init_store(self, name, template, params, overwrite=False, source=None):
         """Create a metadata-only store so slices can be written by region.
 
-        ``template`` is a lazy dataset with the final shape, dims, chunks and
-        dtypes; only its metadata is written here (``compute=False``).
+        `template` is a lazy dataset with the final shape, dims, chunks and
+        dtypes; only its metadata is written here (`compute=False`).
 
-        ``source`` is the dataset that will be *read* while this store is being
+        `source` is the dataset that will be *read* while this store is being
         filled in, if any. It is checked against the target for the same
-        read-what-you-delete hazard :meth:`store` guards.
+        read-what-you-delete hazard `store` guards.
         """
         target = self.path(name)
         if target.exists():
@@ -424,7 +424,7 @@ class Workspace:
         self._done_path(name).write_text(json.dumps({"pairs_done": []}))
 
     def write_region(self, name, ds, region):
-        """Write a slice of ``ds`` into an initialised store at ``region``."""
+        """Write a slice of `ds` into an initialised store at `region`."""
         ds.to_zarr(
             self.path(name), region=region, consolidated=False, **_ZARR_KWARGS
         )
@@ -436,7 +436,7 @@ class Workspace:
         zarr.consolidate_metadata(str(self.path(name)))
 
     def mark_pair_done(self, name, pair):
-        """Record that ``pair`` is written, so an interrupted run can resume.
+        """Record that `pair` is written, so an interrupted run can resume.
 
         Read-modify-write, so it takes the workspace lock: the unwrap stage calls
         this from every worker thread when pairs run concurrently, and an

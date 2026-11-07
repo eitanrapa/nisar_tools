@@ -30,12 +30,10 @@ warnings.filterwarnings(
 def as_crs(value):
     """Normalise a CRS argument to something rasterio and pyproj both accept.
 
-    Historically every grid in this package was identified by an integer EPSG
-    code, and the helpers below built ``f"EPSG:{code}"`` themselves. The slip
-    module's :class:`~slipsolve.frame.LocalFrame` is a transverse Mercator
-    centred on the study area, which has **no EPSG code at all** -- so a grid can
-    now be identified by a :class:`pyproj.CRS` instead. An integer (or a string of
-    digits) still means EPSG; anything else is passed through.
+    An integer (or a string of digits) means an EPSG code; anything else, such
+    as a `pyproj.CRS`, is passed through. A grid need not have an EPSG code:
+    `slipsolve.frame.LocalFrame`, for example, is a transverse Mercator centred
+    on the study area, which has none.
     """
     if isinstance(value, (int, np.integer)):
         return f"EPSG:{int(value)}"
@@ -47,8 +45,8 @@ def as_crs(value):
 def bbox_to_native(lon_min, lon_max, lat_min, lat_max, epsg_code):
     """Transform a lon/lat bounding box to native-CRS x/y bounds.
 
-    Returns ``(x_min, x_max, y_min, y_max)`` in the projection given by
-    ``epsg_code`` (an EPSG code or a :class:`pyproj.CRS`; see :func:`as_crs`).
+    Returns `(x_min, x_max, y_min, y_max)` in the projection given by
+    `epsg_code` (an EPSG code or a `pyproj.CRS`; see `as_crs`).
     All four corners are transformed (not just two) so the bounds are correct
     even when the box edges are not axis-aligned in the native projection.
     """
@@ -62,8 +60,8 @@ def bbox_to_native(lon_min, lon_max, lat_min, lat_max, epsg_code):
 
 
 def native_bbox_to_lonlat(x_min, x_max, y_min, y_max, epsg_code):
-    """Transform a native-CRS bounding box to lon/lat ``(lon_min, lon_max,
-    lat_min, lat_max)``. Edge-densified, so the returned box covers the whole
+    """Transform a native-CRS bounding box to lon/lat `(lon_min, lon_max,
+    lat_min, lat_max)`. Edge-densified, so the returned box covers the whole
     footprint even where the grid is rotated relative to lon/lat."""
     return transform_native_bbox(x_min, x_max, y_min, y_max, epsg_code, 4326)
 
@@ -71,12 +69,12 @@ def native_bbox_to_lonlat(x_min, x_max, y_min, y_max, epsg_code):
 def native_to_lonlat(x, y, epsg_code):
     """Transform native-CRS coordinates to lon/lat, point by point.
 
-    ``x`` and ``y`` are array-likes of matching shape (a meshgrid, say, or two
-    flat lists of the same length); the returned ``(lon, lat)`` arrays have that
-    shape. ``epsg_code`` is an EPSG code or a :class:`pyproj.CRS` (see
-    :func:`as_crs`).
+    `x` and `y` are array-likes of matching shape (a meshgrid, say, or two
+    flat lists of the same length); the returned `(lon, lat)` arrays have that
+    shape. `epsg_code` is an EPSG code or a `pyproj.CRS` (see
+    `as_crs`).
 
-    Unlike :func:`native_bbox_to_lonlat` this is genuinely *pointwise*. A
+    Unlike `native_bbox_to_lonlat` this is genuinely *pointwise*. A
     projected grid's lon/lat both vary along both axes -- the meridians converge
     across a UTM zone and the grid is rotated against true north away from the
     central meridian -- so a corner-to-corner box cannot stand in for the
@@ -92,11 +90,11 @@ def native_to_lonlat(x, y, epsg_code):
 def transform_native_bbox(x_min, x_max, y_min, y_max, src_epsg, dst_epsg):
     """Transform a native-CRS bbox into another projected CRS.
 
-    Edge-densified (via :func:`rasterio.warp.transform_bounds`), so the
+    Edge-densified (via `rasterio.warp.transform_bounds`), so the
     returned bounds cover the whole warped footprint even though a projected
     rectangle's edges curve in the target CRS. Returns
-    ``(x_min, x_max, y_min, y_max)``. Either CRS may be an EPSG code or a
-    :class:`pyproj.CRS` (see :func:`as_crs`).
+    `(x_min, x_max, y_min, y_max)`. Either CRS may be an EPSG code or a
+    `pyproj.CRS` (see `as_crs`).
     """
     left, bottom, right, top = transform_bounds(
         as_crs(src_epsg), as_crs(dst_epsg), x_min, y_min, x_max, y_max
@@ -115,7 +113,7 @@ def grid_transform(x_coords, y_coords):
 
 
 def resampling_from_name(name):
-    """Resolve a rasterio :class:`Resampling` mode by name (e.g. "bilinear")."""
+    """Resolve a rasterio `Resampling` mode by name (e.g. "bilinear")."""
     try:
         return Resampling[name]
     except KeyError:
@@ -131,10 +129,10 @@ def warp_to_grid(arr, src_transform, src_epsg, dst_transform, dst_epsg,
 
     Complex input is resampled on its real and imaginary parts separately
     (for linear kernels this is exactly complex-valued interpolation) and
-    recombined as complex64; use ``resampling="nearest"`` to preserve exact
+    recombined as complex64; use `resampling="nearest"` to preserve exact
     sample values. Pixels with no source coverage come back NaN.
 
-    Either CRS may be an EPSG code or a :class:`pyproj.CRS` (see :func:`as_crs`).
+    Either CRS may be an EPSG code or a `pyproj.CRS` (see `as_crs`).
     """
     resampling = resampling_from_name(resampling)
     src_crs, dst_crs = as_crs(src_epsg), as_crs(dst_epsg)
@@ -169,9 +167,9 @@ def warp_to_grid(arr, src_transform, src_epsg, dst_transform, dst_epsg,
 def project_to_latlon(data, x_coords=None, y_coords=None, epsg_code=None):
     """Reproject a 2D grid from its native CRS to WGS84 lon/lat.
 
-    Accepts either a georeferenced :class:`xarray.DataArray` (with a written
-    CRS) or a raw 2D array plus ``x_coords``/``y_coords``/``epsg_code``.
-    Returns a lon/lat :class:`xarray.DataArray`. Eager: computes its input.
+    Accepts either a georeferenced `xarray.DataArray` (with a written
+    CRS) or a raw 2D array plus `x_coords`/`y_coords`/`epsg_code`.
+    Returns a lon/lat `xarray.DataArray`. Eager: computes its input.
     """
     if isinstance(data, xr.DataArray) and data.rio.crs is not None:
         da = data
@@ -188,41 +186,41 @@ def project_to_latlon(data, x_coords=None, y_coords=None, epsg_code=None):
     return da.rio.reproject("EPSG:4326")
 
 
-#: xarray engines tried in turn by :func:`read_grd`, best first.
+#: xarray engines tried in turn by `read_grd`, best first.
 #:
-#: A ``.grd`` is single-variable NetCDF, but *which* NetCDF matters: GMT 6 writes
+#: A `.grd` is single-variable NetCDF, but *which* NetCDF matters: GMT 6 writes
 #: HDF5-backed NetCDF-4 by default, which scipy's classic-only backend cannot
-#: read, while ``netcdf4``/``h5netcdf`` are optional dependencies this project
-#: does not require. NetCDF-4 is handled instead by :func:`_read_grd_hdf5`, using
-#: the ``h5py`` this package already depends on.
+#: read, while `netcdf4`/`h5netcdf` are optional dependencies this project
+#: does not require. NetCDF-4 is handled instead by `_read_grd_hdf5`, using
+#: the `h5py` this package already depends on.
 #:
-#: ``pygmt`` registers a ``gmt`` engine that reads both, and it is deliberately
-#: **not** in this list: importing ``h5py`` -- which ``nisar_tools`` always does
+#: `pygmt` registers a `gmt` engine that reads both, and it is deliberately
+#: not in this list: importing `h5py` -- which `nisar_tools` always does
 #: -- makes it drop a NetCDF-4 grid's coordinate variables and return *pixel
 #: indices* instead, with no error. Two HDF5 libraries end up loaded in one
 #: process and GMT's netCDF layer loses. The data comes back right and only the
 #: georeferencing is wrong, so nothing downstream would notice.
 _GRD_ENGINES = ("netcdf4", "h5netcdf", "scipy", "rasterio")
 
-#: Leading bytes of an HDF5 file, i.e. of a NetCDF-4 ``.grd``.
+#: Leading bytes of an HDF5 file, i.e. of a NetCDF-4 `.grd`.
 _HDF5_MAGIC = b"\x89HDF\r\n\x1a\n"
 
 
 def utm_epsg(lon, lat):
-    """EPSG code of the WGS84 UTM zone containing ``(lon, lat)``."""
+    """EPSG code of the WGS84 UTM zone containing `(lon, lat)`."""
     zone = int((float(lon) + 180.0) // 6.0) % 60 + 1
     return (32600 if lat >= 0 else 32700) + zone
 
 
 def _read_grd_hdf5(path):
-    """Read a NetCDF-4 (HDF5-backed) ``.grd`` with ``h5py``.
+    """Read a NetCDF-4 (HDF5-backed) `.grd` with `h5py`.
 
     A GMT grid is one 2-D variable plus its two coordinate variables at the file
     root, so the layout can be recovered without a NetCDF library: the data is
     the only 2-D dataset, and its axes are named by the HDF5 dimension scales it
-    points at (``DIMENSION_LIST``), falling back to matching 1-D datasets by
-    length. The CRS, when present, rides on a ``grid_mapping`` dataset's
-    ``spatial_ref``/``crs_wkt`` attribute.
+    points at (`DIMENSION_LIST`), falling back to matching 1-D datasets by
+    length. The CRS, when present, rides on a `grid_mapping` dataset's
+    `spatial_ref`/`crs_wkt` attribute.
     """
     import h5py
 
@@ -267,16 +265,16 @@ def _read_grd_hdf5(path):
 
 
 def read_grd(path, engine=None):
-    """Read a GMT ``.grd`` as a CRS-aware 2-D DataArray -- the inverse of
-    :func:`write_grd`.
+    """Read a GMT `.grd` as a CRS-aware 2-D DataArray -- the inverse of
+    `write_grd`.
 
-    Axes are renamed to ``x``/``y``. The CRS comes from the file when it carries
+    Axes are renamed to `x`/`y`. The CRS comes from the file when it carries
     one; otherwise the grid is taken as geographic if its axes were named
-    ``lon``/``lat`` (GMT's own convention for a geographic grid) or if they span
-    a plausible lon/lat range. ``engine`` forces one backend instead of trying
-    :data:`_GRD_ENGINES` in turn; ``engine="hdf5"`` forces the ``h5py`` reader.
+    `lon`/`lat` (GMT's own convention for a geographic grid) or if they span
+    a plausible lon/lat range. `engine` forces one backend instead of trying
+    `_GRD_ENGINES` in turn; `engine="hdf5"` forces the `h5py` reader.
 
-    Eager -- a ``.grd`` is a whole raster in one variable, with no chunking to
+    Eager -- a `.grd` is a whole raster in one variable, with no chunking to
     preserve.
     """
     with open(path, "rb") as fh:
@@ -315,16 +313,16 @@ def read_grd(path, engine=None):
 def write_grd(field, path):
     """Reproject a 2D native-grid field to lon/lat and write a GMT `.grd`.
 
-    A GMT ``.grd`` is single-variable NetCDF, so the field is reprojected to
-    WGS84, its axes renamed ``lat``/``lon`` and the data variable to ``z``.
+    A GMT `.grd` is single-variable NetCDF, so the field is reprojected to
+    WGS84, its axes renamed `lat`/`lon` and the data variable to `z`.
     Two rioxarray artefacts are stripped or the file is unusable: the length-1
-    ``band`` axis a reproject leaves behind (``squeeze``), and the
-    ``spatial_ref`` coordinate, which NetCDF would otherwise write as a second
-    variable and GMT would then refuse. ``field`` must be CRS-aware (any field
-    of a stack is). Eager. Returns ``path``.
+    `band` axis a reproject leaves behind (`squeeze`), and the
+    `spatial_ref` coordinate, which NetCDF would otherwise write as a second
+    variable and GMT would then refuse. `field` must be CRS-aware (any field
+    of a stack is). Eager. Returns `path`.
 
     Integer label layers (a connected-component or subswath mask) are cast to
-    ``float32`` with NaN outside coverage: a GMT grid is float anyway, uint32
+    `float32` with NaN outside coverage: a GMT grid is float anyway, uint32
     overflows classic NetCDF's int32, and a NaN edge beats an integer sentinel
     warped in from the reprojection.
     """
