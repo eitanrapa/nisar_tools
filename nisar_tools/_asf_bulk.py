@@ -218,7 +218,7 @@ class bulk_downloader:
             return True
 
         print("WARNING: Could not generate new cookie! Cannot proceed. Please try Username and Password again.")
-        print("Response was {response.getcode()}.")
+        print(f"Response was {response.getcode()}.")
         print("\n\nNew users: you must first log into Vertex and accept the EULA. In addition, your Study Area must be set at Earthdata https://urs.earthdata.nasa.gov")
         exit(-1)
 
