@@ -24,7 +24,8 @@ jobs:
           python-version: "3.11"
 
       - name: Install MkDocs
-        run: pip install "mkdocs-material>=9.5" "mkdocstrings[python]>=0.26"
+        # The versions the site is checked with locally.
+        run: python -m pip install "mkdocs==1.6.1" "mkdocs-material==9.8.1" "mkdocstrings==1.0.8" "mkdocstrings-python==2.0.10"
 
       - name: Build the site
         run: mkdocs build --strict
