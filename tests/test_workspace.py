@@ -176,6 +176,17 @@ def test_a_write_that_dies_leaves_no_stage(tmp_path):
     assert not (tmp_path / "igrams.zarr.partial").exists()
 
 
+@pytest.mark.parametrize("config", [{}, {"scheduler": "synchronous"}, {"num_workers": 2}])
+def test_store_writes_under_any_scheduler_setting(tmp_path, config):
+    """The write runs on its own pool only under dask's default threads; any other setting is respected."""
+    import dask
+
+    ws = Workspace(tmp_path)
+    with dask.config.set(config):
+        out = ws.store("igrams", _complex_ds(), {"v": 1})
+    np.testing.assert_array_equal(out["slc"].compute().values, _complex_ds()["slc"].compute().values)
+
+
 def test_init_store_refuses_to_delete_its_own_source(tmp_path):
     """Region-written stores take the same path (e.g. unwrapping into igrams)."""
     ws = Workspace(tmp_path)

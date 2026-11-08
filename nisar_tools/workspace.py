@@ -16,6 +16,7 @@ import os
 import shutil
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -119,6 +120,29 @@ def _json_default(obj):
     if hasattr(obj, "item"):
         return obj.item()
     return str(obj)
+
+
+def _compute_and_wait(writer):
+    """Compute the delayed write `writer`; if a task fails, wait for the others before re-raising.
+
+    On dask's threaded scheduler a failing task leaves the tasks already running to finish on
+    their own, still writing chunks after the error has reached the caller, so a retry in the
+    same process would race them. The write gets its own pool, shut down before this returns
+    either way. Under another scheduler (a distributed client, a configured pool) it runs as usual.
+    """
+    import dask
+    from dask import threaded
+    from dask.base import get_scheduler
+    from dask.system import CPU_COUNT
+
+    if get_scheduler(collections=[writer]) is not threaded.get or dask.config.get("pool", None) is not None:
+        return writer.compute()
+    executor = getattr(threaded, "ContextAwareThreadPoolExecutor", ThreadPoolExecutor)
+    pool = executor(dask.config.get("num_workers", None) or CPU_COUNT)
+    try:
+        return writer.compute(scheduler="threads", pool=pool)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 # Attributes that lead from a dask task down to the array it reads. Covers the
@@ -356,11 +380,11 @@ class Workspace:
         partial = target.with_name(target.name + ".partial")
         if partial.exists():
             shutil.rmtree(partial)
-        ds.to_zarr(
-            partial, mode="w", consolidated=True,
+        _compute_and_wait(ds.to_zarr(
+            partial, mode="w", consolidated=True, compute=False,
             **({} if encoding is None else {"encoding": encoding}),
             **_ZARR_KWARGS,
-        )
+        ))
         os.replace(partial, target)
         return self.load(name)
 
