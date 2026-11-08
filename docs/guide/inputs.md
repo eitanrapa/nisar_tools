@@ -18,9 +18,11 @@ files = download.download_gslcs("data/gslc", bbox=bbox, temporal=("2025-11-01", 
 files = download.download_gslcs("data/gslc", granules=["NISAR_L2_PR_GSLC_..."], method="asf")
 ```
 
-- `short_name` selects the CMR collection. The default is `NISAR_L2_GSLC_BETA_V1`; granules of other releases are in
-  other collections (production GSLCs, for example, in `NISAR_L2_GSLC_PROVISIONAL_V1`), so pass `short_name=` to search
-  or download those. `download.search(short_name, ...)` searches any collection and returns earthaccess results.
+- `short_name` selects the CMR collection, and by default it follows the granule names (`download.gslc_short_name`):
+  production `_PR_` GSLCs are in `NISAR_L2_GSLC_PROVISIONAL_V1`, urgent-response `_UR_` ones in `NISAR_UR_L2`, and
+  others in the beta release's `NISAR_L2_GSLC_BETA_V1`. A search by area or time alone uses the production collection;
+  pass `short_name=` for another. `download.search(short_name, ...)` searches any collection and returns earthaccess
+  results.
 - `download_dem(dest, bbox)` builds a DEM with sardem. The default source is the NISAR reference DEM
   (`data_source="NISAR"`); `"COP"` (Copernicus, no login) and `"3DEP"` (United States) also work.
 - `download_tec(dest, rslc=...)` (or `start=`, `end=`) fetches the daily NISAR TEC file covering an acquisition, for

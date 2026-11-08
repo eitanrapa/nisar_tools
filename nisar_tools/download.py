@@ -3,10 +3,12 @@
 Three sources, all behind optional, lazily-imported dependencies so the package
 still imports without them:
 
-- **earthaccess** (NASA Earthdata) -- the primary path for GSLC granules
-  (`short_name` `NISAR_L2_GSLC_BETA_V1` by default; production `_PR_` granules
-  are in `NISAR_L2_GSLC_PROVISIONAL_V1`), searchable by granule name,
-  bounding box, and time range.
+- **earthaccess** (NASA Earthdata) -- the primary path for GSLC granules,
+  searchable by granule name, bounding box, and time range. The collection
+  follows the granule names (`gslc_short_name`): production `_PR_` granules are
+  in `NISAR_L2_GSLC_PROVISIONAL_V1`, urgent-response `_UR_` ones in
+  `NISAR_UR_L2`, and others in the beta release's `NISAR_L2_GSLC_BETA_V1`. A
+  search by area or time alone uses the production collection.
 - **direct ASF** -- ASF's bulk-download script (`nisar_tools._asf_bulk`),
   which pulls GSLCs straight from the NISAR bucket by granule name with no
   search and only the standard library. It is the fallback where earthaccess
@@ -45,8 +47,11 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
-# NISAR GSLC product short name on NASA CMR / Earthdata.
-GSLC_SHORT_NAME = "NISAR_L2_GSLC_BETA_V1"
+# NISAR GSLC collections on NASA CMR / Earthdata: production (`_PR_` granules, the
+# default), urgent response (`_UR_`), and the earlier beta release.
+GSLC_SHORT_NAME = "NISAR_L2_GSLC_PROVISIONAL_V1"
+GSLC_UR_SHORT_NAME = "NISAR_UR_L2"
+GSLC_BETA_SHORT_NAME = "NISAR_L2_GSLC_BETA_V1"
 
 # Direct-download URL template for a GSLC granule on the NISAR ASF bucket.
 _GSLC_URL = "https://nisar.asf.earthdatacloud.nasa.gov/NISAR/{short_name}/{name}/{name}.h5"
@@ -142,19 +147,41 @@ def _download_results(results, dest):
 
 
 # -- GSLC granules -----------------------------------------------------------
-def gslc_url(name, short_name=GSLC_SHORT_NAME):
-    """Direct NISAR-bucket URL for a GSLC granule (accepts `name` or `name.h5`)."""
-    return _GSLC_URL.format(short_name=short_name, name=_strip_ext(name))
+def gslc_short_name(name):
+    """The CMR collection a GSLC granule is in, from its name.
+
+    Production granules (`_PR_`) are in `GSLC_SHORT_NAME`, urgent-response ones
+    (`_UR_`) in `GSLC_UR_SHORT_NAME`, and any other in the beta release's
+    `GSLC_BETA_SHORT_NAME`.
+    """
+    stem = _strip_ext(Path(str(name)).name)
+    if "_PR_" in stem:
+        return GSLC_SHORT_NAME
+    if "_UR_" in stem:
+        return GSLC_UR_SHORT_NAME
+    return GSLC_BETA_SHORT_NAME
+
+
+def gslc_url(name, short_name=None):
+    """Direct NISAR-bucket URL for a GSLC granule (accepts `name` or `name.h5`).
+
+    `short_name` defaults to the granule's own collection (`gslc_short_name`).
+    """
+    return _GSLC_URL.format(short_name=short_name or gslc_short_name(name), name=_strip_ext(name))
 
 
 def download_gslcs(dest, *, granules=None, bbox=None, temporal=None,
-                   method="earthaccess", short_name=GSLC_SHORT_NAME, count=None,
+                   method="earthaccess", short_name=None, count=None,
                    **kwargs):
     """Download NISAR GSLC granules to `dest`. Returns the local file paths.
 
     `method="earthaccess"` searches CMR by `granules` / `bbox` / `temporal`
     then downloads. `method="asf"` is the direct-by-name path: it needs explicit
     `granules` and only the standard library (no earthaccess).
+
+    `short_name` is the CMR collection. By default it follows the granule names
+    (`gslc_short_name`), and a search by area or time alone uses production
+    GSLCs (`GSLC_SHORT_NAME`).
     """
     if method not in _DOWNLOAD_METHODS:
         raise ValueError(f"method must be one of {_DOWNLOAD_METHODS}")
@@ -168,6 +195,13 @@ def download_gslcs(dest, *, granules=None, bbox=None, temporal=None,
         urls = [gslc_url(n, short_name=short_name) for n in names]
         return download_urls(dest, urls)
 
+    if short_name is None:
+        names = _as_list(granules)
+        collections = {gslc_short_name(n) for n in names} if names else {GSLC_SHORT_NAME}
+        if len(collections) > 1:
+            raise ValueError(f"the granules are in different collections ({', '.join(sorted(collections))}); "
+                             "download each group with its own short_name=")
+        short_name = collections.pop()
     results = search(
         short_name, granules=granules, bbox=bbox, temporal=temporal,
         count=count, **kwargs,

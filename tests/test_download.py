@@ -96,12 +96,27 @@ def test_bbox_conversion_orders_corners():
     assert d._bbox_wsen((-119.5, -120.5, 35.0, 34.0)) == (-120.5, 34.0, -119.5, 35.0)
 
 
+PR_NAME = "NISAR_L2_PR_GSLC_022_162_A_006_4005_DHDH_A_20260613T100623_20260613T100657_P05023_N_F_J_001"
+UR_NAME = "NISAR_L2_UR_GSLC_032_040_D_085_4005_DHDH_A_20261014T234516_20261014T234533_P05023_F_P_J_001"
+
+
 def test_gslc_url_builds_and_strips_extension():
-    assert d.gslc_url("G1") == (
+    assert d.gslc_url(PR_NAME) == (
         "https://nisar.asf.earthdatacloud.nasa.gov/NISAR/"
-        f"{GSLC_SHORT_NAME}/G1/G1.h5"
+        f"{GSLC_SHORT_NAME}/{PR_NAME}/{PR_NAME}.h5"
     )
-    assert d.gslc_url("G1.h5").endswith("/G1/G1.h5")
+    assert d.gslc_url(PR_NAME + ".h5") == d.gslc_url(PR_NAME)
+    assert d.gslc_url("G1", short_name="X").endswith("/NISAR/X/G1/G1.h5")
+
+
+def test_gslc_collection_follows_the_granule_name():
+    """A production granule's URL must name the production collection, not the default beta one."""
+    assert GSLC_SHORT_NAME == "NISAR_L2_GSLC_PROVISIONAL_V1"
+    assert d.gslc_short_name(PR_NAME) == GSLC_SHORT_NAME
+    assert d.gslc_short_name(f"/data/{PR_NAME}.h5") == GSLC_SHORT_NAME
+    assert d.gslc_short_name(UR_NAME) == d.GSLC_UR_SHORT_NAME == "NISAR_UR_L2"
+    assert d.gslc_short_name("NISAR_L2_GSLC_beta_granule") == d.GSLC_BETA_SHORT_NAME
+    assert f"/{d.GSLC_BETA_SHORT_NAME}/" in d.gslc_url("G1")
 
 
 def test_as_list_normalises():
@@ -134,6 +149,15 @@ def test_download_gslcs_earthaccess(fake_ea, tmp_path):
     assert fake_ea["searches"][0]["short_name"] == GSLC_SHORT_NAME
     assert fake_ea["download"]["path"] == str(tmp_path / "g")
     assert all(str(p).endswith(".h5") for p in out)
+
+
+def test_download_gslcs_by_name_searches_the_names_collection(fake_ea, tmp_path):
+    d.download_gslcs(tmp_path / "g", granules=[UR_NAME])
+    assert fake_ea["searches"][0]["short_name"] == "NISAR_UR_L2"
+    with pytest.raises(ValueError, match="different collections"):
+        d.download_gslcs(tmp_path / "g", granules=[PR_NAME, UR_NAME])
+    d.download_gslcs(tmp_path / "g", granules=[PR_NAME, UR_NAME], short_name="X")
+    assert fake_ea["searches"][-1]["short_name"] == "X"
 
 
 def test_download_gslcs_asf_builds_urls(fake_bulk, tmp_path):
