@@ -87,6 +87,7 @@ class OffsetLattice:
     def for_grid(cls, lines, samples, layers, margin=250, skip_azimuth=15, skip_range=15,
                  start_pixel_azimuth=None, start_pixel_range=None,
                  gross_offset_azimuth=0, gross_offset_range=0):
+        """The lattice ISCE3 lays out for `layers` on a `lines` x `samples` reference raster."""
         layers = list(layers.values()) if isinstance(layers, dict) else list(layers)
         margin = max(margin, abs(gross_offset_range), abs(gross_offset_azimuth))
         hs_az = min(L.half_search_azimuth for L in layers)
@@ -105,6 +106,7 @@ class OffsetLattice:
         return self.az_start + np.asarray(rows) * self.skip_azimuth
 
     def window_samples(self, cols):
+        """Top-left reference sample of the windows in lattice `cols`."""
         return self.rg_start + np.asarray(cols) * self.skip_range
 
     def label_lines(self, rows):
@@ -112,6 +114,7 @@ class OffsetLattice:
         return self.window_lines(rows) + self.label_azimuth
 
     def label_samples(self, cols):
+        """ISCE3's label: the sample the offsets are assigned to."""
         return self.window_samples(cols) + self.label_range
 
 

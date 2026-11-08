@@ -168,6 +168,33 @@ class GSLC:
     Opens one `frequency` ("A" or "B") and `polarization` of the granule at
     `path`; `chunks` is the dask read-block size, aligned to the file's HDF5
     chunking.
+
+    Attributes
+    ----------
+    path : str
+        The granule file.
+    frequency : str
+        The band, `"A"` or `"B"`.
+    polarization : str
+        The polarization, such as `"HH"`.
+    x_coords : ndarray
+        x of each column, the granule's `xCoordinates`.
+    y_coords : ndarray
+        y of each row, the granule's `yCoordinates`.
+    x_spacing : float
+        Column spacing.
+    y_spacing : float
+        Row spacing, negative for a north-up grid.
+    epsg : int
+        The granule's projection.
+    center_frequency : float or None
+        The band's centre frequency, in Hz.
+    direction : str
+        The orbit pass direction, `"Ascending"` or `"Descending"`.
+    datetime : numpy.datetime64 or None
+        The zero-Doppler start time.
+    chunks : tuple
+        The dask read-block size.
     """
 
     def __init__(self, path, frequency="A", polarization="HH", chunks=(2048, 2048)):
@@ -218,6 +245,7 @@ class GSLC:
 
     @property
     def shape(self):
+        """Shape of the image, `(y, x)`."""
         return self._dset.shape
 
     @property

@@ -72,7 +72,14 @@ def _as_list(paths):
 
 
 class UnwrappedStack(RasterStackMixin):
-    """A stack of unwrapped phases with connected-component labels."""
+    """A stack of unwrapped phases with connected-component labels.
+
+    Attributes
+    ----------
+    ds : xarray.Dataset
+        `unw` (radians), `conncomp` (connected-component labels, 0 unassigned) and
+        `coherence` on `(pair, y, x)`; a GUNW adds `phase_screen` and `subswath_mask`.
+    """
 
     STAGE = "unwrapped"
 
@@ -81,6 +88,7 @@ class UnwrappedStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
+        """Reopen a stack stored by `persist`."""
         return cls(open_stage(path))
 
     # -- construction: SNAPHU on our own interferograms --------------------
@@ -1104,6 +1112,7 @@ class UnwrappedStack(RasterStackMixin):
         return geo.project_to_latlon(self.ds["unw"].isel(pair=pair))
 
     def plot(self, pair=0):
+        """Map of pair `pair`'s unwrapped phase."""
         from .plot import plot_unwrapped_phase
 
         return plot_unwrapped_phase(self.ds["unw"].isel(pair=pair), epsg_code=self.epsg)

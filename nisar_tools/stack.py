@@ -22,7 +22,13 @@ from .interferogram import InterferogramStack, make_pairs
 
 
 class GSLCStack(RasterStackMixin):
-    """A time stack of aligned GSLCs."""
+    """A time stack of aligned GSLCs.
+
+    Attributes
+    ----------
+    ds : xarray.Dataset
+        `slc`, the complex images, on `(time, y, x)`.
+    """
 
     STAGE = "slc_stack"
     GRD_STACK_DIM = "time"
@@ -104,6 +110,7 @@ class GSLCStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
+        """Reopen a stack stored by `persist`."""
         return cls(open_stage(path))
 
     # -- lazy operations ---------------------------------------------------

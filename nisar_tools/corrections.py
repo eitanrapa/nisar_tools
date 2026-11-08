@@ -214,10 +214,12 @@ class TimingCorrections:
 
     @property
     def az_vec(self):
+        """Azimuth time of each line of the decimated grid, in seconds."""
         return self.grid.sensing_start + np.arange(self.grid.length) / self.grid.prf
 
     @property
     def rg_vec(self):
+        """Slant range of each sample of the decimated grid, in metres."""
         return self.grid.starting_range + np.arange(self.grid.width) * self.grid.range_pixel_spacing
 
 

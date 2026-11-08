@@ -80,6 +80,7 @@ class AmpcorParams:
 
     @property
     def half_zoom_raw(self):
+        """Half the correlation-surface zoom window, in SLC pixels before oversampling."""
         return self.zoom_window // (2 * self.slc_oversampling_factor)
 
 

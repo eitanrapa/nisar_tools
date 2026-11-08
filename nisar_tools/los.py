@@ -108,7 +108,15 @@ def _finalise_look(ds):
 
 
 class LOSStack(RasterStackMixin):
-    """LOS displacement (per pair) plus shared per-pixel look geometry."""
+    """LOS displacement (per pair) plus shared per-pixel look geometry.
+
+    Attributes
+    ----------
+    ds : xarray.Dataset
+        `los` on `(pair, y, x)`, in metres, positive toward the sensor, and the shared
+        `(y, x)` geometry: `los_east`, `los_north`, `los_up` (target to sensor),
+        `incidence_angle`, `look_angle` and `height`.
+    """
 
     STAGE = "los"
     # The per-pair displacement plus the ENU LOS **unit vectors** and the two
@@ -317,10 +325,12 @@ class LOSStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
+        """Reopen a stack stored by `persist`."""
         return cls(open_stage(path))
 
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):
+        """Write the stack to the workspace and return the reopened lazy stack."""
         from . import geometry
 
         name = name or self.STAGE
@@ -396,6 +406,7 @@ class LOSStack(RasterStackMixin):
         return geo.project_to_latlon(self.ds["los"].isel(pair=pair))
 
     def plot(self, pair=0):
+        """Map of pair `pair`'s line-of-sight displacement."""
         from .plot import plot_los_displacement
 
         return plot_los_displacement(self.ds["los"].isel(pair=pair), epsg_code=self.epsg)

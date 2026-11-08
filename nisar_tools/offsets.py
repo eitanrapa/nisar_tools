@@ -56,7 +56,14 @@ DEFAULT_N_SIGMA = 6.0
 
 
 class PixelOffsetStack(RasterStackMixin):
-    """A stack of sub-pixel offset fields with their correlation."""
+    """A stack of sub-pixel offset fields with their correlation.
+
+    Attributes
+    ----------
+    ds : xarray.Dataset
+        `x_offset` and `y_offset`, in pixels of the source grid, and their
+        `correlation`, on `(pair, y, x)`.
+    """
 
     STAGE = "offsets"
     #: The three measured fields; `east_offset`/`north_offset` (the same
@@ -209,6 +216,7 @@ class PixelOffsetStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
+        """Reopen a stack stored by `persist`."""
         return cls(open_stage(path))
 
     # -- derived fields ----------------------------------------------------

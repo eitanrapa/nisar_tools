@@ -61,7 +61,6 @@ plugins:
             show_source: false
             members_order: source
             filters: ["!^_"]
-            show_if_no_docstring: true
             merge_init_into_class: true
             separate_signature: true
             show_signature_annotations: true

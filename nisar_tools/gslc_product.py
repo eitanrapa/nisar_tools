@@ -350,6 +350,7 @@ class ComplexStats:
         self._lock = threading.Lock()
 
     def update(self, values):
+        """Add `values` to the running statistics, skipping NaN samples."""
         values = np.asarray(values)
         valid = values[~(np.isnan(values.real) | np.isnan(values.imag))]
         if valid.size == 0:
@@ -372,6 +373,7 @@ class ComplexStats:
             self.n = total
 
     def write(self, dataset):
+        """Write the statistics as `dataset`'s attributes, under ISCE3's names (`min_real_value`, ...)."""
         std = np.sqrt(self.ssq / (self.n - 1)) if self.n > 1 else np.zeros(2)
         for i, part in enumerate(("real", "imag")):
             dataset.attrs.create(f"min_{part}_value", data=np.float64(np.float32(self.min[i])))

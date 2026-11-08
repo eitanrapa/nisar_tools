@@ -176,18 +176,22 @@ class Orbit:
     # -- lattice ------------------------------------------------------------
     @property
     def time(self):
+        """Time of every state vector, in seconds since `reference_epoch`."""
         return self.first + self.spacing * np.arange(self.size)
 
     @property
     def start_time(self):
+        """Time of the first state vector."""
         return self.first
 
     @property
     def end_time(self):
+        """Time of the last state vector."""
         return self.first + (self.size - 1) * self.spacing
 
     @property
     def mid_time(self):
+        """Midpoint of `start_time` and `end_time`."""
         return 0.5 * (self.start_time + self.end_time)
 
     def _search(self, t):
@@ -682,21 +686,26 @@ class LUT2d:
 
     @property
     def length(self):
+        """Number of rows (azimuth times); 0 with no data."""
         return self.data.shape[0] if self.have_data else 0
 
     @property
     def width(self):
+        """Number of columns (slant ranges); 0 with no data."""
         return self.data.shape[1] if self.have_data else 0
 
     @property
     def x_end(self):
+        """Slant range of the last column."""
         return self.x_start + (self.width - 1) * self.dx
 
     @property
     def y_end(self):
+        """Azimuth time of the last row."""
         return self.y_start + (self.length - 1) * self.dy
 
     def contains(self, y, x):
+        """Whether each `(y, x)` lies within the table's extent; always True with no data."""
         y = np.asarray(y, float)
         x = np.asarray(x, float)
         if not self.have_data:
@@ -741,28 +750,35 @@ class RadarGrid:
 
     @property
     def azimuth_time_interval(self):
+        """Time between lines, `1 / prf`, in seconds."""
         return 1.0 / self.prf
 
     @property
     def sensing_stop(self):
+        """Azimuth time of the last line."""
         return self.sensing_start + (self.length - 1.0) / self.prf
 
     @property
     def sensing_mid(self):
+        """Midpoint of `sensing_start` and `sensing_stop`."""
         return 0.5 * (self.sensing_start + self.sensing_stop)
 
     @property
     def end_range(self):
+        """Slant range of the last sample, in metres."""
         return self.starting_range + (self.width - 1.0) * self.range_pixel_spacing
 
     @property
     def mid_range(self):
+        """Midpoint of `starting_range` and `end_range`."""
         return 0.5 * (self.starting_range + self.end_range)
 
     def sensing_time(self, line):
+        """Azimuth time of line `line` (fractional lines allowed)."""
         return self.sensing_start + np.asarray(line, float) / self.prf
 
     def slant_range(self, sample):
+        """Slant range of sample `sample` (fractional samples allowed), in metres."""
         return self.starting_range + np.asarray(sample, float) * self.range_pixel_spacing
 
     def contains(self, t, r):

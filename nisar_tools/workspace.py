@@ -292,7 +292,13 @@ def _check_not_reading_target(ds, target, name):
 
 
 class Workspace:
-    """A directory of per-stage Zarr stores."""
+    """A directory of per-stage Zarr stores.
+
+    Attributes
+    ----------
+    workdir : pathlib.Path
+        The directory.
+    """
 
     def __init__(self, workdir, create=True):
         self.workdir = Path(workdir)
@@ -323,9 +329,11 @@ class Workspace:
 
     # -- existence / resume ------------------------------------------------
     def exists(self, name):
+        """Whether stage `name` has a store."""
         return self.path(name).exists()
 
     def stored_params_hash(self, name):
+        """The parameter hash stage `name` was stored with; None if it has no store."""
         return self._stored_attr(name, "params_hash")
 
     def _stored_attr(self, name, key):
@@ -514,6 +522,7 @@ class Workspace:
             _atomic_write_text(done, json.dumps(state))
 
     def pairs_done(self, name):
+        """Indices of the pairs of region-written stage `name` marked done."""
         done = self._done_path(name)
         if not done.exists():
             return set()

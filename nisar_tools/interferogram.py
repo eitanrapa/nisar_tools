@@ -82,7 +82,14 @@ def _phase_model_rotation(model, x, y, like):
 
 
 class InterferogramStack(RasterStackMixin):
-    """A stack of multilooked interferograms with coherence."""
+    """A stack of multilooked interferograms with coherence.
+
+    Attributes
+    ----------
+    ds : xarray.Dataset
+        `igram`, the complex interferogram (`reference * conj(secondary)`), and its
+        `coherence`, on `(pair, y, x)`, with each pair's `ref_time` and `sec_time`.
+    """
 
     STAGE = "igrams"
     # Wrapped phase and coherence by default; the interferogram amplitude is
@@ -213,6 +220,7 @@ class InterferogramStack(RasterStackMixin):
 
     @classmethod
     def from_zarr(cls, path):
+        """Reopen a stack stored by `persist`."""
         return cls(open_stage(path))
 
     # -- operations --------------------------------------------------------
@@ -500,6 +508,7 @@ class InterferogramStack(RasterStackMixin):
 
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):
+        """Write the stack to the workspace and return the reopened lazy stack."""
         name = name or self.STAGE
         ds = self.ds.chunk(self.disk_chunks("pair"))
         full = {
@@ -546,6 +555,7 @@ class InterferogramStack(RasterStackMixin):
 
     # -- plotting ----------------------------------------------------------
     def plot_wrapped(self, pair=0):
+        """Map of pair `pair`'s wrapped phase."""
         from .plot import plot_wrapped_phase
 
         return plot_wrapped_phase(

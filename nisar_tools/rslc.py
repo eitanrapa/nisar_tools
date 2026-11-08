@@ -54,10 +54,12 @@ class GeoGrid:
 
     @property
     def end_x(self):
+        """x of the grid's far edge, not a pixel centre."""
         return self.start_x + self.spacing_x * self.width
 
     @property
     def end_y(self):
+        """y of the grid's far edge, not a pixel centre."""
         return self.start_y + self.spacing_y * self.length
 
     @property
@@ -68,6 +70,7 @@ class GeoGrid:
 
     @property
     def y_coordinates(self):
+        """Pixel-centre y (`set_get_geo_info`'s `linspace`)."""
         y0 = self.start_y + 0.5 * self.spacing_y
         return np.linspace(y0, y0 + (self.length - 1) * self.spacing_y, self.length)
 
@@ -151,9 +154,11 @@ class RSLC:
 
     # -- structure ------------------------------------------------------------
     def swath(self, frequency):
+        """The HDF5 group of frequency band `frequency` (`"A"` or `"B"`)."""
         return self._root[f"swaths/frequency{frequency}"]
 
     def polarizations(self, frequency):
+        """The band's polarizations, such as `["HH", "HV"]`."""
         return [_decode(p) for p in self.swath(frequency)["listOfPolarizations"][()]]
 
     @cached_property
@@ -165,6 +170,7 @@ class RSLC:
         return orbit
 
     def center_frequency(self, frequency):
+        """The band's processed centre frequency, in Hz."""
         return float(self.swath(frequency)["processedCenterFrequency"][()])
 
     def radar_grid(self, frequency):
@@ -299,6 +305,7 @@ class RSLC:
         return grid
 
     def default_posting(self, frequency):
+        """The standard GSLC posting for the band's range bandwidth (`POSTING_BY_BANDWIDTH`)."""
         bandwidth = float(self.swath(frequency)["processedRangeBandwidth"][()])
         mhz = int(round(bandwidth * 1e-6))
         if mhz not in POSTING_BY_BANDWIDTH:
@@ -317,6 +324,7 @@ class RSLC:
 
     # -- lifetime ---------------------------------------------------------------
     def close(self):
+        """Close the HDF5 file."""
         if self._file is not None:
             self._file.close()
             self._file = None
