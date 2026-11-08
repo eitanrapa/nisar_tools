@@ -18,6 +18,10 @@ files = download.download_gslcs("data/gslc", bbox=bbox, temporal=("2025-11-01", 
 files = download.download_gslcs("data/gslc", granules=["NISAR_L2_PR_GSLC_..."], method="asf")
 ```
 
+The direct path (`method="asf"`) takes its credentials from the `urs.earthdata.nasa.gov` entry in `~/.netrc`, which
+`download.login()` writes, else from `EARTHDATA_USERNAME` and `EARTHDATA_PASSWORD`, else asks. It skips a file
+already present at the server's size, and writes each download to `<name>.part` until it is complete.
+
 - `short_name` selects the CMR collection, and by default it follows the granule names (`download.gslc_short_name`):
   production `_PR_` GSLCs are in `NISAR_L2_GSLC_PROVISIONAL_V1`, urgent-response `_UR_` ones in `NISAR_UR_L2`, and
   others in the beta release's `NISAR_L2_GSLC_BETA_V1`. A search by area or time alone uses the production collection;

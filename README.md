@@ -58,7 +58,6 @@ walks through the same pipeline with plots. For slip inversion of the results, s
 - The amplitude offset tracker is a port of [GMTSAR](https://github.com/gmtsar/gmtsar)'s `xcorr`.
 - Unwrapping uses [SNAPHU](https://web.stanford.edu/group/radar/softwareandlinks/sw/snaphu/) through
   [snaphu-py](https://github.com/isce-framework/snaphu-py); water masks use the GSHHG coastlines through GMT and pygmt.
-- The direct download path is adapted from the Alaska Satellite Facility's bulk-download script.
 
 ## Licence
 

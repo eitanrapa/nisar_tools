@@ -9,17 +9,17 @@ still imports without them:
   in `NISAR_L2_GSLC_PROVISIONAL_V1`, urgent-response `_UR_` ones in
   `NISAR_UR_L2`, and others in the beta release's `NISAR_L2_GSLC_BETA_V1`. A
   search by area or time alone uses the production collection.
-- **direct ASF** -- ASF's bulk-download script (`nisar_tools._asf_bulk`),
-  which pulls GSLCs straight from the NISAR bucket by granule name with no
-  search and only the standard library. It is the fallback where earthaccess
-  can't be installed (its latest release needs Python >= 3.12).
+- **direct** -- `nisar_tools._earthdata`, which pulls GSLCs straight from the
+  NISAR bucket by granule name with no search and only the standard library.
+  It is the fallback where earthaccess can't be installed (its latest release
+  needs Python >= 3.12).
 - **sardem** -- builds/stitches a DEM for a bounding box; the default source is
   the official NISAR reference DEM (`data_source="NISAR"`), also on Earthdata.
 
 All of these need Earthdata Login. `login` wraps earthaccess auth (netrc,
 `EARTHDATA_USERNAME` / `EARTHDATA_PASSWORD` env vars, or interactive); the
-direct ASF path prompts for credentials; sardem's `NISAR`/`3DEP` sources read
-`~/.netrc`.
+direct path reads the same netrc entry or variables, or asks; sardem's
+`NISAR`/`3DEP` sources read `~/.netrc`.
 
 Bounding boxes follow this package's convention -- `(lon_min, lon_max, lat_min,
 lat_max)`, the same order `nisar_tools.GSLC.crop` takes -- and are
@@ -42,10 +42,7 @@ download.download_gslcs("data/gslc", granules=["NISAR_L2_..._001"], method="asf"
 """
 
 import importlib
-import signal
-import threading
 from pathlib import Path
-from urllib.parse import urlparse
 
 # NISAR GSLC collections on NASA CMR / Earthdata: production (`_PR_` granules, the
 # default), urgent response (`_UR_`), and the earlier beta release.
@@ -355,31 +352,20 @@ def download_tec(dest, start=None, end=None, *, rslc=None, margin=60.0, overwrit
 
 # -- direct ASF bulk download ------------------------------------------------
 def download_urls(dest, urls):
-    """Download fully-formed Earthdata URLs with the ASF bulk downloader.
+    """Download fully-formed Earthdata URLs directly, with Earthdata Login.
 
-    The low-level path behind `method="asf"`: it authenticates with Earthdata
-    Login (prompting if needed) and streams each URL into `dest`, following the
-    URS re-auth redirect and waiting on the burst-extraction service. Returns the
-    expected local paths (one per URL, named by the URL's basename).
+    The low-level path behind `method="asf"` (`nisar_tools._earthdata.download`): each
+    URL is streamed into `dest` under its basename, and a file already there at the
+    server's size is kept. Returns the local paths, one per URL; failures raise once
+    every URL has been tried.
     """
-    from . import _asf_bulk
+    from . import _earthdata
 
-    dest = Path(dest).expanduser()
-    dest.mkdir(parents=True, exist_ok=True)
     urls = _as_list(urls)
     for url in urls:
         if not isinstance(url, str):
             raise ValueError("urls must be strings")
-
-    # SIGINT trapping only works from the main thread (e.g. not inside a dask
-    # worker), so guard it.
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGINT, _asf_bulk.signal_handler)
-
-    downloader = _asf_bulk.bulk_downloader(download_dir=str(dest), files=urls)
-    downloader.download_files()
-    downloader.print_summary()
-    return [dest / Path(urlparse(u).path).name for u in urls]
+    return _earthdata.download(urls, dest)
 
 
 def download_files(download_dir, files):

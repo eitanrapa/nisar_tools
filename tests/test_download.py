@@ -58,34 +58,20 @@ def fake_sardem(monkeypatch):
     return record
 
 
-class _FakeBulk:
-    """Stand-in for the ASF bulk downloader; records URLs, hits no network."""
-
-    def __init__(self, download_dir, files):
-        self.download_dir = download_dir
-        self.files = files
-        self.downloaded = False
-
-    def download_files(self):
-        self.downloaded = True
-
-    def print_summary(self):
-        pass
-
-
 @pytest.fixture
-def fake_bulk(monkeypatch):
-    from nisar_tools import _asf_bulk
+def fake_direct(monkeypatch):
+    """Stand-in for the direct downloader: records the URLs, touches no network."""
+    from pathlib import Path
+
+    from nisar_tools import _earthdata
 
     made = {}
 
-    def factory(download_dir, files):
-        made["obj"] = _FakeBulk(download_dir, files)
-        return made["obj"]
+    def fake(urls, dest):
+        made.update(urls=list(urls), dest=Path(dest))
+        return [Path(dest) / u.rsplit("/", 1)[-1] for u in urls]
 
-    monkeypatch.setattr(_asf_bulk, "bulk_downloader", factory)
-    # Don't actually install a SIGINT handler during the test.
-    monkeypatch.setattr(d.signal, "signal", lambda *a, **k: None)
+    monkeypatch.setattr(_earthdata, "download", fake)
     return made
 
 
@@ -160,11 +146,10 @@ def test_download_gslcs_by_name_searches_the_names_collection(fake_ea, tmp_path)
     assert fake_ea["searches"][-1]["short_name"] == "X"
 
 
-def test_download_gslcs_asf_builds_urls(fake_bulk, tmp_path):
+def test_download_gslcs_asf_builds_urls(fake_direct, tmp_path):
     out = d.download_gslcs(tmp_path / "g", granules=["G1", "G2"], method="asf")
-    urls = fake_bulk["obj"].files
-    assert urls == [d.gslc_url("G1"), d.gslc_url("G2")]
-    assert fake_bulk["obj"].downloaded
+    assert fake_direct["urls"] == [d.gslc_url("G1"), d.gslc_url("G2")]
+    assert fake_direct["dest"] == tmp_path / "g"
     assert [p.name for p in out] == ["G1.h5", "G2.h5"]
 
 
@@ -196,9 +181,9 @@ def test_login_passes_strategy(fake_ea):
     assert fake_ea["login"]["strategy"] == "netrc"
 
 
-def test_download_files_backcompat_uses_asf(fake_bulk, tmp_path):
+def test_download_files_backcompat_uses_asf(fake_direct, tmp_path):
     out = d.download_files(str(tmp_path / "g"), ["G1"])
-    assert fake_bulk["obj"].files == [d.gslc_url("G1")]
+    assert fake_direct["urls"] == [d.gslc_url("G1")]
     assert [p.name for p in out] == ["G1.h5"]
 
 
