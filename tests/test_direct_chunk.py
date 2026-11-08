@@ -158,3 +158,47 @@ def test_reader_result_is_chunk_layout_independent(gslc_factory):
         if ref is None:
             ref = got
         np.testing.assert_array_equal(got.view(np.uint8), ref.view(np.uint8))
+
+
+# -- indexing beyond plain windows ---------------------------------------------
+
+
+@pytest.mark.parametrize("key", [
+    (slice(None, None, 3), slice(None, None, 4)),       # strided over the whole array
+    (slice(5, 190, 7), slice(1, 179, 5)),               # strided windows across chunk seams
+    (slice(-30, None), slice(None, -40)),               # negative bounds
+    (17, slice(None)),                                  # one row
+    (slice(None), -1),                                  # the last column
+    (3, 4),                                             # one pixel
+    (slice(None, None, 2),),                            # one index for the first axis only
+])
+def test_reader_indexes_like_numpy(tmp_path, key):
+    """Steps, integers and negative bounds give exactly what numpy gives on the decoded array."""
+    path = _dataset(tmp_path)
+    with h5py.File(path, "r") as f:
+        dset = f["img"]
+        full = np.asarray(dset[...])
+        got = DirectChunkReader(dset)[key]
+    want = full[key]
+    assert np.shape(got) == np.shape(want) and got.dtype == want.dtype
+    np.testing.assert_array_equal(got, want)
+
+
+def test_reader_under_dask_honours_steps(tmp_path):
+    """dask folds `data[::n, ::n]` into the slices it hands the reader, so the reader must stride."""
+    import dask.array as da
+
+    path = _dataset(tmp_path)
+    with h5py.File(path, "r") as f:
+        dset = f["img"]
+        full = np.asarray(dset[...])
+        lazy = da.from_array(DirectChunkReader(dset), chunks=(50, 60), lock=False)
+        np.testing.assert_array_equal(lazy[::3, ::4].compute(), full[::3, ::4])
+        np.testing.assert_array_equal(lazy[7, ::2].compute(), full[7, ::2])
+
+
+def test_reader_refuses_negative_steps(tmp_path):
+    path = _dataset(tmp_path)
+    with h5py.File(path, "r") as f:
+        with pytest.raises(IndexError, match="negative steps"):
+            DirectChunkReader(f["img"])[::-1, :]

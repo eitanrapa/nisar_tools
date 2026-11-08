@@ -108,10 +108,41 @@ class DirectChunkReader:
         return np.frombuffer(buf, dtype=self.dtype).reshape(self._cy, self._cx)
 
     def __getitem__(self, key):
-        ys, xs = key
-        ny, nx = self.shape
-        y0, y1 = (ys.start or 0), (ny if ys.stop is None else min(ys.stop, ny))
-        x0, x1 = (xs.start or 0), (nx if xs.stop is None else min(xs.stop, nx))
+        """Index like a 2-D array: slices (with any positive step), integers, or both.
+
+        dask folds a strided read (`data[::4, ::4]`) into the slice it passes here, so a
+        step has to be honoured: the window is read whole and then strided.
+        """
+        if not isinstance(key, tuple):
+            key = (key,)
+        if len(key) > 2:
+            raise IndexError(f"too many indices for a 2-D dataset: {key!r}")
+        key = key + (slice(None),) * (2 - len(key))
+        windows, steps, drop = [], [], []
+        for axis, (k, n) in enumerate(zip(key, self.shape)):
+            if isinstance(k, (int, np.integer)):
+                i = int(k) + n if k < 0 else int(k)
+                if not 0 <= i < n:
+                    raise IndexError(f"index {int(k)} is out of bounds for axis {axis} with size {n}")
+                windows.append((i, i + 1))
+                steps.append(1)
+                drop.append(axis)
+            elif isinstance(k, slice):
+                start, stop, step = k.indices(n)
+                if step < 1:
+                    raise IndexError("DirectChunkReader does not support negative steps")
+                windows.append((start, max(start, stop)))
+                steps.append(step)
+            else:
+                raise TypeError(f"DirectChunkReader takes slices and integers, not {type(k).__name__}")
+        (y0, y1), (x0, x1) = windows
+        out = self._read_window(y0, y1, x0, x1)
+        if steps != [1, 1]:
+            out = out[::steps[0], ::steps[1]].copy()
+        return out.squeeze(axis=tuple(drop)) if drop else out
+
+    def _read_window(self, y0, y1, x0, x1):
+        """The contiguous window `[y0:y1, x0:x1]`, decoded chunk by chunk."""
         out = np.empty((max(y1 - y0, 0), max(x1 - x0, 0)), dtype=self.dtype)
         if out.size == 0:
             return out
