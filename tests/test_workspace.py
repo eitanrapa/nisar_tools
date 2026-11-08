@@ -198,12 +198,58 @@ def test_init_store_refuses_to_delete_its_own_source(tmp_path):
         coords={"time": [0, 1], "y": np.arange(8), "x": np.arange(8)},
     )
     with pytest.raises(WorkspaceError, match="still an input"):
-        ws.init_store("igrams", template, {"v": 2}, source=source)
+        ws.init_store("igrams", template, {"v": 2}, source=source, overwrite=True)
 
     assert ws.stored_params_hash("igrams") == hash_params({"v": 1})
     # Without a source to conflict with, the same call goes through.
-    ws.init_store("igrams", template, {"v": 2})
+    ws.init_store("igrams", template, {"v": 2}, overwrite=True)
     assert ws.stored_params_hash("igrams") == hash_params({"v": 2})
+
+
+def _region_template(npair=2, ny=8, nx=8):
+    return xr.Dataset(
+        {"unw": (("pair", "y", "x"), da.zeros((npair, ny, nx), chunks=(1, ny, nx), dtype="float32"))},
+        coords={"pair": np.arange(npair), "y": np.arange(ny), "x": np.arange(nx)},
+    )
+
+
+def test_init_store_rejects_param_mismatch_without_overwrite(tmp_path):
+    """As `store` does: other settings must not silently delete the pairs already written."""
+    ws = Workspace(tmp_path)
+    ws.init_store("unwrapped", _region_template(), {"v": 1})
+    ws.mark_pair_done("unwrapped", 0)
+
+    with pytest.raises(WorkspaceError, match="different parameters"):
+        ws.init_store("unwrapped", _region_template(), {"v": 2})
+    assert ws.pairs_done("unwrapped") == {0}
+    ws.init_store("unwrapped", _region_template(), {"v": 1})          # the same settings resume
+    assert ws.pairs_done("unwrapped") == {0}
+    ws.init_store("unwrapped", _region_template(), {"v": 2}, overwrite=True)
+    assert ws.pairs_done("unwrapped") == set()
+    assert ws.stored_params_hash("unwrapped") == hash_params({"v": 2})
+
+
+def test_init_store_checks_the_input_it_was_made_from(tmp_path):
+    ws = Workspace(tmp_path)
+    ws.init_store("unwrapped", _region_template(), {"v": 1}, provenance={"goldstein": 0.5})
+    ws.mark_pair_done("unwrapped", 0)
+    # The record sits beside the parameters, outside their hash.
+    assert ws.stored_params_hash("unwrapped") == hash_params({"v": 1})
+
+    ws.init_store("unwrapped", _region_template(), {"v": 1}, provenance={"goldstein": 0.5})
+    assert ws.pairs_done("unwrapped") == {0}
+    with pytest.raises(WorkspaceError, match="different input .it differs in goldstein"):
+        ws.init_store("unwrapped", _region_template(), {"v": 1}, provenance={"goldstein": 0.8})
+    assert ws.pairs_done("unwrapped") == {0}
+    ws.init_store("unwrapped", _region_template(), {"v": 1}, provenance={"goldstein": 0.8}, overwrite=True)
+    assert ws.pairs_done("unwrapped") == set()
+
+    # A store written before the input was recorded is reused, with a warning.
+    ws.init_store("old", _region_template(), {"v": 1})
+    ws.mark_pair_done("old", 1)
+    with pytest.warns(UserWarning, match="does not record the input"):
+        ws.init_store("old", _region_template(), {"v": 1}, provenance={"goldstein": 0.5})
+    assert ws.pairs_done("old") == {1}
 
 
 def test_source_detection_is_cheap_on_a_large_graph(tmp_path):

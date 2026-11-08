@@ -326,11 +326,15 @@ class Workspace:
         return self.path(name).exists()
 
     def stored_params_hash(self, name):
+        return self._stored_attr(name, "params_hash")
+
+    def _stored_attr(self, name, key):
+        """One attribute of stage `name`'s store, or None if the stage or the attribute is missing."""
         if not self.exists(name):
             return None
         ds = xr.open_zarr(self.path(name))
         try:
-            return ds.attrs.get("params_hash")
+            return ds.attrs.get(key)
         finally:
             ds.close()
 
@@ -412,7 +416,7 @@ class Workspace:
             done.unlink()
 
     # -- region-written stores (for the per-pair unwrap loop) --------------
-    def init_store(self, name, template, params, overwrite=False, source=None):
+    def init_store(self, name, template, params, overwrite=False, source=None, provenance=None):
         """Create a metadata-only store so slices can be written by region.
 
         `template` is a lazy dataset with the final shape, dims, chunks and
@@ -421,17 +425,49 @@ class Workspace:
         `source` is the dataset that will be *read* while this store is being
         filled in, if any. It is checked against the target for the same
         read-what-you-delete hazard `store` guards.
+
+        An existing store with the same `params` is kept, so an interrupted run
+        resumes; one with different `params` raises, as `store` does, unless
+        `overwrite`. `provenance` describes the input the store is made from (the
+        interferogram, for the unwrap stage). It is recorded beside the parameters,
+        outside their hash, and a store made from a different input raises. A store
+        that predates the record is kept, with a warning.
         """
         target = self.path(name)
         if target.exists():
-            if not overwrite and self.stored_params_hash(name) == hash_params(params):
+            same = self.stored_params_hash(name) == hash_params(params)
+            if same and not overwrite:
+                if provenance is not None:
+                    stored = self._stored_attr(name, "provenance_hash")
+                    if stored is None:
+                        import warnings
+
+                        warnings.warn(f"Stage '{name}' does not record the input it was made from, so it is "
+                                      "reused as it is; pass overwrite=True if that input has changed.",
+                                      stacklevel=3)
+                    elif stored != hash_params(provenance):
+                        old = json.loads(self._stored_attr(name, "provenance") or "{}")
+                        new = json.loads(json.dumps(provenance, default=_json_default))
+                        keys = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+                        raise WorkspaceError(
+                            f"Stage '{name}' was made from a different input (it differs in "
+                            f"{', '.join(keys) or 'its record'}). Pass overwrite=True or use another name."
+                        )
                 return
+            if not same and not overwrite:
+                raise WorkspaceError(
+                    f"Stage '{name}' already exists with different parameters. "
+                    f"Pass overwrite=True or use a fresh workspace."
+                )
             if source is not None:
                 _check_not_reading_target(source, target, name)
             shutil.rmtree(target)
             self._done_path(name).unlink(missing_ok=True)
 
         template = template.copy()
+        if provenance is not None:
+            template.attrs["provenance"] = json.dumps(provenance, default=_json_default)
+            template.attrs["provenance_hash"] = hash_params(provenance)
         template.attrs["params"] = json.dumps(params, default=_json_default)
         template.attrs["params_hash"] = hash_params(params)
         encoding = _encoding_for(template)

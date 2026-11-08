@@ -326,6 +326,37 @@ def test_unwrap_tiling_is_in_the_params_hash_but_nproc_is_not(
     assert ws.stored_params_hash("b") != base
 
 
+def test_unwrap_refuses_a_store_made_from_another_interferogram(gslc_factory, tmp_path):
+    """Masks, filtering and extent are not unwrapping settings, but they change what is unwrapped."""
+    from nisar_tools.workspace import WorkspaceError
+
+    igrams = _igram_stack(gslc_factory, tmp_path / "ws0")
+    persisted = igrams.persist(Workspace(tmp_path / "ws0"), "igrams")
+    ws = Workspace(tmp_path / "ws1")
+    persisted.unwrap(ws, nproc=1)
+    npair = persisted.sizes["pair"]
+    record = ws._stored_attr("unwrapped", "provenance_hash")
+
+    # The same interferogram, in memory instead of reloaded from its store, resumes it.
+    igrams.unwrap(ws, nproc=1)
+    assert ws._stored_attr("unwrapped", "provenance_hash") == record
+
+    filtered = persisted.filter_goldstein(alpha=0.5, patch_size=8)
+    cropped = InterferogramStack(persisted.ds.isel(x=slice(2, None)))
+    for other, differs in ((filtered, "goldstein"), (cropped, "grid")):
+        with pytest.raises(WorkspaceError, match=f"different input .it differs in {differs}"):
+            other.unwrap(ws, nproc=1)
+        assert ws.pairs_done("unwrapped") == set(range(npair))      # nothing deleted
+
+    # Other unwrapping settings raise too, as persist does, instead of replacing the store.
+    with pytest.raises(WorkspaceError, match="different parameters"):
+        persisted.unwrap(ws, nproc=1, cost="defo")
+
+    filtered.unwrap(ws, nproc=1, overwrite=True)
+    assert ws._stored_attr("unwrapped", "provenance_hash") != record
+    assert ws.pairs_done("unwrapped") == set(range(npair))
+
+
 def test_unwrap_rejects_an_illegal_tiling_before_calling_snaphu(
     gslc_factory, tmp_path, monkeypatch
 ):

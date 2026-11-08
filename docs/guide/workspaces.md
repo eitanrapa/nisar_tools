@@ -57,10 +57,12 @@ Most steps are lazy. Unwrapping is the exception: SNAPHU needs a whole raster, s
 creates its store first, then unwraps and writes one pair at a time and marks each one done. When it returns, the store
 exists. An interrupted unwrap resumes at the first unfinished pair.
 
-The unwrapping store follows its own rule. It is keyed on the unwrapping settings and on the interferogram's looks and
-pairs, but not on how the interferogram was masked, filtered or corrected. With the same settings, `unwrap` resumes, or
-returns, the store that exists, even if the interferogram changed. With different settings it replaces the store
-instead of raising. Give each differently processed interferogram its own unwrapping `name`.
+The unwrapping store is checked the same way. It is keyed on the unwrapping settings, and it also records the
+interferogram it was made from: its looks, pairs, masks, filtering, corrections and grid. With the same settings and
+the same interferogram, `unwrap` resumes, or returns, the store that exists. With other settings, or an interferogram
+processed differently, it raises `WorkspaceError`: pass `overwrite=True` to rebuild it, or use another `name`. A store
+written before the interferogram was recorded is reused, with a warning. As for any stage, an edit made to the
+interferogram's `ds` directly is not recorded.
 
 The rule is that a method taking the workspace as its first positional argument writes, and one taking it as a keyword
 does not. `mask_water(mask_cache=ws)` is lazy: the workspace caches only the coastline mask, keyed on the grid, not the

@@ -21,6 +21,7 @@ or `"gunw"`) records which path built it and drives `to_los`'s geometry.
 """
 
 import itertools
+import json
 import os
 import warnings
 from collections import deque
@@ -91,6 +92,10 @@ class UnwrappedStack(RasterStackMixin):
         tile_cost_thresh=500, single_tile_reoptimize=True, pairs_in_flight=1, cost="smooth",
     ):
         """Unwrap every pair with SNAPHU into a region-written, resumable store.
+
+        A store already under `name` is resumed when it was made with the same settings from the
+        same interferogram (its looks, pairs, masks, filtering, corrections and grid). Otherwise
+        this raises `WorkspaceError`, unless `overwrite=True`.
 
         `cost` is SNAPHU's statistical cost mode: `"smooth"` (default) or `"defo"` (deformation: phase
         discontinuities are cheap where coherence is low, for a pair across a coseismic step). An interferogram
@@ -176,7 +181,7 @@ class UnwrappedStack(RasterStackMixin):
         # Metadata-only store so each pair can be written by region.
         template = _template(ds, npair, ny, nx)
         workspace.init_store(
-            name, template, params, overwrite=overwrite, source=ds
+            name, template, params, overwrite=overwrite, source=ds, provenance=_provenance(ds)
         )
 
         done = workspace.pairs_done(name)
@@ -1233,6 +1238,26 @@ def _unwrap_pair(igram, corr, *, nlooks, ntiles, tile_overlap, nproc, pair=None,
         unw[~valid] = np.nan
         conncomp[~valid] = 0
     return unw, conncomp
+
+
+#: The interferogram's own settings that change what is unwrapped, as `InterferogramStack.persist` records them.
+_INPUT_KEYS = ("looks", "downsample", "align_looks", "convolution", "nan_aware", "min_valid_fraction", "pairs",
+               "sigma", "goldstein", "water_mask", "edges_masked", "unconnected_removed", "ionosphere",
+               "phase_model")
+
+
+def _provenance(igram_ds):
+    """What an unwrapped store is made from: the interferogram's settings and its grid.
+
+    Recorded beside the unwrapping parameters rather than in their hash, so stores made
+    before it existed keep their hash and still resume.
+    """
+    out = {k: igram_ds.attrs[k] for k in _INPUT_KEYS if igram_ds.attrs.get(k) is not None}
+    x, y = igram_ds["x"].values, igram_ds["y"].values
+    out["grid"] = [int(y.size), int(x.size), float(x[0]), float(x[-1]), float(y[0]), float(y[-1])]
+    out["epsg"] = igram_ds.attrs.get("epsg")
+    # As JSON gives it back, so a stack in memory and the same stack reloaded from its store agree.
+    return json.loads(json.dumps(out, default=lambda v: v.tolist() if hasattr(v, "tolist") else str(v)))
 
 
 def _template(igram_ds, npair, ny, nx):
