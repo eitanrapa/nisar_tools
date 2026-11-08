@@ -62,6 +62,7 @@ walks through the same pipeline with plots. For slip inversion of the results, s
 
 ## Licence
 
-The ISCE3-derived modules and the vendored product specification are covered by ISCE3's Apache License 2.0, whose
-notice is in [`nisar_tools/data/ISCE3_LICENSE`](nisar_tools/data/ISCE3_LICENSE). A licence for the rest of the
-package is still to be added.
+MIT; see [`LICENSE`](LICENSE). The ISCE3-derived modules and the vendored product specification remain under
+ISCE3's Apache License 2.0, reproduced with ISCE3's notice in
+[`nisar_tools/data/ISCE3_LICENSE`](nisar_tools/data/ISCE3_LICENSE). The GSLC pixel-offset tracker is a port of
+GMTSAR's `xcorr`, which is GPL-3.0; its authors agreed to its release here under the MIT licence.

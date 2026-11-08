@@ -4,6 +4,7 @@ site_url: https://eitanrapa.github.io/nisar_tools/
 repo_url: https://github.com/eitanrapa/nisar_tools
 repo_name: eitanrapa/nisar_tools
 edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Eitan Rapaport. MIT licence.
 
 validation:
   anchors: warn

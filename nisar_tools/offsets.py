@@ -7,8 +7,9 @@ carries `ref_time` and `sec_time` auxiliary coordinates (plain coords rather
 than a MultiIndex, which would not serialise to Zarr), and `x_pixel`/`y_pixel`
 give the 0-based index into the *source* grid that each axis's locations sit at.
 
-This is a port of GMTSAR's `xcorr`; `nisar_tools._kernels.pixel_offsets`
-holds the numerics and records where it departs from that reference.
+This is a port of GMTSAR's `xcorr`, released under this package's MIT licence with
+the agreement of its authors; `nisar_tools._kernels.pixel_offsets` holds the numerics
+and records where it departs from that reference.
 
 **What the offsets mean here.** `xcorr` runs on radar-geometry SLCs, where the
 two images are unaligned and the offsets are a coregistration solution in range
