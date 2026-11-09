@@ -317,18 +317,6 @@ class GSLCStack(RasterStackMixin):
             phase_model=phase_model,
         )
 
-    def pixel_offsets(self, pairs="sequential", **kwargs):
-        """Cross-correlate pairs of acquisitions into a `PixelOffsetStack`.
-
-        Amplitude offset tracking -- the measurement that survives where the
-        interferogram decorrelates. See
-        `nisar_tools.offsets.PixelOffsetStack.from_slc_stack` for the
-        correlation window, the location lattice and the sub-pixel refinement.
-        """
-        from .offsets import PixelOffsetStack  # local: offsets imports no stack
-
-        return PixelOffsetStack.from_slc_stack(self, pairs=pairs, **kwargs)
-
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):
         """Write the stack to the workspace and return the reopened lazy stack."""

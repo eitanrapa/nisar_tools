@@ -20,8 +20,8 @@ along a rupture, or an ionospheric screen that leaves the deformation alone.
 - **Unwrapping.** SNAPHU, one pair at a time and resumable, plus edge, outlier and ramp clean-up (`UnwrappedStack`).
 - **Ionosphere.** A dual-frequency correction from two unwrapped sub-bands (`ionosphere`), and a split-spectrum screen
   built from the main band and a deformation-free side-band residual (`split_spectrum`).
-- **Pixel offsets.** Amplitude cross-correlation of GSLC pairs (a port of GMTSAR's `xcorr`, `PixelOffsetStack`), and
-  NISAR's ROFF from two RSLCs (a port of ISCE3's offsets workflow, `roff`), convertible to LOS-style stacks.
+- **Pixel offsets.** NISAR's ROFF from two RSLCs (a port of ISCE3's offsets workflow, `roff`), convertible to
+  LOS-style stacks.
 - **Line of sight.** Displacement in metres with per-pixel look vectors from the products' own geometry cubes
   (`LOSStack`), export to GMT `.grd` from every stage, and import of LOS grids made by other software.
 - **Merging.** Frames joined before or after unwrapping, across UTM zones and across dates.

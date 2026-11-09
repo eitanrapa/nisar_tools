@@ -42,7 +42,6 @@ split into `amplitude` and wrapped `phase`.
 | `InterferogramStack` | `phase`, `coherence` (`amplitude` on request) |
 | `UnwrappedStack` | every layer present: `unw`, `coherence`, `conncomp`, and a GUNW's `phase_screen`, `subswath_mask` |
 | `LOSStack` | `los`, `los_east`, `los_north`, `los_up`, `incidence_angle`, `look_angle` (`height` on request) |
-| `PixelOffsetStack` | `x_offset`, `y_offset`, `correlation` (`east_offset`, `north_offset` on request) |
 
 Keep the unit vectors: the LOS of an ascending and a descending track can be decomposed into vertical and east-west
 motion only with them.

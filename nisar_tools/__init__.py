@@ -19,8 +19,7 @@ The main entry points, in pipeline order:
   deramping, outlier rejection.
 - `ionosphere` and `nisar_tools.split_spectrum`: the dual-frequency
   (split-spectrum) ionosphere correction.
-- `PixelOffsetStack` (amplitude cross-correlation of two GSLCs) and `roff`
-  (NISAR's dense ROFF/GOFF offsets from two RSLCs, ported from ISCE3).
+- `roff`: NISAR's dense ROFF/GOFF pixel offsets from two RSLCs, ported from ISCE3.
 - `LOSStack`: line-of-sight displacement in metres, positive toward the
   sensor, with the per-pixel look geometry.
 
@@ -36,8 +35,6 @@ igrams = stack.form_interferograms(looks=5).persist(ws, "igrams")
 igrams = igrams.filter_goldstein(alpha=0.5)
 unw = igrams.unwrap(ws, nproc=8)
 los = unw.to_los(gslc=paths[0], dem=dem_path)
-
-offsets = stack.pixel_offsets(step=64)        # amplitude offset tracking
 ```
 
 Making a GSLC from an RSLC:
@@ -61,7 +58,6 @@ from .roff import dense_offsets, geocode_offsets, open_roff
 from .stack import GSLCStack
 from .interferogram import InterferogramStack, make_pairs
 from .los import LOSStack
-from .offsets import PixelOffsetStack
 from .unwrap import UnwrappedStack
 from .workspace import Workspace, WorkspaceError
 
@@ -72,7 +68,6 @@ __all__ = [
     "GSLCStack",
     "InterferogramStack",
     "LOSStack",
-    "PixelOffsetStack",
     "RSLC",
     "RegistrationField",
     "UnwrappedStack",

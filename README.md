@@ -14,7 +14,7 @@ fit in memory and an interrupted run resumes where it stopped.
 - Interferograms with NaN-aware multilooking, water and swath-edge masks and removal of unreachable regions; the
   Goldstein filter; SNAPHU unwrapping, pair by pair and resumable.
 - Ionospheric correction: dual-frequency, and a split-spectrum screen that keeps the deformation out of it.
-- Pixel offsets from GSLC pairs (a port of GMTSAR's `xcorr`) and NISAR's ROFF from RSLC pairs (a port of ISCE3's).
+- NISAR's ROFF pixel offsets from RSLC pairs (a port of ISCE3's).
 - Line-of-sight displacement with per-pixel look vectors, GMT `.grd` export, and frame merging across UTM zones and
   dates.
 
@@ -55,7 +55,6 @@ walks through the same pipeline with plots. For slip inversion of the results, s
 
 - The RSLC-to-GSLC geocoding, the GSLC writer and the ROFF offsets port algorithms from
   [ISCE3](https://github.com/isce-framework/isce3) v0.25.16, and the L2 GSLC product specification is copied from it.
-- The amplitude offset tracker is a port of [GMTSAR](https://github.com/gmtsar/gmtsar)'s `xcorr`.
 - Unwrapping uses [SNAPHU](https://web.stanford.edu/group/radar/softwareandlinks/sw/snaphu/) through
   [snaphu-py](https://github.com/isce-framework/snaphu-py); water masks use the GSHHG coastlines through GMT and pygmt.
 
@@ -63,5 +62,4 @@ walks through the same pipeline with plots. For slip inversion of the results, s
 
 MIT; see [`LICENSE`](LICENSE). The ISCE3-derived modules and the vendored product specification remain under
 ISCE3's Apache License 2.0, reproduced with ISCE3's notice in
-[`nisar_tools/data/ISCE3_LICENSE`](nisar_tools/data/ISCE3_LICENSE). The GSLC pixel-offset tracker is a port of
-GMTSAR's `xcorr`, which is GPL-3.0; its authors agreed to its release here under the MIT licence.
+[`nisar_tools/data/ISCE3_LICENSE`](nisar_tools/data/ISCE3_LICENSE).

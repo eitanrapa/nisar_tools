@@ -64,11 +64,6 @@ changes the fit of a model very little.
 
 ## Pixel offsets
 
-- **Amplitude offsets on GSLC pairs** (`PixelOffsetStack`): `x_offset` and `y_offset` are in pixels of the source grid,
-  positive when a feature sits at a larger index in the secondary (secondary minus reference, as in GMTSAR's `xcorr`).
-  On a geocoded pair these are shifts along the map axes, that is, ground displacement, not range and azimuth
-  offsets. `east_offset` and `north_offset` give metres; the signed `y_spacing` turns a positive `y_offset` (a move
-  to a larger row, southward) into a negative northward offset.
 - **NISAR ROFF** (`roff`): `slantRangeOffset` is secondary minus reference range, positive away from the sensor;
   `alongTrackOffset` is positive along the flight direction. Both are in metres; variances in m².
   `roff.offset_los_stacks` turns them into LOS-style stacks: `"range"` is `-slantRangeOffset` on the LOS unit vector
