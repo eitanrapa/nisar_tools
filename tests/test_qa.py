@@ -138,3 +138,29 @@ def test_band_offset_needs_band_b(tmp_path):
         sw["zeroDopplerTimeSpacing"] = 1.0
     with RSLC(path) as r, pytest.raises(ValueError, match="no band B"):
         qa.band_offset(r)
+
+
+def _blocks(cells):
+    """Block measurements: {(window, bin): [A - B values]} on windows [0, 10), [10, 20) s and bins [0, 1), [1, 2) m."""
+    return [dict(t=10.0 * i + 2.0 + 0.5 * n, r=j + 0.5, a_minus_b=v, peak=0.9)
+            for (i, j), values in cells.items() for n, v in enumerate(values)]
+
+
+def test_cell_offsets_ignore_a_lone_false_peak():
+    times, ranges = np.array([0.0, 10.0, 20.0]), np.array([0.0, 1.0, 2.0])
+    good = [-10.3, -10.5, -10.4, -10.6]
+    blocks = _blocks({(0, 0): good, (0, 1): [-26.0],                   # one false peak, alone in its cell
+                      (1, 0): good, (1, 1): [-1.0, -10.4, -18.0, -10.5, -10.3]})   # outliers among good blocks
+    values, measured = qa._cell_offsets(blocks, times, ranges, margin=0.5, agree=0.75, min_blocks=2)
+    assert measured.tolist() == [[True, False], [True, True]]
+    np.testing.assert_allclose(values[1], [-10.45, -10.4])
+
+
+def test_cell_offsets_keep_a_supported_change_across_range():
+    times, ranges = np.array([0.0, 10.0]), np.array([0.0, 1.0, 2.0])
+    deviant = qa._cell_offsets(_blocks({(0, 0): [-4.0, -4.2], (0, 1): [-0.2, -0.3, -0.1]}), times, ranges,
+                               margin=0.5, agree=0.75, min_blocks=2)
+    supported = qa._cell_offsets(_blocks({(0, 0): [-4.0, -4.2, -4.1], (0, 1): [-0.2, -0.3, -0.1]}), times, ranges,
+                                 margin=0.5, agree=0.75, min_blocks=2)
+    assert deviant[1].tolist() == [[False, True]]          # two cells disagree: the better supported stays
+    np.testing.assert_allclose(supported[0][0], [-4.1, -0.2])

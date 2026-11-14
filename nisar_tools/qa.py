@@ -248,8 +248,40 @@ def _fill(values, measured):
     return out
 
 
-def band_offset(rslc, step=2.0, bins=6, window=4096, lines=512, group=32, min_peak=0.6,
-                limits=(-40.0, 5.0), margin=0.5, ionosphere=IONOSPHERE_GUESS_M, calibration=B_CALIBRATION_M):
+def _cell_offsets(blocks, times, ranges, margin, agree, min_blocks):
+    """Robust A - B per data window and range bin from the block measurements. Returns (values, measured).
+
+    A cell is measured when at least `min_blocks` of its blocks, and at least
+    half of them, lie within `agree` metres of their median; its value is the
+    median of those. A cell further than half a clock period from its window's
+    median needs one more agreeing block: a lone false peak over water or ice
+    must not set a cell's correction.
+    """
+    values = np.full((len(times) - 1, len(ranges) - 1), np.nan)
+    support = np.zeros(values.shape, int)
+    for i in range(values.shape[0]):
+        for j in range(values.shape[1]):
+            v = np.array([blk["a_minus_b"] for blk in blocks
+                          if times[i] + margin <= blk["t"] < times[i + 1] - margin
+                          and ranges[j] <= blk["r"] < ranges[j + 1]])
+            if v.size == 0:
+                continue
+            close = np.abs(v - np.median(v)) <= agree
+            if close.sum() >= max(min_blocks, int(np.ceil(0.5 * v.size))):
+                values[i, j], support[i, j] = float(np.median(v[close])), int(close.sum())
+    for i in range(values.shape[0]):
+        row = np.isfinite(values[i])
+        if row.sum() < 2:
+            continue
+        deviant = row & (np.abs(values[i] - np.median(values[i, row])) > CLOCK_PERIOD_M / 2) \
+            & (support[i] < min_blocks + 1)
+        values[i, deviant] = np.nan
+    return values, np.isfinite(values)
+
+
+def band_offset(rslc, step=1.0, bins=6, window=4096, lines=512, group=32, min_peak=0.6,
+                limits=(-40.0, 5.0), margin=0.5, agree=0.75, min_blocks=2, ionosphere=IONOSPHERE_GUESS_M,
+                calibration=B_CALIBRATION_M):
     """Measure band B's slant-range offset against band A on the same ground.
 
     Every `step` seconds, a `lines`-line block of A, low-passed to B's
@@ -257,14 +289,15 @@ def band_offset(rslc, step=2.0, bins=6, window=4096, lines=512, group=32, min_pe
     azimuth-averaged log power in `window`-sample range windows, one per range
     bin of `bins` across the swath, and cross-correlated in range.
     Measurements with a correlation peak under `min_peak` or an A - B outside
-    `limits` (m) are dropped; the rest give a median per data window
-    (`window_changes`) and bin, leaving out `margin` seconds at each window's
-    edges, where the synthetic aperture mixes the two windows. The offset changes at data-window updates and,
-    on some granules, across range within one window.
+    `limits` (m) are dropped; the rest give a robust median per data window
+    (`window_changes`) and bin (`agree`, `min_blocks`: see `_cell_offsets`),
+    leaving out `margin` seconds at each window's edges, where the synthetic
+    aperture mixes the two windows. The offset changes at data-window updates
+    and, on some granules, across range within one window.
 
     Needs both bands, with B's range grid nested in A's (same first range, a
     whole number of A samples per B sample), as in NISAR's 40 + 5 MHz mode.
-    About 20 s per frame.
+    About 40 s per frame.
     """
     own = not isinstance(rslc, RSLC)
     r = RSLC(rslc) if own else rslc
@@ -307,14 +340,7 @@ def band_offset(rslc, step=2.0, bins=6, window=4096, lines=512, group=32, min_pe
                                        a_minus_b=a_minus_b, peak=peak))
         edges = [float(t[i]) for i in window_changes(va)]
         times = np.array([float(t[0])] + [e for e in edges if t[0] < e < t[-1]] + [float(t[-1]) + 1.0 / ga.prf])
-        medians = np.full((times.size - 1, bins), np.nan)
-        for i in range(times.size - 1):
-            for j in range(bins):
-                inside = [blk["a_minus_b"] for blk in blocks
-                          if times[i] + margin <= blk["t"] < times[i + 1] - margin and ranges[j] <= blk["r"] < ranges[j + 1]]
-                if inside:
-                    medians[i, j] = float(np.median(inside))
-        measured = np.isfinite(medians)
+        medians, measured = _cell_offsets(blocks, times, ranges, margin, agree, min_blocks)
         return BandOffset(granule=r.granule_id, blocks=blocks, times=times, ranges=ranges,
                           offset=_fill(-np.nan_to_num(medians), measured), measured=measured,
                           calibration=calibration, ionosphere=ionosphere)
