@@ -59,6 +59,50 @@ def repair_drops(valid_samples, threshold=0.1):
     return out
 
 
+def restore_start(valid_samples, lines):
+    """`valid_samples` with the start of the valid region moved `lines` lines earlier.
+
+    For an RSLC whose first data-window segment ISCE3 v0.25.16 left out
+    (`nisar_tools.l0b.masked_segments`): the region it marks fully focused
+    starts half a synthetic aperture after the second segment instead of the
+    first, the same time later at every range. Each range sample's first valid
+    line moves `lines` earlier (not before the first line), within the extent
+    of the first line where the start is complete; that line and the ones after
+    it are unchanged.
+    """
+    out = []
+    for v in valid_samples:
+        v = np.asarray(v, np.int64).copy()
+        width = np.clip(v[:, 1] - v[:, 0], 0, None)
+        valid = np.flatnonzero(width > 0)
+        if lines <= 0 or valid.size == 0:
+            out.append(v)
+            continue
+        first = int(valid[0])
+        # where the start is complete: the first line as wide as any in the next half shift (the
+        # next data-window update, a segment later, comes after that)
+        window = width[first:first + max(lines // 2, 1)]
+        ref = first + int(np.flatnonzero(window >= window.max())[0])
+        s0, e0 = v[ref]
+        enters = np.full(e0 - s0, ref, np.int64)                   # each sample's first valid line
+        for i in range(first, ref):
+            a, b = max(v[i, 0], s0) - s0, min(v[i, 1], e0) - s0
+            if b > a:
+                np.minimum(enters[a:b], i, out=enters[a:b])
+        order = np.argsort(enters, kind="stable")
+        lo, hi = np.minimum.accumulate(order), np.maximum.accumulate(order)
+        rows = np.arange(max(first - lines, 0), ref)
+        count = np.searchsorted(enters[order], rows + lines, side="right")
+        has = count > 0
+        rows, count = rows[has], count[has]
+        start, end = s0 + lo[count - 1], s0 + hi[count - 1] + 1
+        old = width[rows] > 0
+        v[rows, 0] = np.where(old, np.minimum(v[rows, 0], start), start)
+        v[rows, 1] = np.where(old, np.maximum(v[rows, 1], end), end)
+        out.append(v)
+    return out
+
+
 def window_changes(valid_samples, persist=50, merge=1000):
     """Lines where the data window changes: a subswath edge steps to a new value and holds it
     for `persist` lines (the end of a one-line blip is no change).
@@ -112,7 +156,7 @@ def check_rslc(rslc):
             if lines.size:
                 out["problems"].append(
                     f"frequency {freq}: {lines.size} isolated line(s) mark {100 * fractions.max():.0f}% or less of "
-                    f"the swath invalid (lines {lines[:5].tolist()}); RSLC.valid_samples(repair=True) fixes them")
+                    f"the swath invalid (lines {lines[:5].tolist()}); geocode_rslc repairs them (repair_drops)")
         if out["input_data_exception"]:
             out["problems"].append("the L0B had input data exceptions (see inputDataExceptionMask)")
         return out

@@ -181,3 +181,21 @@ def test_a_timing_report_zeroes_the_mask_in_a_slips_transition():
                                                 azimuth_shift=report)
     assert list(m0) == [1, 1, 1] and list(m1) == [1, 0, 1]
     np.testing.assert_allclose(a1 - a0, [0.0, 0.0, -grid.prf / 1909.6], atol=1e-6)
+
+
+def test_geocoding_repairs_the_mask_unless_isce3s_masks_are_kept():
+    from nisar_tools.gslc_geocode import _valid_samples
+
+    class Rslc:
+        def valid_samples(self, frequency):
+            v = np.tile(np.array([[0, 50]], np.int64), (10, 1))
+            v[4] = (0, 10)                                    # a line that drops out of the swath
+            return [v]
+
+    class Report:
+        def repair_mask(self, valid):
+            return [v + 1 for v in valid]
+
+    assert _valid_samples(Rslc(), "A", True, Report())[0][4].tolist() == [1, 51]
+    assert _valid_samples(Rslc(), "A", True, lambda t: 0.0 * t)[0][4].tolist() == [0, 50]
+    assert _valid_samples(Rslc(), "A", False, Report())[0][4].tolist() == [0, 10]

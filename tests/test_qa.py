@@ -31,6 +31,30 @@ def test_isolated_drops_and_their_repair():
     assert qa.isolated_drops(fixed)[0].size == 0
 
 
+def _start_mask(first, lines, offset=10):
+    """Per-line `[start, end)` of a swath whose sample `j` is valid from line `first[j]` on."""
+    v = np.zeros((lines, 2), np.int64)
+    for i in range(lines):
+        ok = np.flatnonzero(first <= i)
+        if ok.size:
+            v[i] = (offset + ok[0], offset + ok[-1] + 1)
+    return v
+
+
+def test_restore_start_moves_each_samples_first_line_back():
+    shift, first = 150, 20 + np.arange(100) // 10          # far range fully focused last
+    true, masked = _start_mask(first, 400), _start_mask(first + shift, 400)
+    masked[300:, 0] = 11                                   # a later data-window update: left alone
+    (fixed,) = qa.restore_start([masked], shift)
+    np.testing.assert_array_equal(fixed[:300], true[:300])
+    np.testing.assert_array_equal(fixed[300:], masked[300:])
+    full = _start_mask(np.zeros(100, int), 400)            # a frame that starts after the start
+    np.testing.assert_array_equal(qa.restore_start([full], shift)[0], full)
+    empty = np.zeros((50, 2), np.int64)
+    np.testing.assert_array_equal(qa.restore_start([empty], shift)[0], empty)
+    np.testing.assert_array_equal(qa.restore_start([masked], 0)[0], masked)
+
+
 def test_window_changes_hold_and_merge():
     v = _swath(3000, 10, 90)
     v[1000:, 0] = 12                          # a data-window update...

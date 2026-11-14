@@ -18,9 +18,14 @@ straight into the RSLC:
 `timing_report` places what it finds in an RSLC's zero-Doppler time, and gives
 the one-pulse azimuth shift that `geocode_rslc(azimuth_shift=)` corrects a slip
 with.
+
+ISCE3 v0.25.16 also leaves the first data-window segment of every datatake out
+of the RSLC's valid samples, though it focuses its echoes: `masked_segments`
+finds such segments, and `TimingReport.repair_mask` restores them.
 """
 
 import dataclasses
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -587,13 +592,109 @@ def pulse_timings(source, **kwargs):
 
 
 @dataclasses.dataclass
+class MaskedSegment:
+    """A data-window segment of an L0B whose echoes ISCE3 v0.25.16 focuses but
+    leaves out of the RSLC's valid samples (`masked_segments`).
+
+    Times are seconds since `epoch`. `start` is the segment's first pulse and
+    `end` the next segment's (the last pulse, for the last segment);
+    `first_valid` its first pulse with echo, None if it has none; `empty` the
+    number of empty pulses it starts with; `leading` whether it is the L0B's
+    first segment, where a datatake's first L0B has its empty pulses.
+    """
+
+    granule: str
+    frequency: str
+    epoch: np.datetime64
+    start: float
+    end: float
+    first_valid: float
+    empty: int
+    leading: bool
+
+    @property
+    def lost(self):
+        """Seconds of echo the mask leaves out, `end - first_valid` (0 without echo)."""
+        return 0.0 if self.first_valid is None else self.end - self.first_valid
+
+
+def masked_segments(source, frequency="A", tx=None):
+    """The data-window segments of an L0B that ISCE3 v0.25.16 leaves out of an RSLC's valid samples.
+
+    The data window updates about every 10 s. ISCE3 v0.25.16 sizes each segment
+    of constant data window from the sub-swaths of its first pulse
+    (`Raw.getSubSwathBboxes`), and a segment whose first pulse carries no echo
+    gets no valid region at all, though its echoes are focused like the rest.
+    A datatake's first L0B starts with a few hundred empty pulses, so every
+    datatake loses its first segment: `validSamplesSubSwath` marks the image
+    fully focused only from half a synthetic aperture after the second segment
+    starts. ISCE3's develop branch finds the runs of pulses with echo first.
+
+    Parameters
+    ----------
+    source : str, Path or h5py.File
+        A local L0B, an `https://` URL of one, or an open file. A remote one
+        costs a few MB (the sub-swath limits), and about 10 MB more (the
+        data-window settings) when some pulse has no echo.
+    frequency : str
+        The band.
+    tx : str, optional
+        The transmit group (default: the band's first).
+
+    Returns
+    -------
+    list of MaskedSegment
+        Empty when every segment starts with echo, or the L0B has no sub-swath
+        limits.
+    """
+    f, close, name = _open(source)
+    try:
+        ident = f.get("science/LSAR/identification")
+        if ident is not None and "granuleId" in ident:
+            name = _decode(ident["granuleId"][()])
+        band = f[f"{RRSD}/swaths/frequency{frequency}"]
+        tx_name = tx or sorted(k for k in band if k.startswith("tx"))[0]
+        g = band[tx_name]
+        if "numberOfSubSwaths" not in g:
+            return []                                # no sub-swath limits: nothing for ISCE3 to size
+        epoch = radar.parse_epoch(g["UTCtime"].attrs["units"])
+        utc = g["UTCtime"][()].astype(np.float64)
+        n = int(g["numberOfSubSwaths"][()])
+        limits = np.stack([g[f"validSamplesSubSwath{i + 1}"][()] for i in range(n)]).astype(np.int64)
+        if "slantRange" in g:                        # ISCE3 clips the fill value to the samples in a line
+            limits = np.minimum(limits, g["slantRange"].shape[0])
+        empty = ~np.any(limits[..., 1] > limits[..., 0], axis=0)
+        if not empty.any():
+            return []
+        rx = sorted(k for k in g if k.startswith("rx"))[0]
+        rd, wd, wl = (g[f"{rx}/{k}"][()].astype(np.int64) for k in ("RD", "WD", "WL"))
+    finally:
+        if close:
+            f.close()
+    # ISCE3's get_dwp_change_indices: where the earliest window start or latest end over the channels changes
+    lo, hi = np.min(rd + wd, axis=1), np.max(rd + wd + wl, axis=1)
+    changes = np.flatnonzero((np.diff(lo) != 0) | (np.diff(hi) != 0)) + 1
+    out = []
+    for k, (a, b) in enumerate(zip(np.r_[0, changes], np.r_[changes, utc.size - 1])):
+        if not empty[a]:
+            continue
+        echo = np.flatnonzero(~empty[a:max(b, a + 1)])
+        out.append(MaskedSegment(granule=name, frequency=frequency, epoch=epoch, start=float(utc[a]),
+                                 end=float(utc[b]), first_valid=float(utc[a + echo[0]]) if echo.size else None,
+                                 empty=int(echo[0]) if echo.size else int(b - a), leading=k == 0))
+    return out
+
+
+@dataclasses.dataclass
 class TimingReport:
     """The pulse timing behind one RSLC, placed in its zero-Doppler time (`timing_report`).
 
     Times are seconds since the RSLC's epoch. `problems` lists each run of bad
     echoes as a dict with its `kind`, `start` / `end` transmit times, `count`,
     the zero-Doppler span it fully decides (`full`, or None) and the spans where
-    the synthetic aperture mixes it with good echoes (`transitions`).
+    the synthetic aperture mixes it with good echoes (`transitions`). `masked`
+    lists the L0Bs' `masked_segments` as dicts with the same times, and whether
+    the span ISCE3 masks wrongly `reaches` into the frame.
     """
 
     granule: str
@@ -605,6 +706,7 @@ class TimingReport:
     span: tuple
     lead: tuple
     aperture: float
+    masked: list = dataclasses.field(default_factory=list)
 
     @property
     def prf_error(self):
@@ -655,6 +757,49 @@ class TimingReport:
                 out |= (t >= a) & (t <= b)
         return out
 
+    def _leading_masked(self):
+        hits = [m for m in self.masked if m["leading"] and m["first_valid"] is not None and m["reaches"]]
+        return min(hits, key=lambda m: m["start"]) if hits else None
+
+    @property
+    def masked_start(self):
+        """Seconds of focused echo at the start of the frame's datatake that ISCE3
+        v0.25.16 left out of `validSamplesSubSwath` (`masked_segments`): from the
+        first pulse with echo to the next data-window segment. 0 when that does
+        not reach into the frame."""
+        m = self._leading_masked()
+        return 0.0 if m is None else float(m["end"] - m["first_valid"])
+
+    def repair_mask(self, valid_samples):
+        """`valid_samples` (`RSLC.valid_samples` of one band) with the masked
+        datatake start restored: each range sample's first valid line moves
+        `masked_start` earlier (`nisar_tools.qa.restore_start`).
+
+        Unchanged, with a warning, when the mask does not start where the lost
+        segment puts it (half an aperture after the next segment, give or take
+        a second), or when no line of the frame is valid to take the extent from.
+        """
+        from .qa import restore_start
+
+        m = self._leading_masked()
+        out = [np.asarray(v, np.int64).copy() for v in valid_samples]
+        if m is None or not out:
+            return out
+        dt = (self.span[1] - self.span[0]) / max(out[0].shape[0] - 1, 1)
+        width = sum(np.clip(v[:, 1] - v[:, 0], 0, None) for v in out)
+        valid = np.flatnonzero(width > 0)
+        if valid.size == 0:
+            warnings.warn(f"{self.granule}: no valid line to restore the masked datatake start from")
+            return out
+        if valid[0] > 0:
+            expected = m["end"] + self.lead[0] + 0.5 * self.aperture
+            seen = self.span[0] + valid[0] * dt
+            if abs(seen - expected) > 1.0:
+                warnings.warn(f"{self.granule}: the mask starts at {seen:.3f} s, not near {expected:.3f} s where "
+                              "the masked data-window segment puts it; left as it is")
+                return out
+        return restore_start(out, int(round(self.masked_start / dt)))
+
     def summary(self):
         """Readable lines, for logs."""
         lines = [f"{self.granule}: {self.verdict}; PRF {self.prf_product:.4f} Hz as focused, "
@@ -663,6 +808,12 @@ class TimingReport:
         for p in self.problems:
             where = "inside the frame" if _overlaps(p, self.span) else "outside the frame"
             lines.append(f"  {p['count']} echoes {p['kind']} at {p['start']:.3f}..{p['end']:.3f} s, {where}")
+        for m in self.masked:
+            lost = 0.0 if m["first_valid"] is None else m["end"] - m["first_valid"]
+            where = "reaches the frame" if m["reaches"] else "outside the frame"
+            fix = "; repair_mask restores it" if m["reaches"] and m["leading"] and lost > 0 else ""
+            lines.append(f"  the data-window segment at {m['start']:.3f}..{m['end']:.3f} s starts with {m['empty']} "
+                         f"empty pulses: ISCE3 v0.25.16 masks its {lost:.3f} s of echo ({where}{fix})")
         return "\n".join(lines)
 
 
@@ -711,7 +862,8 @@ def timing_report(rslc, l0b=None, frequency="A", tolerance=TOLERANCE):
     TimingReport
         A pixel whose beam-centre crossing is within half an aperture of a run's
         edge mixes good and bad echoes (`transitions`); one wholly inside a run
-        of slipped echoes is just shifted by a pulse (`full`).
+        of slipped echoes is just shifted by a pulse (`full`). The L0Bs'
+        `masked_segments` are in `masked` (not for `PulseTiming`s given as `l0b`).
     """
     from .rslc import RSLC
 
@@ -736,6 +888,16 @@ def timing_report(rslc, l0b=None, frequency="A", tolerance=TOLERANCE):
                 edges = [(x + lead_min - half, x + lead_max + half) for x in (a, b)]
                 problems.append(dict(s, granule=pt.granule, start=a, end=b,
                                      full=full if full[0] < full[1] else None, transitions=edges))
+        masked = []
+        for x in l0b:
+            if isinstance(x, PulseTiming):
+                continue                             # its file is not at hand
+            for m in masked_segments(x, frequency):
+                shift = (m.epoch - r.ref_epoch) / np.timedelta64(1, "s")
+                first = None if m.first_valid is None else m.first_valid + shift
+                wrong = ((m.start + shift if first is None else first) + lead_min, m.end + shift + lead_max + half)
+                masked.append(dict(granule=m.granule, start=m.start + shift, end=m.end + shift, first_valid=first,
+                                   empty=m.empty, leading=m.leading, reaches=_overlap(wrong, span)))
         prf_product = float(r.swath(frequency)["nominalAcquisitionPRF"][()])
         if timings:
             # the L0B ISCE3 took the PRF from is the one whose tags give the product's value
@@ -745,7 +907,7 @@ def timing_report(rslc, l0b=None, frequency="A", tolerance=TOLERANCE):
             expected = commanded = prf_product
         return TimingReport(granule=r.granule_id or Path(r.path).stem, timings=timings, problems=problems,
                             prf_product=prf_product, prf_expected=expected, prf_commanded=commanded, span=span,
-                            lead=(lead_min, lead_max), aperture=aperture)
+                            lead=(lead_min, lead_max), aperture=aperture, masked=masked)
     finally:
         if own:
             r.close()

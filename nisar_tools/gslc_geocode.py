@@ -370,8 +370,11 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         `f(t)`, seconds to add to zero-Doppler time `t` in every band: corrects
         pulses tagged with the wrong transmit time. A `TimingReport` shifts by
         a pulse where a slip fully decides the pixel and sets the mask to 0
-        where a slip's edge mixes good and bad echoes. Do not combine with a
-        `registration` measured on this RSLC, which already holds the shift.
+        where a slip's edge mixes good and bad echoes; unless
+        `isce3_compatible=True`, it also restores the start of a datatake that
+        ISCE3 left out of `validSamplesSubSwath` (`TimingReport.repair_mask`).
+        Do not combine with a `registration` measured on this RSLC, which
+        already holds the shift.
     isce3_compatible : {"pixels", True, False}
         Which of ISCE3 v0.25.16's defects to reproduce.
         - `"pixels"` (default): pixels identical to ISCE3's, so this GSLC
@@ -625,21 +628,30 @@ def _block_may_touch_swath(geogrid, row0, row1, col0, col1, grid, orbit, margin_
                 or sample.max() < -margin_px or sample.min() > grid.width + margin_px)
 
 
+def _valid_samples(rslc, freq, fix_metadata, azimuth_shift=None):
+    """The band's `validSamplesSubSwath`, repaired unless ISCE3's masks are reproduced: lines that
+    drop out for one line, and a datatake start a `TimingReport` finds masked."""
+    from .qa import repair_drops
+
+    valid = rslc.valid_samples(freq)
+    if fix_metadata:
+        valid = repair_drops(valid)
+        if hasattr(azimuth_shift, "repair_mask"):
+            valid = azimuth_shift.repair_mask(valid)
+    return valid
+
+
 def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
                        flatten, block_size, workers, log, exception_bands,
                        registration=None, range_shift=None, azimuth_shift=None,
                        fix_metadata=False, fix_pixels=False):
-    from .qa import repair_drops
-
     root = f"{gp.PRODUCT}/grids/frequency{freq}"
     writers = {pol: gp.ChunkWriter(f[f"{root}/{pol}"]) for pol in pols}
     mask_writer = gp.ChunkWriter(f[f"{root}/mask"])
     stats = {(freq, pol): gp.ComplexStats() for pol in pols}
     readers = {pol: rslc.reader(freq, pol) for pol in pols}
     doppler = rslc.doppler_centroid(freq, zero_doppler=fix_pixels)
-    valid = rslc.valid_samples(freq)
-    if fix_metadata:
-        valid = repair_drops(valid)
+    valid = _valid_samples(rslc, freq, fix_metadata, azimuth_shift)
 
     blocks = []
     for row0 in range(0, geogrid.length, block_size):

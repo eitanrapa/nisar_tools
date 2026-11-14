@@ -36,6 +36,26 @@ def _write_l0b(path, utc, table, first_line=5000, name="NISAR_L0_PR_RRSD_TEST"):
     return path
 
 
+def _add_windows(path, changes, empty, samples=1000):
+    """Sub-swath limits (the fill value on pulses with no echo) and data-window settings that
+    update at the pulses in `changes`."""
+    with h5py.File(path, "r+") as f:
+        tx = f["science/LSAR/RRSD/swaths/frequencyA/txH"]
+        n = tx["UTCtime"].shape[0]
+        limits = np.tile(np.array([[10, samples - 10]], np.uint32), (n, 1))
+        limits[empty] = np.iinfo(np.uint32).max
+        tx["numberOfSubSwaths"] = 1
+        tx["validSamplesSubSwath1"] = limits
+        tx["slantRange"] = 880e3 + 3.12 * np.arange(samples)
+        wd = np.full((n, 12), 4720, np.uint32)
+        for c in changes:
+            wd[c:] -= 5
+        tx["rxH/RD"] = np.full((n, 12), 1403230, np.uint32)
+        tx["rxH/WD"] = wd
+        tx["rxH/WL"] = np.full((n, 12), 42650, np.uint32)
+    return path
+
+
 @pytest.fixture
 def table():
     return np.random.default_rng(1).uniform(0.423e-3, 0.621e-3, 173)
@@ -84,6 +104,17 @@ def test_a_fixed_prf_l0b_without_a_table(tmp_path):
         tx["nominalAcquisitionPRF"] = 1600.0
     segs = l0b.pulse_timing(path).segments()
     assert [(s["code"], s["first"], s["count"]) for s in segs] == [(l0b.EARLY, 700, 200)]
+
+
+def test_masked_segments_are_those_whose_first_pulse_has_no_echo(tmp_path, table):
+    utc = _true_times(20000, 1000.0, table)
+    path = _add_windows(_write_l0b(tmp_path / "l0b.h5", utc, table), [6000, 12000], np.r_[0:500, 6003, 12000])
+    first, later = l0b.masked_segments(path)
+    assert first.leading and first.empty == 500 and (first.start, first.end) == (utc[0], utc[6000])
+    assert first.first_valid == utc[500] and first.lost == pytest.approx(utc[6000] - utc[500])
+    assert not later.leading and later.empty == 1 and later.first_valid == utc[12001] and later.end == utc[-1]
+    clean = _add_windows(_write_l0b(tmp_path / "clean.h5", utc, table), [6000], np.array([], int))
+    assert l0b.masked_segments(clean) == []
 
 
 # -- the report on an RSLC -------------------------------------------------------------
@@ -163,6 +194,42 @@ def test_timing_report_places_a_slip_in_the_rslcs_time(tmp_path, table):
     if inside is not None:
         assert rep.azimuth_shift([inside])[0] == pytest.approx(-1 / pt.prf_commanded)
     assert rep.azimuth_shift([grid.sensing_start + 1.0])[0] == 0.0
+
+
+def test_the_report_restores_a_masked_datatake_start(tmp_path, table):
+    orbit = rs.orbit()
+    grid = rs.radar_grid(length=20 * 1520, width=400, sensing_start=rs.T0 + 60.0)
+    utc = _true_times(int(40 * 1909.6), rs.T0 + 50.0, table)
+    changes = [int(np.searchsorted(utc, rs.T0 + 50.0 + 10.0 * k)) for k in (1, 2, 3)]
+    path = _add_windows(_write_l0b(tmp_path / "l0b.h5", utc, table), changes, np.arange(500))
+    rslc = _write_rslc(tmp_path / "rslc.h5", grid, orbit, l0b.pulse_timing(path).prf_from_tags,
+                       "NISAR_L0_PR_RRSD_TEST")
+    rep = l0b.timing_report(rslc, l0b=[path])
+    (m,) = rep.masked
+    assert m["leading"] and m["reaches"] and m["empty"] == 500
+    assert rep.masked_start == pytest.approx(utc[changes[0]] - utc[500])
+    assert "repair_mask restores it" in rep.summary()
+    # ISCE3's mask: full focus half an aperture after the second segment starts, later at far range
+    t_full = utc[changes[0]] + rep.lead[0] + 0.5 * rep.aperture * np.linspace(0.85, 1.0, grid.width)
+    first = np.ceil((t_full - grid.sensing_start) * grid.prf).astype(int)
+    masked = np.zeros((grid.length, 2), np.int64)
+    for i in range(grid.length):
+        ok = np.flatnonzero(first <= i)
+        if ok.size:
+            masked[i] = (ok[0], ok[-1] + 1)
+    (fixed,) = rep.repair_mask([masked])
+    shift = int(round(rep.masked_start * grid.prf))
+    fixed_first = np.array([np.flatnonzero((fixed[:, 0] <= j) & (j < fixed[:, 1]))[0] for j in range(grid.width)])
+    np.testing.assert_array_equal(fixed_first, np.maximum(first - shift, 0))
+    late = masked.copy()
+    late[:first.max() + 3 * 1520] = 0                       # a mask that starts somewhere else
+    with pytest.warns(UserWarning, match="left as it is"):
+        np.testing.assert_array_equal(rep.repair_mask([late])[0], late)
+    after = l0b.TimingReport(granule="x", timings=[], problems=[], prf_product=1909.6, prf_expected=1909.6,
+                             prf_commanded=1909.6, span=(0.0, 10.0), lead=(2.0, 2.3), aperture=2.8,
+                             masked=[dict(m, reaches=False)])
+    assert after.masked_start == 0.0
+    np.testing.assert_array_equal(after.repair_mask([masked])[0], masked)
 
 
 @pytest.mark.skipif(not os.environ.get("NISAR_TEST_L0B_RSLC"),

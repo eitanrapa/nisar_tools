@@ -119,6 +119,6 @@ gslc = geocode_rslc(rslc, "data/", dem, range_shift={"B": offset.shift}, azimuth
 ```
 
 `range_shift` aligns band B's ground with A's, which split-spectrum ionosphere screens need; `azimuth_shift` moves
-spans tagged a pulse early or late back by a pulse and sets the mask to 0 where a slip's edge mixes good and bad
-echoes. Do not pass `azimuth_shift` together with a `registration` measured on the same RSLC, which already holds the
+spans tagged a pulse early or late back by a pulse, sets the mask to 0 where a slip's edge mixes good and bad echoes,
+and restores the start of a datatake that ISCE3 left out of `validSamplesSubSwath`. Do not pass `azimuth_shift` together with a `registration` measured on the same RSLC, which already holds the
 shift.

@@ -9,7 +9,7 @@ from nisar_tools.qa import band_offset, check_pair, check_rslc
 
 check_rslc(rslc)["problems"]       # release, PRF, calibration delays, input-data exceptions, dropped mask lines
 check_pair(reference, secondary)   # [] when the two were focused alike
-print(timing_report(rslc).summary())
+print(timing_report(rslc).summary())   # pulse timing, and a datatake start the mask leaves out
 print(band_offset(rslc).summary())
 ```
 
@@ -49,6 +49,24 @@ and checks the tags against it, which finds two more defects:
   refocus repairs it (`"refocus"`);
 - **unanchored tags**: no run of tags follows the sequence at all. The echoes are then timed from the transmit gaps,
   anchored on the first tag, whose own error remains as a constant along-track shift to measure against another date.
+
+## Datatake starts
+
+The data window updates about every 10 s. ISCE3 v0.25.16 takes each window's valid region from its first pulse, and a
+datatake's first L0B starts with a few hundred empty pulses, so the datatake's first window gets none:
+`validSamplesSubSwath` marks the image fully focused only from half a synthetic aperture after the second window starts,
+though the first is focused like the rest. A frame holding a datatake start can lose most of its lines to the mask, and
+GSLCs and interferograms made from it drop them. On a map the false edge is a line of constant time, slanted at the
+track's heading. ISCE3's development branch has fixed it.
+
+`masked_segments` finds such windows in an L0B. `timing_report(rslc)` reads them with the pulse timing:
+`masked_start` is the time the mask loses in the frame, `repair_mask` restores it in a band's valid samples, and
+`geocode_rslc(azimuth_shift=report)` does so in the GSLC's mask (unless `isce3_compatible=True`). Only the mask
+changes; the pixels were right.
+
+The strip of band A at near range is different. Band B's pulse follows band A's by about 31 µs in one receive window,
+both bands share a grid that starts at B's nearer range, and band A's first ~5 km of slant range hold echoes recorded
+only in part. ISCE3 marks that strip correctly, and nothing recovers it.
 
 ## Band B's range
 
