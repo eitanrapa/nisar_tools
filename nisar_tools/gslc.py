@@ -249,6 +249,21 @@ class GSLC:
         return self._dset.shape
 
     @property
+    def pixel_convention(self):
+        """`"isce3"`, or `"fixed"` for a GSLC geocoded with `isce3_compatible=False`.
+
+        ASF's GSLCs, and `geocode_rslc`'s by default, carry ISCE3 v0.25.16's
+        pixels. The fixed ones interpolate the DEM and the Doppler differently,
+        which changes the phase, so the two do not pair.
+        """
+        path = "science/LSAR/GSLC/metadata/processingInformation/parameters/runConfigurationContents"
+        if path not in self._file:
+            return "isce3"
+        text = _decode(self._file[path][()])
+        ours = text.startswith("# written by nisar_tools.gslc_geocode.geocode_rslc")
+        return "fixed" if ours and "\n    isce3_compatible: False\n" in text else "isce3"
+
+    @property
     def wavelength(self):
         """Radar wavelength (m) of this sub-band, or None if unrecorded."""
         if self.center_frequency is None:

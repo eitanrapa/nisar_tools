@@ -118,3 +118,37 @@ def test_context_manager(gslc_factory):
     with GSLC(path) as g:
         assert g.shape[0] > 0
     assert g._file is None
+
+
+def _record_run(path, isce3_compatible):
+    """Give a synthetic GSLC the run record geocode_rslc writes."""
+    import h5py
+    import numpy as np
+
+    from nisar_tools._gslc_metadata import describe_run
+
+    with h5py.File(path, "r+") as f:
+        name = "science/LSAR/GSLC/metadata/processingInformation/parameters/runConfigurationContents"
+        if name in f:
+            del f[name]
+        f[name] = np.bytes_(describe_run(software="x", isce3_compatible=isce3_compatible, epsg=32611))
+
+
+def test_pixel_convention_and_stacks_refuse_a_mix(gslc_factory):
+    from nisar_tools import GSLC
+    from nisar_tools.stack import GSLCStack
+
+    asf = gslc_factory(datetime_str="2025-11-28T02:32:50.000000000")
+    ours = gslc_factory(datetime_str="2025-12-10T02:32:50.000000000")
+    _record_run(ours, "pixels")
+    fixed = gslc_factory(datetime_str="2025-12-22T02:32:50.000000000")
+    _record_run(fixed, False)
+    a, b, c = GSLC(asf), GSLC(ours), GSLC(fixed)
+    try:
+        assert (a.pixel_convention, b.pixel_convention, c.pixel_convention) == ("isce3", "isce3", "fixed")
+        GSLCStack.from_gslcs([a, b])
+        with pytest.raises(ValueError, match="isce3_compatible=False"):
+            GSLCStack.from_gslcs([a, c])
+    finally:
+        for g in (a, b, c):
+            g.close()

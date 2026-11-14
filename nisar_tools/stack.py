@@ -70,6 +70,13 @@ class GSLCStack(RasterStackMixin):
                 "interferometric with each other; build one stack per band (that "
                 "is what the dual-frequency ionosphere correction combines)."
             )
+        conventions = {g.pixel_convention for g in gslcs}
+        if len(conventions) > 1:
+            raise ValueError(
+                "GSLCs mix ISCE3's pixels (ASF's, or geocode_rslc's default) with "
+                "geocode_rslc(isce3_compatible=False)'s, whose DEM and Doppler "
+                "interpolation change the phase; geocode every date the same way."
+            )
         # Every granule of a band shares its carrier, so a mismatch here is a
         # corrupt product rather than a user error -- but recording it is what
         # lets the ionosphere correction find the two frequencies on its own.

@@ -98,6 +98,7 @@ on band B's grid; and the cube's ground-track velocity uses its own `rdr2geo` to
 The pixel fixes change the phase, so both dates of a pair must use them, and never with an ASF GSLC: a centred DEM
 spline window (ISCE3's is one node off, and never reads the first row or column) and the Doppler table read at
 zero-Doppler coordinates (ISCE3 writes it over beam-centre times, about 2 s earlier, and labels them zero-Doppler).
+`GSLC.pixel_convention` reads which a GSLC has, and `GSLCStack.from_gslcs` refuses a mix.
 
 One departure is always there: the port reads the RSLC's last line and range sample, which ISCE3 drops, so along the
 far-range edge a ribbon about a pixel wide is finite here and NaN in ASF's products, with mask 0 in both.
