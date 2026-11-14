@@ -127,3 +127,57 @@ def test_field_must_be_finite_and_regular():
         RegistrationField(x, y, np.array([[0.0, np.nan], [0.0, 0.0]]), np.zeros((2, 2)))
     with pytest.raises(ValueError, match="regular"):
         RegistrationField(np.array([0.0, 1.0, 3.0]), y, np.zeros((2, 3)), np.zeros((2, 3)))
+
+
+# -- an RSLC's own range and timing errors ------------------------------------------------
+def test_range_and_azimuth_shifts_equal_a_registration_and_leave_the_flattening():
+    """`range_shift(t, r)` metres and `azimuth_shift(t)` seconds move the sampled radar
+    position exactly as a registration of `r / dr` samples and `t * prf` lines would."""
+    orbit = rs.orbit()
+    grid = rs.radar_grid(length=64, width=64)
+    doppler = rs.constant_doppler(grid, 950.0)
+    x, y = _map_points(grid, orbit, [20.3, 31.7, 40.1], [22.9, 30.2, 41.6])
+    field = RegistrationField(np.linspace(x.min() - 500, x.max() + 500, 3),
+                              np.linspace(y.max() + 500, y.min() - 500, 3),
+                              np.full((3, 3), -0.8), np.full((3, 3), 2.5))
+    dem = _FlatDEM()
+    _, _, _, a1, g1, f1, m1 = pixel_radar_indices(x, y, 32617, dem, grid, orbit, doppler, [],
+                                                  registration=field)
+    seen = []
+
+    def range_shift(t, r):
+        seen.append((np.asarray(t).copy(), np.asarray(r).copy()))
+        return np.full(np.shape(t), 2.5 * grid.range_pixel_spacing)
+
+    _, _, _, a2, g2, f2, m2 = pixel_radar_indices(
+        x, y, 32617, dem, grid, orbit, doppler, [], range_shift=range_shift,
+        azimuth_shift=lambda t: np.full(np.shape(t), -0.8 / grid.prf))
+    np.testing.assert_allclose(a1, a2, atol=1e-9)
+    np.testing.assert_allclose(g1, g2, atol=1e-9)
+    np.testing.assert_array_equal(f1, f2)
+    np.testing.assert_array_equal(m1, m2)
+    # the hooks see the pixel's own zero-Doppler time and slant range
+    _, _, _, a0, g0, _, _ = pixel_radar_indices(x, y, 32617, dem, grid, orbit, doppler, [])
+    np.testing.assert_allclose(seen[0][0], grid.sensing_start + a0 / grid.prf, atol=1e-9)
+    np.testing.assert_allclose(seen[0][1], grid.starting_range + g0 * grid.range_pixel_spacing, atol=1e-6)
+
+
+def test_a_timing_report_zeroes_the_mask_in_a_slips_transition():
+    from nisar_tools import l0b
+
+    orbit = rs.orbit()
+    grid = rs.radar_grid(length=64, width=64)
+    doppler = rs.constant_doppler(grid, 950.0)
+    x, y = _map_points(grid, orbit, [10.0, 30.0, 50.0], [30.0, 30.0, 30.0])
+    t_mid = grid.sensing_start + 30.0 / grid.prf
+    problem = dict(kind=l0b.KIND_NAMES[l0b.EARLY], code=l0b.EARLY, count=1, start=0.0, end=0.0,
+                   full=(t_mid + 0.004, t_mid + 1.0), transitions=[(t_mid - 0.004, t_mid + 0.004)])
+    report = l0b.TimingReport(granule="x", timings=[], problems=[problem], prf_product=1909.6,
+                              prf_expected=1909.6, prf_commanded=1909.6, span=(0.0, 1e6), lead=(2.0, 2.0),
+                              aperture=0.008)
+    valid = [np.column_stack([np.zeros(grid.length), np.full(grid.length, grid.width)]).astype(np.int64)]
+    _, _, _, a0, _, _, m0 = pixel_radar_indices(x, y, 32617, _FlatDEM(), grid, orbit, doppler, valid)
+    _, _, _, a1, _, _, m1 = pixel_radar_indices(x, y, 32617, _FlatDEM(), grid, orbit, doppler, valid,
+                                                azimuth_shift=report)
+    assert list(m0) == [1, 1, 1] and list(m1) == [1, 0, 1]
+    np.testing.assert_allclose(a1 - a0, [0.0, 0.0, -grid.prf / 1909.6], atol=1e-6)

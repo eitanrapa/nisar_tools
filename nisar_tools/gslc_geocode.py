@@ -229,16 +229,28 @@ class RegistrationField:
                 f"samples {np.min(self.samples):+.3f}..{np.max(self.samples):+.3f})")
 
 
+def _timing_hooks(azimuth_shift):
+    """`(shift(t), transition(t) or None)` from a callable or a `nisar_tools.l0b.TimingReport`."""
+    if azimuth_shift is None:
+        return None, None
+    if hasattr(azimuth_shift, "azimuth_shift") and hasattr(azimuth_shift, "transition"):
+        return azimuth_shift.azimuth_shift, azimuth_shift.transition
+    return azimuth_shift, None
+
+
 def pixel_radar_indices(x, y, epsg, dem, grid, orbit, doppler, valid, corrections=None,
-                        registration=None):
+                        registration=None, range_shift=None, azimuth_shift=None):
     """Steps 1-5 of the geocoding for output pixels at map `x`, `y` (1-D).
 
-    The DEM height, zero-Doppler `geo2rdr`, the timing `corrections` and,
-    last, the `registration` shifts (see `RegistrationField`). Returns
-    `(lon, lat, h, az_index, rg_index, flatten_range, mask)`, lon/lat in
-    radians. `flatten_range` is the geometric range in every case, and the
-    subswath `mask` is that of the position *before* registration -- a shift
-    of a line or two does not change it except at a subswath edge.
+    The DEM height, zero-Doppler `geo2rdr`, the timing `corrections`, the
+    RSLC's own `azimuth_shift(t)` (s) and `range_shift(t, r)` (m) at the
+    corrected time and range, and last the `registration` shifts (see
+    `RegistrationField`). Returns `(lon, lat, h, az_index, rg_index,
+    flatten_range, mask)`, lon/lat in radians. `flatten_range` is the geometric
+    range in every case, and the subswath `mask` is that of the position
+    *before* the shifts -- a shift of a line or two does not change it except
+    at a subswath edge -- except that a `TimingReport` given as `azimuth_shift`
+    sets it to 0 where a timing defect's transition mixes good and bad echoes.
     """
     lon, lat = _to_lonlat(epsg, x, y)
     lon, lat = np.deg2rad(lon), np.deg2rad(lat)
@@ -246,6 +258,16 @@ def pixel_radar_indices(x, y, epsg, dem, grid, orbit, doppler, valid, correction
     az_corr = corrections.azimuth if corrections is not None else None
     rg_corr = corrections.slant_range if corrections is not None else None
     az, rg, rng, mask = radar_indices(lon, lat, h, grid, orbit, doppler, valid, az_corr, rg_corr)
+    shift, transition = _timing_hooks(azimuth_shift)
+    if shift is not None or range_shift is not None:
+        t = grid.sensing_start + az / grid.prf
+        r = grid.starting_range + rg * grid.range_pixel_spacing
+        if shift is not None:
+            az = az + np.asarray(shift(t), float) * grid.prf
+        if range_shift is not None:
+            rg = rg + np.asarray(range_shift(t, r), float) / grid.range_pixel_spacing
+        if transition is not None:
+            mask = np.where(transition(t) & (mask != 255), np.uint8(0), mask)
     if registration is not None:
         d_lines, d_samples = registration(x, y)
         az = az + d_lines
@@ -290,9 +312,9 @@ def product_bounds(path):
 def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
                  epsg=None, bounds=None, like=None, posting=None, snap=240.0,
                  orbit_file=None, tec_file=None, solid_earth_tides=True,
-                 flatten=True, registration=None, block_size=1024, workers=None,
-                 granule_id=None, dem_description=None, overwrite=False,
-                 log=print):
+                 flatten=True, registration=None, range_shift=None, azimuth_shift=None,
+                 block_size=1024, workers=None, granule_id=None, dem_description=None,
+                 overwrite=False, log=print):
     """Geocode an RSLC into a NISAR L2 GSLC HDF5 file. Returns the output path.
 
     Parameters
@@ -333,6 +355,19 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         built from dense offsets, to make this GSLC the coregistered
         secondary of a reference GSLC -- see that class for why ASF's GSLCs
         need it. Recorded in `runConfigurationContents`.
+    range_shift : dict, optional
+        `{frequency: f(t, r)}`, metres to add to that band's slant range at
+        zero-Doppler time `t` and range `r`: corrects the band's own range
+        error. `nisar_tools.qa.band_offset(rslc).shift` is band B's offset
+        against A (whole periods of the 48 MHz clock, constant per data
+        window), which otherwise leaks deformation into split-spectrum screens.
+        The flattening range is not changed.
+    azimuth_shift : callable or `nisar_tools.l0b.TimingReport`, optional
+        `f(t)`, seconds to add to zero-Doppler time `t` in every band: corrects
+        pulses tagged with the wrong transmit time. A `TimingReport` shifts by
+        a pulse where a slip fully decides the pixel and sets the mask to 0
+        where a slip's edge mixes good and bad echoes. Do not combine with a
+        `registration` measured on this RSLC, which already holds the shift.
     block_size : int
         Output block edge in pixels; rounded to a multiple of the 512 chunk.
     workers : int, optional
@@ -390,7 +425,8 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
                 corrections[freq], flatten, block_size, workers, log,
                 exception_masks=(freq == first and _has_input_data_exception(src)),
                 exception_grid=grids[first], freq_pols=freq_pols,
-                registration=registration))
+                registration=registration, range_shift=(range_shift or {}).get(freq),
+                azimuth_shift=azimuth_shift))
         for (freq, pol), st in stats.items():
             st.write(f[f"{gp.PRODUCT}/grids/frequency{freq}/{pol}"])
 
@@ -403,6 +439,9 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             solid_earth_tides=solid_earth_tides, flatten=flatten,
             registration=None if registration is None else getattr(
                 registration, "description", type(registration).__name__),
+            range_shift=None if not range_shift else {
+                k: _describe(v) for k, v in range_shift.items() if k in freq_pols},
+            azimuth_shift=None if azimuth_shift is None else _describe(azimuth_shift),
             frequencies=dict(freq_pols), epsg=epsg, bounds=bounds,
             like=str(like) if like is not None else None, snap=snap,
             geo2rdr_threshold=1e-8, geo2rdr_maxiter=25, block_size=block_size,
@@ -515,6 +554,14 @@ def _write_timing_corrections(f, freq, corr):
 _TRANSFORMERS = threading.local()
 
 
+def _describe(hook):
+    """A short label of a shift hook for `runConfigurationContents`."""
+    owner = getattr(hook, "__self__", hook)
+    if hasattr(owner, "granule"):
+        return f"{type(owner).__name__} of {owner.granule}"
+    return getattr(hook, "__name__", type(hook).__name__)
+
+
 def _to_lonlat(epsg, x, y):
     from pyproj import Transformer
 
@@ -556,7 +603,8 @@ def _block_may_touch_swath(geogrid, row0, row1, col0, col1, grid, orbit, margin_
 
 def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
                        flatten, block_size, workers, log, exception_masks,
-                       exception_grid, freq_pols, registration=None):
+                       exception_grid, freq_pols, registration=None, range_shift=None,
+                       azimuth_shift=None):
     root = f"{gp.PRODUCT}/grids/frequency{freq}"
     writers = {pol: gp.ChunkWriter(f[f"{root}/{pol}"]) for pol in pols}
     mask_writer = gp.ChunkWriter(f[f"{root}/mask"])
@@ -585,7 +633,7 @@ def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
         X, Y = np.meshgrid(xs, ys)
         lon, lat, h, az, rg, rng, mask = pixel_radar_indices(
             X.ravel(), Y.ravel(), geogrid.epsg, dem, grid, orbit, doppler, valid,
-            corr, registration)
+            corr, registration, range_shift=range_shift, azimuth_shift=azimuth_shift)
         shape = (row1 - row0, col1 - col0)
         ok = np.isfinite(az)
         if ok.any():
