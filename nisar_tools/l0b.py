@@ -34,7 +34,7 @@ TOLERANCE = 10e-6
 CONSISTENT, EARLY, LATE, INCONSISTENT, RELABELLED = 0, -1, 1, 2, 3
 KIND_NAMES = {CONSISTENT: "consistent", EARLY: "previous pulse's time",
               LATE: "next pulse's time", INCONSISTENT: "inconsistent",
-              RELABELLED: "time of another pulse (off the transmit gaps)"}
+              RELABELLED: "time of another pulse"}
 
 
 def _decode(value):
@@ -171,6 +171,7 @@ class PulseTiming:
     gap_match: float = None
     tag_shift: int = 0
     anchored: bool = True
+    phase_source: str = "tags"
 
     @property
     def residual(self):
@@ -233,9 +234,11 @@ class PulseTiming:
                 f"{self.prf_commanded:.4f} Hz, from the tags {self.prf_from_tags:.4f} Hz")
         lines = [head] + [f"  {s['count']} echoes tagged with the {s['kind']}" if s["code"] in (EARLY, LATE, RELABELLED)
                           else f"  {s['count']} echoes {s['kind']}" for s in self.segments()]
+        if self.phase_source != "tags":
+            lines.append(f"  the table's phase, {self.table_phase}, from the "
+                         + ("transmit leakage in the echoes" if self.phase_source == "leakage" else "sub-swath limits"))
         if self.tag_shift:
-            lines.append(f"  the tags follow the table {self.tag_shift} pulses off the transmit gaps "
-                         f"(phase {self.gap_phase})")
+            lines.append(f"  the tags follow the table {self.tag_shift} pulses off the radar's sequence")
         behind = float(np.max(self.model - self.utc))
         if behind > 1e-3:
             lines.append(f"  the tags fall up to {behind:.3f} s behind the sequence")
@@ -327,7 +330,102 @@ def tx_gap_phase(source, frequency="A", count=519, tolerance=3.0):
                     first_line=line0)
 
 
-def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", min_anchor=1.0):
+@dataclasses.dataclass
+class LeakagePhase:
+    """`tx_leakage_phase`'s answer: the PRI table's phase the radar flew, read from its echoes."""
+
+    granule: str
+    phase: int
+    ratio: float
+    runner_up: float
+    offset: float
+    pulses: int
+    first_line: int
+
+    @property
+    def clear(self):
+        """The phase stands out: its ratio is at least 1.3 times any other phase's."""
+        return self.ratio >= 1.3 * self.runner_up
+
+    def summary(self):
+        """One line, for logs."""
+        return (f"{self.granule}: the transmit leakage in {self.pulses} echoes follows the PRI table at phase "
+                f"{self.phase} (power ratio {self.ratio:.2f}, next {self.runner_up:.2f}; offset {self.offset:+.0f} "
+                f"samples), counted from line {self.first_line}")
+
+
+def _echo_amplitude(dataset, rows, lut=None):
+    """|echo| of `rows` of an L0B raw dataset: BFPQ codes through `lut`, or complex samples."""
+    raw = dataset[rows]
+    if raw.dtype.names and "r" in raw.dtype.names:
+        if lut is None:
+            return np.hypot(raw["r"].astype(float), raw["i"].astype(float))
+        return np.hypot(lut[raw["r"]].astype(float), lut[raw["i"]].astype(float))
+    return np.abs(raw).astype(float)
+
+
+def tx_leakage_phase(source, frequency="A", count=200, width=1849, offsets=np.arange(-2000, 2001, 40)):
+    """Which phase of the commanded PRI table the radar flew, read from the transmit leakage in its echoes.
+
+    While an echo is received the radar transmits later pulses, and each
+    transmit leaks into the receive window, several times brighter than the
+    echo: pulse k + M's transmit lands `(t[k + M] - t[k] - 2 r0 / c) fs` samples
+    into pulse k's window, up to an offset fixed by the hardware. For each
+    phase (and offset), the mean amplitude in the predicted windows over the
+    mean of all samples picks the radar's phase: on Kumamoto 003D 2026-07-08 and
+    07-20 the ratio is about 4 there and at most 2.4 elsewhere, at -250
+    samples. Unlike `tx_gap_phase` it reads the echoes, `count` of them
+    mid-datatake (about 40 MB), but the L0B's sub-swath limits can be
+    bookkeeping: on 003D 07-20 they follow the table 44 pulses off.
+
+    Returns
+    -------
+    LeakagePhase
+        Its `phase` is `pulse_timing`'s, counted from the L0B's first line.
+    """
+    f, close, name = _open(source)
+    try:
+        tx = f[f"science/LSAR/RRSD/swaths/frequency{frequency}/txH"]
+        table = np.atleast_1d(np.asarray(tx["PRISequence"][()], float))
+        lines = tx["rangeLineIndex"]
+        n = lines.shape[0]
+        first = max(0, n // 2 - count // 2)
+        sel = slice(first, min(n, first + count))
+        line0 = int(lines[0])
+        k = np.asarray(lines[sel], np.int64) - line0
+        rx = tx[sorted(key for key in tx if key.startswith("rx"))[0]]
+        data = rx[sorted(key for key in rx if len(key) == 2 and key.isupper())[0]]
+        a = _echo_amplitude(data, sel, rx["BFPQLUT"][()] if "BFPQLUT" in rx else None)
+        r = tx["slantRange"]
+        r0, dr = float(r[0]), float(r[1] - r[0])
+    finally:
+        if close:
+            f.close()
+    ns = a.shape[1]
+    cs = np.concatenate([np.zeros((a.shape[0], 1)), np.cumsum(a, axis=1)], axis=1)
+    base = a.mean()
+    c = radar.SPEED_OF_LIGHT
+    fs, tau0 = c / (2 * dr), 2 * r0 / c
+    lags = np.arange(1, int(np.ceil(4 * tau0 / table.min())) + 2)
+    cum = np.concatenate([[0.0], np.cumsum(np.tile(table, int((k.max() + lags[-1]) // table.size) + 3))])
+    rows = np.broadcast_to(np.arange(a.shape[0])[:, None], (a.shape[0], lags.size))
+    ratios, best_off = np.zeros(table.size), np.zeros(table.size)
+    for phase in range(table.size):
+        pred = (cum[k[:, None] + phase + lags[None, :]] - cum[k[:, None] + phase] - tau0) * fs
+        for off in offsets:
+            start = np.round(pred + off).astype(np.int64)
+            ok = (start >= 0) & (start + width <= ns)
+            if ok.any():
+                ratio = (cs[rows[ok], start[ok] + width] - cs[rows[ok], start[ok]]).mean() / width / base
+                if ratio > ratios[phase]:
+                    ratios[phase], best_off[phase] = ratio, off
+    order = np.argsort(ratios)[::-1]
+    return LeakagePhase(granule=name, phase=int(order[0]), ratio=float(ratios[order[0]]),
+                        runner_up=float(ratios[order[1]]), offset=float(best_off[order[0]]), pulses=int(a.shape[0]),
+                        first_line=line0)
+
+
+def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", min_anchor=1.0, echoes="auto"):
     """Check an L0B's echo times against its commanded pulse sequence.
 
     Parameters
@@ -339,6 +437,11 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
         The band (`"A"` or `"B"`); both share the pulses.
     tolerance : float
         Seconds within which a tag matches a table time.
+    echoes : {"auto", True, False}
+        Read the table's phase from the transmit leakage in the echoes
+        (`tx_leakage_phase`, about 40 MB of them), the radar's own record:
+        `"auto"` does for local files and not for URLs, which fall back on the
+        sub-swath limits (`tx_gap_phase`), then on the tags.
     anchor : {"latest", "majority"}
         Which run of tags is taken as right when runs disagree by whole pulses.
         `"latest"`: the run whose tags are latest, among runs of at least
@@ -379,10 +482,22 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
             gaps = tx_gap_phase(f, frequency) if table.size > 1 else None
         except (KeyError, ValueError, IndexError):
             gaps = None                              # no sub-swaths to read the transmit gaps from
+        leak = None
+        if table.size > 1 and (echoes is True or (echoes == "auto" and not str(source).startswith("http"))):
+            try:
+                leak = tx_leakage_phase(f, frequency)
+            except (KeyError, ValueError, IndexError):
+                leak = None                          # no echoes to read the leakage from
     finally:
         if close:
             f.close()
-    gaps = gaps if gaps is not None and gaps.match >= 0.98 else None
+    if leak is not None and leak.clear:
+        phase_source = "leakage"
+        gaps = GapPhase(granule=name, phase=leak.phase, match=1.0, pulses=leak.pulses, first_line=leak.first_line)
+    elif gaps is not None and gaps.match >= 0.98:
+        phase_source = "sub-swaths"
+    else:
+        phase_source, gaps = "tags", None
     model, phase, drift, anchored = _fit_table(utc, line_index, table, tolerance, anchor, min_anchor,
                                                gap_phase=None if gaps is None else gaps.phase)
     k = line_index - line_index[0]
@@ -412,7 +527,7 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
     return PulseTiming(granule=name, frequency=frequency, epoch=epoch, utc=utc, line_index=line_index, model=model,
                        kind=kind, table=table, table_phase=int(phase), drift=drift,
                        gap_phase=None if gaps is None else gaps.phase, gap_match=None if gaps is None else gaps.match,
-                       tag_shift=int(tag_shift), anchored=anchored)
+                       tag_shift=int(tag_shift), anchored=anchored, phase_source=phase_source)
 
 
 @dataclasses.dataclass

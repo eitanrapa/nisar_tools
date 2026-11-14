@@ -37,10 +37,12 @@ The L0B's `radarTime` carries the same slips, so the record alone cannot say whi
 whose tags are latest is taken as right: every slip measured against corner reflectors put the image early.
 
 The echoes keep a timing record of their own. While a pulse's echo is received the radar transmits later pulses, and
-each transmit blanks part of the receive window; the L0B's sub-swath limits record where, and the blanked samples are
-transmit leakage, several times brighter than the echo. Those positions depend on the pulse sequence alone, so
-`tx_gap_phase` reads which phase of the commanded sequence the radar flew without the tags. `pulse_timing` checks the
-tags against it, which finds two more defects:
+each transmit leaks into the receive window, several times brighter than the echo. Where it lands depends on the pulse
+sequence alone, so `tx_leakage_phase` reads which phase of the commanded sequence the radar flew from the echoes,
+without the tags. The L0B's sub-swath limits mark the same windows (`tx_gap_phase`, cheaper, with no echoes to read),
+but they can be bookkeeping rather than a record: on one datatake they follow the sequence 44 pulses off, with no
+leakage inside them. `pulse_timing` takes the phase from the echoes when it reads them (by default for local files),
+and checks the tags against it, which finds two more defects:
 
 - **relabelled tags**: tags that follow the sequence exactly, but a few pulses off the transmits, so every echo carries
   another pulse's time. The error varies from pulse to pulse with the dither, so the RSLC is defocused and only a

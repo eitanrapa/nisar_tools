@@ -242,3 +242,36 @@ def test_tags_behind_and_off_their_transmit_gaps_are_re_timed(tmp_path, table):
     # the echo whose step is the jump itself fits nothing; the run after it follows the table, 4 pulses off
     assert [(s["code"], s["first"]) for s in pt.segments()] == [(l0b.INCONSISTENT, 1500), (l0b.RELABELLED, 1501)]
     assert "4 pulses off" in pt.summary() and " 7.60" in pt.summary()     # 7.6 s plus the 4 PRIs
+
+
+def test_the_echoes_transmit_leakage_overrules_the_sub_swath_limits(tmp_path, table):
+    """As on 003D 2026-07-20: the sub-swath limits follow the table at one phase, the echoes' leakage another."""
+    true = _true_times(1200, 1000.0, table, phase=64, drift=0.0)
+    path = _write_l0b(tmp_path / "leakage.h5", true, table, first_line=4334)
+    r0, dr, n_samples = 888836.24, 3.1228381041437387, 20000
+    fs, tau0 = 299792458.0 / (2 * dr), 2 * r0 / 299792458.0
+    cum = np.concatenate([[0.0], np.cumsum(np.tile(table, 20))])
+    rng = np.random.default_rng(5)
+    echoes = (rng.normal(size=(true.size, n_samples)) + 1j * rng.normal(size=(true.size, n_samples))).astype(np.complex64)
+    sub = np.full((5, true.size, 2), np.iinfo(np.uint32).max, np.uint32)
+    for kk in range(true.size):
+        leak = np.round((cum[kk + 64 + np.arange(1, 20)] - cum[kk + 64] - tau0) * fs - 250).astype(int)
+        for s0 in leak[(leak > 0) & (leak < n_samples - 1849)]:
+            echoes[kk, s0:s0 + 1849] *= 7.0
+        g = np.round((cum[kk + 108 + np.arange(1, 20)] - cum[kk + 108] - tau0) * fs - 14.5)   # bookkeeping
+        g = g[(g > 600) & (g < n_samples - 2000)]
+        edges = [509] + [v for e in g for v in (e, e + 1849)] + [n_samples]
+        for i in range(min(5, len(edges) // 2)):
+            sub[i, kk] = edges[2 * i], edges[2 * i + 1]
+    with h5py.File(path, "r+") as f:
+        tx = f["science/LSAR/RRSD/swaths/frequencyA/txH"]
+        tx["numberOfSubSwaths"] = 5
+        for i in range(5):
+            tx[f"validSamplesSubSwath{i + 1}"] = sub[i]
+        tx["slantRange"] = r0 + dr * np.arange(n_samples)
+        tx["rxH/HH"] = echoes
+    assert l0b.tx_gap_phase(path).phase == 108
+    lp = l0b.tx_leakage_phase(path)
+    assert lp.phase == 64 and lp.clear and abs(lp.offset + 250) <= 40
+    pt = l0b.pulse_timing(path)
+    assert pt.phase_source == "leakage" and pt.table_phase == 64 and np.max(np.abs(pt.corrected - true)) < 1e-9
