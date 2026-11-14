@@ -14,7 +14,7 @@ Otherwise use the RSLC, or another date.
 ```python
 from nisar_tools.focus import focus_inputs, run_focus
 
-run = focus_inputs(rslc, "work/", window={"start_time": "2026-08-20T10:10:52", "end_time": "2026-08-20T10:10:59",
+run = focus_inputs(rslc, "work/", window={"start_time": "2025-01-01T10:10:52", "end_time": "2025-01-01T10:10:59",
                                           "start_range": 1008e3, "end_range": 1040e3})
 refocused = run_focus(run, python="/path/to/isce3-env/bin/python", polarizations=["HH"])
 gslc = geocode_rslc(refocused, "data/", dem, tec_file=tec)

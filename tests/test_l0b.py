@@ -45,7 +45,7 @@ def table():
 def defective(tmp_path, table):
     true = _true_times(30000, 1000.0, table)
     utc = true.copy()
-    utc[:3000] = true[3000] - 0.6 * (true[3000] - true[:3000])     # squeezed, as in 003D 2026-07-08
+    utc[:3000] = true[3000] - 0.6 * (true[3000] - true[:3000])     # squeezed
     utc[12000:13000] = true[11999:12999]                           # tagged with the previous pulse's time
     utc[20000:20400] = true[20001:20401]                           # tagged with the next pulse's time
     return _write_l0b(tmp_path / "l0b.h5", utc, table), true
@@ -176,7 +176,7 @@ def test_real_rslc_report_reads_its_l0b_remotely():
 def test_tags_that_never_follow_the_table_are_reported(tmp_path, table):
     true = _true_times(20000, 1000.0, table)
     rng = np.random.default_rng(4)
-    steps = np.diff(true) * rng.uniform(0.0, 1.2, true.size - 1)        # every step wrong, as on 003D 2026-07-20
+    steps = np.diff(true) * rng.uniform(0.0, 1.2, true.size - 1)        # every step wrong
     utc = np.concatenate([[true[0]], true[0] + np.cumsum(steps)])
     path = _write_l0b(tmp_path / "corrupt.h5", utc, table)
     with pytest.raises(l0b.UnanchoredTags, match="no run of the tags follows"):
@@ -215,7 +215,7 @@ def test_transmit_gaps_give_the_table_phase_the_tags_lost(tmp_path, table):
 
 
 def test_tags_behind_and_off_their_transmit_gaps_are_re_timed(tmp_path, table):
-    """As on 003D 2026-07-08: right at first, then behind by seconds and 4 pulses off the transmits."""
+    """Tags right at first, then behind by seconds and 4 pulses off the transmits."""
     true = _true_times(4004, 1000.0, table, phase=0, drift=0.0)
     tags, true = true[:-4].copy(), true[4:]           # echo k carries pulse k - 4's time ...
     tags[:1500] = true[:1500]                        # ... except at first, where the tags are right,
@@ -245,7 +245,7 @@ def test_tags_behind_and_off_their_transmit_gaps_are_re_timed(tmp_path, table):
 
 
 def test_the_echoes_transmit_leakage_overrules_the_sub_swath_limits(tmp_path, table):
-    """As on 003D 2026-07-20: the sub-swath limits follow the table at one phase, the echoes' leakage another."""
+    """Sub-swath limits that follow the table at one phase, and the echoes' leakage at another."""
     true = _true_times(1200, 1000.0, table, phase=64, drift=0.0)
     path = _write_l0b(tmp_path / "leakage.h5", true, table, first_line=4334)
     r0, dr, n_samples = 888836.24, 3.1228381041437387, 20000

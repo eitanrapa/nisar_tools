@@ -372,11 +372,11 @@ def tx_leakage_phase(source, frequency="A", count=200, width=1849, offsets=np.ar
     echo: pulse k + M's transmit lands `(t[k + M] - t[k] - 2 r0 / c) fs` samples
     into pulse k's window, up to an offset fixed by the hardware. For each
     phase (and offset), the mean amplitude in the predicted windows over the
-    mean of all samples picks the radar's phase: on Kumamoto 003D 2026-07-08 and
-    07-20 the ratio is about 4 there and at most 2.4 elsewhere, at -250
-    samples. Unlike `tx_gap_phase` it reads the echoes, `count` of them
-    mid-datatake (about 40 MB), but the L0B's sub-swath limits can be
-    bookkeeping: on 003D 07-20 they follow the table 44 pulses off.
+    mean of all samples picks the radar's phase: on the datatakes checked the
+    ratio is about 4 there and at most 2.4 elsewhere, at -250 samples. Unlike
+    `tx_gap_phase` it reads the echoes, `count` of them mid-datatake (about
+    40 MB), but the L0B's sub-swath limits can be bookkeeping: on one datatake
+    they follow the table 44 pulses off, with no leakage inside them.
 
     Returns
     -------

@@ -23,7 +23,7 @@ from .rslc import RSLC
 #: Slant-range length of one period of the 48 MHz clock band B is decimated from (m).
 CLOCK_PERIOD_M = 299792458.0 / (2 * 48e6)
 #: Band B's slant range measured long against A after every modelled delay, on
-#: corner reflectors at two sites and four tracks (m; the bug report's I6-5).
+#: corner reflectors (m).
 B_CALIBRATION_M = 0.98
 #: Dispersive A - B group delay assumed when rounding to whole periods (m; ~0.02 m per slant TECU).
 IONOSPHERE_GUESS_M = 0.6
