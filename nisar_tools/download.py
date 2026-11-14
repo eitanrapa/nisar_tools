@@ -350,6 +350,67 @@ def download_tec(dest, start=None, end=None, *, rslc=None, margin=60.0, overwrit
     return path
 
 
+# -- NISAR L0B (raw) and ancillary files ---------------------------------------
+#: CMR concept ids of the L0B (RRSD) collections, searched in this order:
+#: production (provisional), production, urgent response.
+L0B_COLLECTIONS = ("C2853089814-ASF", "C3622265756-ASF", "C2887469134-ASF")
+#: CMR concept id of ASF's `NISAR_ANC_AUX` collection: the calibration files
+#: (`EXT_CAL`, `INT_CAL`), antenna patterns (`ANTPAT`), dither sequences, corner
+#: reflectors and frame tables that the SDS processes with.
+ANCILLARY_COLLECTION = "C3622222871-ASF"
+_ANCILLARY_SUFFIXES = (".h5", ".yaml", ".json", ".csv", ".xml")
+
+
+def granule_url(name, collections):
+    """The public HTTPS URL of granule `name`, searched in `collections` (CMR concept ids).
+
+    `name` may carry its file suffix. Uses CMR's public search, so no login is
+    needed to look it up. Raises `FileNotFoundError` when no collection has it.
+    """
+    import json
+    import urllib.parse
+    import urllib.request
+
+    title = next((name[:-len(s)] for s in _ANCILLARY_SUFFIXES if name.endswith(s)), name)
+    for collection in _as_list(collections):
+        params = {"collection_concept_id": collection, "readable_granule_name": title, "page_size": 5}
+        url = _CMR_GRANULES + "?" + urllib.parse.urlencode(params)
+        with urllib.request.urlopen(url, timeout=60) as response:
+            entries = json.load(response)["feed"]["entry"]
+        for entry in entries:
+            for link in entry.get("links", []):
+                href = link.get("href", "")
+                base = href.rsplit("/", 1)[-1]
+                if (href.startswith("https://") and "PRIVATE" not in href
+                        and base.rsplit(".", 1)[0] == title and base.endswith(_ANCILLARY_SUFFIXES)):
+                    return href
+    raise FileNotFoundError(f"{title} is in none of the CMR collections {', '.join(_as_list(collections))}")
+
+
+def l0b_url(name):
+    """The download URL of an L0B granule, e.g. one an RSLC lists in `l0bGranules`."""
+    return granule_url(name, L0B_COLLECTIONS)
+
+
+def ancillary_url(name):
+    """The download URL of a NISAR ancillary file (`NISAR_LSAR_EXT_CAL_...`, `NISAR_ANTPAT_...`)."""
+    return granule_url(name, ANCILLARY_COLLECTION)
+
+
+def download_l0b(dest, names):
+    """Download L0B granules by name into `dest`. Returns the local paths.
+
+    An L0B holds a whole datatake of raw echoes: 10-90 GB. To check its pulse
+    timing only, `nisar_tools.l0b.pulse_timing` reads it remotely instead.
+    """
+    return download_urls(dest, [l0b_url(n) for n in _as_list(names)])
+
+
+def download_ancillary(dest, names):
+    """Download NISAR ancillary files by name into `dest`. Returns the local paths."""
+    return download_urls(dest, [ancillary_url(n) for n in _as_list(names)])
+
+
 # -- direct ASF bulk download ------------------------------------------------
 def download_urls(dest, urls):
     """Download fully-formed Earthdata URLs directly, with Earthdata Login.

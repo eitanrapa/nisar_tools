@@ -88,6 +88,7 @@ nav:
       - Products and inputs: api/products.md
       - Processing stages: api/stages.md
       - Geocoding RSLCs: api/geocoding.md
+      - Checking products: api/checks.md
       - Offsets: api/offsets.md
       - Ionosphere: api/ionosphere.md
       - Utilities: api/utilities.md

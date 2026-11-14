@@ -9,6 +9,7 @@ they are sent to no other host.
 
 import getpass
 import http.cookiejar
+import io
 import netrc
 import os
 import sys
@@ -106,6 +107,66 @@ def _fetch(open_url, url, path, label, progress):
     os.replace(part, path)
     rate = done / 2**20 / max(time.monotonic() - start, 1e-3)
     print(f"\r{label}: {done / 2**20:.1f} MiB at {rate:.1f} MiB/s")
+
+
+class RangeFile(io.RawIOBase):
+    """A read-only remote file over HTTP Range requests, behind Earthdata Login.
+
+    Opens with `h5py.File(RangeFile(url), "r")`, so the metadata of a large
+    granule (an L0B is 10-90 GB) can be read without downloading it. The login
+    redirects are followed once, then every read asks the signed URL for whole
+    `block`-byte blocks and keeps up to `max_blocks` of them.
+    """
+
+    def __init__(self, url, username=None, password=None, block=1 << 21, max_blocks=2048):
+        if username is None or password is None:
+            username, password = credentials()
+        self._open_url = opener(username, password).open
+        request = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+        with self._open_url(request) as response:
+            self.url = response.geturl()
+            self.size = int(response.headers["Content-Range"].rsplit("/", 1)[1])
+        self.block, self.max_blocks = int(block), int(max_blocks)
+        self.requests = 0
+        self._pos = 0
+        self._cache = {}
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self._pos
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: self.size}[whence]
+        self._pos = base + offset
+        return self._pos
+
+    def _block(self, k):
+        if k not in self._cache:
+            first, last = k * self.block, min((k + 1) * self.block, self.size) - 1
+            request = urllib.request.Request(self.url, headers={"Range": f"bytes={first}-{last}"})
+            with self._open_url(request) as response:
+                self._cache[k] = response.read()
+            self.requests += 1
+            if len(self._cache) > self.max_blocks:
+                self._cache.pop(next(iter(self._cache)))
+        return self._cache[k]
+
+    def readinto(self, buffer):
+        n = max(0, min(len(buffer), self.size - self._pos))
+        view, done = memoryview(buffer).cast("B"), 0
+        while done < n:
+            k, offset = divmod(self._pos + done, self.block)
+            data = self._block(k)
+            m = min(n - done, len(data) - offset)
+            view[done:done + m] = data[offset:offset + m]
+            done += m
+        self._pos += n
+        return n
 
 
 def _open(open_url, url):
