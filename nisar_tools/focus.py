@@ -32,7 +32,8 @@ v0.25.16 adds `nisar.products.readers.Raw.model_pulse_times` and uses it in
 - the NISAR DEM v1.2 over the frame;
 - production's own run configuration with these paths, CPU processing and a
   local output;
-- `pulse_timing.txt`, what `nisar_tools.l0b.pulse_timing` finds in each L0B.
+- `pulse_timing.txt`, what `nisar_tools.l0b.pulse_timing` finds in each L0B, and the
+  phase its transmit gaps give (`tx_gap_phase`).
 """
 
 import datetime as _dt
@@ -157,6 +158,21 @@ def _frame_bbox(config, rslc):
     return float(pts[:, 0].min()), float(pts[:, 0].max()), float(pts[:, 1].min()), float(pts[:, 1].max())
 
 
+def _timing_lines(path):
+    """`pulse_timing`'s summary of an L0B, or why it has none, and the phase its transmit gaps give."""
+    from .l0b import UnanchoredTags, pulse_timing, tx_gap_phase
+
+    try:
+        lines = [pulse_timing(path).summary()]
+    except UnanchoredTags as error:
+        lines = [f"{Path(path).stem}: {error}"]
+    try:
+        lines.append(tx_gap_phase(path).summary())
+    except (KeyError, ValueError) as error:
+        lines.append(f"{Path(path).stem}: transmit gaps not read ({error})")
+    return lines
+
+
 def focus_inputs(rslc, workdir, *, l0b_dir=None, ancillary_dir=None, dem=None, download=True, window=None):
     """Prepare everything to refocus an RSLC the way production did. Returns the runconfig path.
 
@@ -184,7 +200,6 @@ def focus_inputs(rslc, workdir, *, l0b_dir=None, ancillary_dir=None, dem=None, d
 
     from . import download as dl
     from .dem import stage_nisar_dem
-    from .l0b import pulse_timing
     from .rslc import RSLC
 
     own = not isinstance(rslc, RSLC)
@@ -202,7 +217,7 @@ def focus_inputs(rslc, workdir, *, l0b_dir=None, ancillary_dir=None, dem=None, d
             if not download:
                 raise FileNotFoundError(f"missing L0B(s) in {l0b_dir}: {', '.join(missing)}")
             dl.download_l0b(l0b_dir, missing)
-        (workdir / "pulse_timing.txt").write_text("\n".join(pulse_timing(p).summary() for p in l0bs) + "\n")
+        (workdir / "pulse_timing.txt").write_text("\n".join(line for p in l0bs for line in _timing_lines(p)) + "\n")
         calibration = {}
         for name in _input_names(r, "auxcalFiles"):
             path = ancillary_dir / name

@@ -36,6 +36,18 @@ dither table). ISCE3 focuses with the tags as stored. `pulse_timing` fits the se
 The L0B's `radarTime` carries the same slips, so the record alone cannot say which side of a slip is right. The run
 whose tags are latest is taken as right: every slip measured against corner reflectors put the image early.
 
+The echoes keep a timing record of their own. While a pulse's echo is received the radar transmits later pulses, and
+each transmit blanks part of the receive window; the L0B's sub-swath limits record where, and the blanked samples are
+transmit leakage, several times brighter than the echo. Those positions depend on the pulse sequence alone, so
+`tx_gap_phase` reads which phase of the commanded sequence the radar flew without the tags. `pulse_timing` checks the
+tags against it, which finds two more defects:
+
+- **relabelled tags**: tags that follow the sequence exactly, but a few pulses off the transmits, so every echo carries
+  another pulse's time. The error varies from pulse to pulse with the dither, so the RSLC is defocused and only a
+  refocus repairs it (`"refocus"`);
+- **unanchored tags**: no run of tags follows the sequence at all. The echoes are then timed from the transmit gaps,
+  anchored on the first tag, whose own error remains as a constant along-track shift to measure against another date.
+
 ## Band B's range
 
 Band B's slant ranges are off by whole periods of the 48 MHz clock it is decimated from (3.12 m each): constant within

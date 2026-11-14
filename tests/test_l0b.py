@@ -181,3 +181,59 @@ def test_tags_that_never_follow_the_table_are_reported(tmp_path, table):
     path = _write_l0b(tmp_path / "corrupt.h5", utc, table)
     with pytest.raises(l0b.UnanchoredTags, match="no run of the tags follows"):
         l0b.pulse_timing(path)
+
+
+def test_transmit_gaps_give_the_table_phase_the_tags_lost(tmp_path, table):
+    """A corrupt-tag L0B whose sub-swaths still record where later transmits blanked each window."""
+    true = _true_times(4000, 1000.0, table, phase=108, drift=0.0)
+    rng = np.random.default_rng(4)
+    utc = np.concatenate([[true[0]], true[0] + np.cumsum(np.diff(true) * rng.uniform(0.0, 1.2, true.size - 1))])
+    path = _write_l0b(tmp_path / "corrupt.h5", utc, table, first_line=4334)
+    r0, dr, n_samples = 888836.24, 3.1228381041437387, 53067
+    c = 299792458.0
+    fs, tau0 = c / (2 * dr), 2 * r0 / c
+    cum = np.concatenate([[0.0], np.cumsum(np.tile(table, 40))])
+    sub = np.full((5, true.size, 2), np.iinfo(np.uint32).max, np.uint32)
+    for kk in range(true.size):
+        g = np.round((cum[kk + 108 + np.arange(1, 20)] - cum[kk + 108] - tau0) * fs - 14.5)
+        g = g[(g > 600) & (g < n_samples - 2000)]
+        edges = [509] + [v for e in g for v in (e, e + 1849)] + [n_samples]
+        for i in range(len(edges) // 2):
+            sub[i, kk] = edges[2 * i], edges[2 * i + 1]
+    with h5py.File(path, "r+") as f:
+        tx = f["science/LSAR/RRSD/swaths/frequencyA/txH"]
+        tx["numberOfSubSwaths"] = 5
+        for i in range(5):
+            tx[f"validSamplesSubSwath{i + 1}"] = sub[i]
+        tx["slantRange"] = r0 + dr * np.arange(n_samples)
+    gp = l0b.tx_gap_phase(path)
+    assert gp.phase == 108 and gp.match == 1.0 and gp.first_line == 4334
+    pt = l0b.pulse_timing(path)                      # no run of tags anchors: timed from the gaps instead
+    assert not pt.anchored and pt.table_phase == 108 and np.max(np.abs(pt.corrected - true)) < 1e-9
+    assert "timed from its transmit gaps" in pt.summary()
+
+
+def test_tags_off_their_transmit_gaps_are_re_timed(tmp_path, table):
+    """As on 003D 2026-07-08: clean-looking tags that follow the table 4 pulses behind the transmits."""
+    true = _true_times(4004, 1000.0, table, phase=0, drift=0.0)
+    tags, true = true[:-4], true[4:]                   # echo k carries pulse k - 4's time
+    path = _write_l0b(tmp_path / "relabelled.h5", tags, table, first_line=4101)
+    r0, dr, n_samples = 888836.24, 3.1228381041437387, 53067
+    fs, tau0 = 299792458.0 / (2 * dr), 2 * r0 / 299792458.0
+    cum = np.concatenate([[0.0], np.cumsum(np.tile(table, 40))])
+    sub = np.full((5, tags.size, 2), np.iinfo(np.uint32).max, np.uint32)
+    for kk in range(tags.size):
+        g = np.round((cum[kk + 4 + np.arange(1, 20)] - cum[kk + 4] - tau0) * fs - 14.5)
+        g = g[(g > 600) & (g < n_samples - 2000)]
+        edges = [509] + [v for e in g for v in (e, e + 1849)] + [n_samples]
+        for i in range(len(edges) // 2):
+            sub[i, kk] = edges[2 * i], edges[2 * i + 1]
+    with h5py.File(path, "r+") as f:
+        tx = f["science/LSAR/RRSD/swaths/frequencyA/txH"]
+        tx["numberOfSubSwaths"] = 5
+        for i in range(5):
+            tx[f"validSamplesSubSwath{i + 1}"] = sub[i]
+        tx["slantRange"] = r0 + dr * np.arange(n_samples)
+    pt = l0b.pulse_timing(path)
+    assert pt.tag_shift == 4 and pt.table_phase == 4 and np.max(np.abs(pt.corrected - true)) < 1e-9
+    assert [s["code"] for s in pt.segments()] == [l0b.RELABELLED] and "4 pulses off" in pt.summary()
