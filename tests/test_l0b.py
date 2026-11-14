@@ -208,22 +208,25 @@ def test_transmit_gaps_give_the_table_phase_the_tags_lost(tmp_path, table):
         tx["slantRange"] = r0 + dr * np.arange(n_samples)
     gp = l0b.tx_gap_phase(path)
     assert gp.phase == 108 and gp.match == 1.0 and gp.first_line == 4334
-    pt = l0b.pulse_timing(path)                      # no run of tags anchors: timed from the gaps instead
-    assert not pt.anchored and pt.table_phase == 108 and np.max(np.abs(pt.corrected - true)) < 1e-9
-    assert "timed from its transmit gaps" in pt.summary()
+    pt = l0b.pulse_timing(path)                      # no run of tags anchors: the gaps' sequence instead
+    off = pt.model - true                            # on the latest pair of tags: one constant, within a PRI
+    assert not pt.anchored and pt.table_phase == 108 and np.ptp(off) < 1e-9 and abs(off[0]) < table.max()
+    assert "anchored on the latest tags" in pt.summary()
 
 
-def test_tags_off_their_transmit_gaps_are_re_timed(tmp_path, table):
-    """As on 003D 2026-07-08: clean-looking tags that follow the table 4 pulses behind the transmits."""
+def test_tags_behind_and_off_their_transmit_gaps_are_re_timed(tmp_path, table):
+    """As on 003D 2026-07-08: right at first, then behind by seconds and 4 pulses off the transmits."""
     true = _true_times(4004, 1000.0, table, phase=0, drift=0.0)
-    tags, true = true[:-4], true[4:]                   # echo k carries pulse k - 4's time
-    path = _write_l0b(tmp_path / "relabelled.h5", tags, table, first_line=4101)
+    tags, true = true[:-4].copy(), true[4:]           # echo k carries pulse k - 4's time ...
+    tags[:1500] = true[:1500]                        # ... except at first, where the tags are right,
+    tags[1500:] -= 7.6                               # and everything after is seconds behind
+    path = _write_l0b(tmp_path / "relabelled.h5", tags, table, first_line=4097)
     r0, dr, n_samples = 888836.24, 3.1228381041437387, 53067
     fs, tau0 = 299792458.0 / (2 * dr), 2 * r0 / 299792458.0
     cum = np.concatenate([[0.0], np.cumsum(np.tile(table, 40))])
     sub = np.full((5, tags.size, 2), np.iinfo(np.uint32).max, np.uint32)
     for kk in range(tags.size):
-        g = np.round((cum[kk + 4 + np.arange(1, 20)] - cum[kk + 4] - tau0) * fs - 14.5)
+        g = np.round((cum[kk + 4 + np.arange(1, 20)] - cum[kk + 4] - tau0) * fs - 14.5)   # echo k is pulse k + 4
         g = g[(g > 600) & (g < n_samples - 2000)]
         edges = [509] + [v for e in g for v in (e, e + 1849)] + [n_samples]
         for i in range(len(edges) // 2):
@@ -235,5 +238,7 @@ def test_tags_off_their_transmit_gaps_are_re_timed(tmp_path, table):
             tx[f"validSamplesSubSwath{i + 1}"] = sub[i]
         tx["slantRange"] = r0 + dr * np.arange(n_samples)
     pt = l0b.pulse_timing(path)
-    assert pt.tag_shift == 4 and pt.table_phase == 4 and np.max(np.abs(pt.corrected - true)) < 1e-9
-    assert [s["code"] for s in pt.segments()] == [l0b.RELABELLED] and "4 pulses off" in pt.summary()
+    assert pt.table_phase == 4 and pt.tag_shift == 4 and np.max(np.abs(pt.corrected - true)) < 1e-9
+    # the echo whose step is the jump itself fits nothing; the run after it follows the table, 4 pulses off
+    assert [(s["code"], s["first"]) for s in pt.segments()] == [(l0b.INCONSISTENT, 1500), (l0b.RELABELLED, 1501)]
+    assert "4 pulses off" in pt.summary() and " 7.60" in pt.summary()     # 7.6 s plus the 4 PRIs

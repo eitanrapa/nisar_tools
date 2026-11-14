@@ -55,36 +55,11 @@ def _open(source):
     return h5py.File(text, "r"), True, Path(text).stem
 
 
-#: `_pulse_shifts` value of a tag that is no whole number of pulses off.
-NO_SHIFT = np.iinfo(np.int64).min
-
-
 def _table_times(k, table, phase):
     """Times of pulses `k` (counted from the first) under the cycled table, starting at its `phase`."""
     reps = int(k.max() // table.size) + 4
     cum = np.concatenate([[0.0], np.cumsum(np.tile(table, reps))])
     return cum[k + phase] - cum[phase]
-
-
-def _table_times_any(j, table, phase):
-    """`_table_times` for pulse counts `j` that may be negative (before the first)."""
-    j = np.asarray(j, np.int64)
-    pad = (int(max(0, -j.min())) // table.size + 2) * table.size
-    reps = int((j.max() + 2 * pad) // table.size) + 4
-    cum = np.concatenate([[0.0], np.cumsum(np.tile(table, reps))])
-    return cum[j + phase + pad] - cum[phase + pad]
-
-
-def _pulse_shifts(utc, model, k, table, phase, drift, tolerance):
-    """Per echo, by how many whole pulses its tag is off the model: 0 if right, -1 if it
-    carries the previous pulse's time, +1 the next pulse's (up to +-2); else `NO_SHIFT`."""
-    shift = np.full(utc.size, NO_SHIFT, np.int64)
-    resid = utc - model
-    for j in (-2, -1, 0, 1, 2):
-        span = sum(table[(k + phase + m) % table.size] for m in range(min(j, 0), max(j, 0)))
-        offset = np.sign(j) * span * (1.0 + drift) if j else 0.0
-        shift[np.abs(resid - offset) < tolerance] = j
-    return shift
 
 
 class UnanchoredTags(ValueError):
@@ -97,55 +72,69 @@ class UnanchoredTags(ValueError):
     """
 
 
-def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min_anchor=1.0):
-    """Times of the commanded table fitted to the tags: `(model, phase, drift)`.
+def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min_anchor=1.0, gap_phase=None):
+    """The commanded table's times that the tags fit: `(model, phase, drift, anchored)`.
 
-    The table's phase is the one whose steps match the tags' on the most echoes
-    (a median, so up to half the datatake may be bad). The constant and the clock
-    drift (dimensionless) are fitted on the echoes of one run that agree with
-    the table: with `anchor="latest"`, the run whose tags are latest among those
-    of at least `min_anchor` seconds; with `"majority"`, the most common one.
+    Every defect seen in delivered L0Bs puts tags behind their pulses (slips
+    carry an earlier pulse's time; squeezed spans, relabelled and random tags
+    fall behind and stay behind); none runs ahead. The candidate models are a
+    phase (`gap_phase`, from the transmit gaps; else the tags' most common
+    phase and two pulses either side) and a stretch of tags at least
+    `min_anchor` seconds long on one level, which slipped runs of a dithered
+    table never are. With `anchor="latest"` the latest model is taken, with
+    `"majority"` the longest stretch's. Without any such stretch (`anchored`
+    False) the constant comes from the latest pair of neighbouring tags, so a
+    lone stray tag cannot set it. The clock drift is fitted on the agreeing
+    tags when they span `min_anchor` seconds.
     """
-    k = (line_index - line_index[0]).astype(np.int64)
-    steps = np.diff(utc)
-    best_phase, best_err = 0, np.inf
-    for phase in range(table.size):
-        cum = np.diff(_table_times(k, table, phase))
-        err = np.median(np.abs(steps - cum))
-        if err < best_err:
-            best_phase, best_err = phase, err
-    t = _table_times(k, table, best_phase)
-    # the tags must follow the table (at this phase or a slip or two away) for min_anchor seconds, or mostly
-    need = min_anchor * table.size / table.sum()
-    agree = [np.abs(steps - np.diff(_table_times(k, table, (best_phase + j) % table.size))) < tolerance
-             for j in (-2, -1, 0, 1, 2)]
-    longest = max(_longest_run(a) for a in agree)
-    share = float(np.mean(np.any(agree, axis=0)))
-    if longest < need and share < 0.5:
-        raise UnanchoredTags(
-            f"no run of the tags follows the commanded pulse sequence for {min_anchor:g} s (longest "
-            f"{longest * table.mean():.2f} s; {100 * share:.1f}% of steps agree within two pulses of one phase); "
-            f"the tags span {utc[-1] - utc[0]:.2f} s where the sequence takes {t[-1]:.2f} s")
-
-    def fit(sel):
-        x = t - t[sel][0]
-        design = np.column_stack([np.ones(int(sel.sum())), x[sel]])
-        (offset, drift), *_ = np.linalg.lstsq(design, (utc - t)[sel], rcond=None)
-        return t + offset + drift * x, float(drift)
-
-    resid = utc - t
-    model, drift = fit(np.abs(resid - np.median(resid)) < 0.25 * table.min())
-    if anchor == "latest":
-        shift = _pulse_shifts(utc, model, k, table, best_phase, drift, tolerance)
-        runs = [j for j in (2, 1, 0, -1, -2) if _longest_run(shift == j) >= need]
-        if runs and runs[0] != 0:
-            # tags j pulses ahead of the table: the same table, j pulses further along
-            best_phase = (best_phase + runs[0]) % table.size
-            t = _table_times(k, table, best_phase)
-            model, drift = fit(shift == runs[0])
-    elif anchor != "majority":
+    if anchor not in ("latest", "majority"):
         raise ValueError(f"anchor must be 'latest' or 'majority', not {anchor!r}")
-    return model, best_phase, drift
+    k = (line_index - line_index[0]).astype(np.int64)
+    if gap_phase is not None:
+        phases = [int(gap_phase) % table.size]
+    else:
+        steps = np.diff(utc)
+        errors = [np.median(np.abs(steps - np.diff(_table_times(k, table, p)))) for p in range(table.size)]
+        phase = int(np.argmin(errors))
+        # the tags must follow the table (at this phase or a slip or two away) for min_anchor seconds, or mostly
+        need = min_anchor * table.size / table.sum()
+        agree = [np.abs(steps - np.diff(_table_times(k, table, (phase + j) % table.size))) < tolerance
+                 for j in (-2, -1, 0, 1, 2)]
+        longest = max(_longest_run(a) for a in agree)
+        share = float(np.mean(np.any(agree, axis=0)))
+        if longest < need and share < 0.5:
+            raise UnanchoredTags(
+                f"no run of the tags follows the commanded pulse sequence for {min_anchor:g} s (longest "
+                f"{longest * table.mean():.2f} s; {100 * share:.1f}% of steps agree within two pulses of one "
+                f"phase); the tags span {utc[-1] - utc[0]:.2f} s where the sequence takes "
+                f"{_table_times(k, table, phase)[-1]:.2f} s")
+        phases = [(phase + j) % table.size for j in (0, 1, -1, 2, -2)]
+    stretches = []                           # (level, length, phase): the model's time of the first echo is `level`
+    for phase in phases:
+        seq = _table_times(k, table, phase)
+        lag = utc - seq
+        flat = np.abs(np.diff(lag)) < tolerance
+        edges = np.flatnonzero(np.diff(np.r_[0, flat.astype(np.int8), 0]))
+        for a, b in zip(edges[::2], edges[1::2]):
+            if seq[b] - seq[a] >= min_anchor:
+                stretches.append((float(np.median(lag[a:b + 1])), float(seq[b] - seq[a]), phase))
+    if stretches:
+        level, _, phase = max(stretches, key=(lambda x: x[0]) if anchor == "latest" else (lambda x: x[1]))
+    else:
+        phase = phases[0]
+        lag = utc - _table_times(k, table, phase)
+        level = float(np.minimum(lag[:-1], lag[1:]).max())
+    seq = _table_times(k, table, phase)
+    model, drift = seq + level, 0.0
+    for _ in range(2):
+        near = np.abs(utc - model) < tolerance
+        if near.sum() < 2 or np.ptp(seq[near]) < min_anchor:
+            break
+        x = seq - seq[near][0]
+        design = np.column_stack([np.ones(int(near.sum())), x[near]])
+        (offset, drift), *_ = np.linalg.lstsq(design, (utc - seq)[near], rcond=None)
+        model, drift = seq + offset + drift * x, float(drift)
+    return model, phase, drift, bool(stretches)
 
 
 def _longest_run(mask):
@@ -164,8 +153,8 @@ class PulseTiming:
     with the previous pulse's time), `LATE` (the next pulse's) or
     `INCONSISTENT` per echo, or `RELABELLED` where the tags follow the table
     `tag_shift` pulses off the transmit gaps (`tx_gap_phase`), whose phase the
-    model then takes. `anchored` is False when no run of tags follows the table:
-    the model is then the gaps' sequence from the first tag.
+    model then takes. `anchored` is False when no second of tags agrees with
+    the model: it then rests on the latest pair of tags.
     """
 
     granule: str
@@ -242,14 +231,17 @@ class PulseTiming:
         """One line per finding, for logs."""
         head = (f"{self.granule} {self.frequency}: {self.utc.size} echoes, commanded PRF "
                 f"{self.prf_commanded:.4f} Hz, from the tags {self.prf_from_tags:.4f} Hz")
-        if not self.anchored:
-            return "\n".join([head, f"  no run of tags follows the table: every echo timed from its transmit gaps "
-                                     f"(phase {self.gap_phase}), anchored on the first tag"])
         lines = [head] + [f"  {s['count']} echoes tagged with the {s['kind']}" if s["code"] in (EARLY, LATE, RELABELLED)
                           else f"  {s['count']} echoes {s['kind']}" for s in self.segments()]
         if self.tag_shift:
             lines.append(f"  the tags follow the table {self.tag_shift} pulses off the transmit gaps "
-                         f"(phase {self.gap_phase}): every echo re-timed")
+                         f"(phase {self.gap_phase})")
+        behind = float(np.max(self.model - self.utc))
+        if behind > 1e-3:
+            lines.append(f"  the tags fall up to {behind:.3f} s behind the sequence")
+        if not self.anchored:
+            lines.append("  no second of tags agrees with the sequence: it is anchored on the latest tags, so check "
+                         "the image's along-track position against another date")
         return "\n".join(lines + ([] if not self.ok else ["  every echo matches the table"]))
 
 
@@ -391,35 +383,36 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
         if close:
             f.close()
     gaps = gaps if gaps is not None and gaps.match >= 0.98 else None
+    model, phase, drift, anchored = _fit_table(utc, line_index, table, tolerance, anchor, min_anchor,
+                                               gap_phase=None if gaps is None else gaps.phase)
     k = line_index - line_index[0]
-    common = dict(granule=name, frequency=frequency, epoch=epoch, utc=utc, line_index=line_index, table=table,
-                  gap_phase=None if gaps is None else gaps.phase, gap_match=None if gaps is None else gaps.match)
-    try:
-        model, phase, drift = _fit_table(utc, line_index, table, tolerance, anchor, min_anchor)
-    except UnanchoredTags:
-        if gaps is None:
-            raise
-        model = utc[0] + _table_times_any(k, table, gaps.phase)
-        kind = np.full(utc.size, INCONSISTENT, np.int8)
-        kind[0] = CONSISTENT
-        return PulseTiming(model=model, kind=kind, table_phase=gaps.phase, drift=0.0, anchored=False, **common)
-    shift = _pulse_shifts(utc, model, k, table, phase, drift, tolerance)
+    d = utc - model
+    pri_before = np.r_[np.nan, np.diff(model)]               # the interval before each echo
+    pri_after = np.r_[np.diff(model), np.nan]
     kind = np.full(utc.size, INCONSISTENT, np.int8)
-    kind[shift == 0] = CONSISTENT
-    kind[shift == -1] = EARLY
-    kind[shift == 1] = LATE
+    kind[np.abs(d + pri_before) < tolerance] = EARLY          # tagged with the previous pulse's time
+    kind[np.abs(d - pri_after) < tolerance] = LATE            # the next pulse's
+    kind[np.abs(d) < tolerance] = CONSISTENT
     tag_shift = 0
-    if gaps is not None and gaps.phase != phase:
-        # the tags follow the table tag_shift pulses off the transmits: echo k carries pulse k - tag_shift's time
-        tag_shift = (gaps.phase - phase) % table.size
-        tag_shift -= table.size if tag_shift > table.size // 2 else 0
-        sel = shift == 0
-        offset = np.median(utc[sel] - _table_times_any(k[sel] - tag_shift, table, gaps.phase))
-        model = offset + _table_times_any(k, table, gaps.phase)
-        kind[sel] = RELABELLED
-        phase = gaps.phase
-    return PulseTiming(model=model, kind=kind, table_phase=int(phase), drift=drift, tag_shift=int(tag_shift),
-                       **common)
+    if gaps is not None and utc.size > 2:
+        # tags that follow the table at another phase than their transmits: relabelled
+        steps = np.diff(utc)
+        errors = [np.median(np.abs(steps - np.diff(_table_times(k, table, p)))) for p in range(table.size)]
+        own = int(np.argmin(errors))
+        if own != phase:
+            follows = np.r_[False, np.abs(steps - np.diff(_table_times(k, table, own))) < tolerance]
+            need = min_anchor * table.size / table.sum()          # a second of them, not a chance match
+            edges = np.flatnonzero(np.diff(np.r_[0, follows.astype(np.int8), 0]))
+            for a, b in zip(edges[::2], edges[1::2]):
+                if b - a >= need:
+                    run = kind[a:b]
+                    run[run == INCONSISTENT] = RELABELLED
+                    tag_shift = (phase - own) % table.size
+                    tag_shift -= table.size if tag_shift > table.size // 2 else 0
+    return PulseTiming(granule=name, frequency=frequency, epoch=epoch, utc=utc, line_index=line_index, model=model,
+                       kind=kind, table=table, table_phase=int(phase), drift=drift,
+                       gap_phase=None if gaps is None else gaps.phase, gap_match=None if gaps is None else gaps.match,
+                       tag_shift=int(tag_shift), anchored=anchored)
 
 
 @dataclasses.dataclass
