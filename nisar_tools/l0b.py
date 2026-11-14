@@ -77,6 +77,15 @@ def _pulse_shifts(utc, model, k, table, phase, drift, tolerance):
     return shift
 
 
+class UnanchoredTags(ValueError):
+    """No run of an L0B's tags follows its commanded pulse sequence long enough to anchor the sequence.
+
+    The relative times are still the table's, if the radar flew it, but the
+    constant offset (where the image lies along track) cannot come from the
+    tags; it has to come from elsewhere, such as a registration to another date.
+    """
+
+
 def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min_anchor=1.0):
     """Times of the commanded table fitted to the tags: `(model, phase, drift)`.
 
@@ -95,6 +104,17 @@ def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min
         if err < best_err:
             best_phase, best_err = phase, err
     t = _table_times(k, table, best_phase)
+    # the tags must follow the table (at this phase or a slip or two away) for min_anchor seconds, or mostly
+    need = min_anchor * table.size / table.sum()
+    agree = [np.abs(steps - np.diff(_table_times(k, table, (best_phase + j) % table.size))) < tolerance
+             for j in (-2, -1, 0, 1, 2)]
+    longest = max(_longest_run(a) for a in agree)
+    share = float(np.mean(np.any(agree, axis=0)))
+    if longest < need and share < 0.5:
+        raise UnanchoredTags(
+            f"no run of the tags follows the commanded pulse sequence for {min_anchor:g} s (longest "
+            f"{longest * table.mean():.2f} s; {100 * share:.1f}% of steps agree within two pulses of one phase); "
+            f"the tags span {utc[-1] - utc[0]:.2f} s where the sequence takes {t[-1]:.2f} s")
 
     def fit(sel):
         x = t - t[sel][0]
@@ -106,7 +126,6 @@ def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min
     model, drift = fit(np.abs(resid - np.median(resid)) < 0.25 * table.min())
     if anchor == "latest":
         shift = _pulse_shifts(utc, model, k, table, best_phase, drift, tolerance)
-        need = min_anchor * table.size / table.sum()
         runs = [j for j in (2, 1, 0, -1, -2) if _longest_run(shift == j) >= need]
         if runs and runs[0] != 0:
             # tags j pulses ahead of the table: the same table, j pulses further along
@@ -233,6 +252,10 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
     -------
     PulseTiming
         `radarTime` is no independent check: it carries the same slips.
+    Raises
+    ------
+    UnanchoredTags
+        If no run of the tags follows the table for `min_anchor` seconds.
     """
     f, close, name = _open(source)
     try:

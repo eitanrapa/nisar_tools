@@ -171,3 +171,13 @@ def test_real_rslc_report_reads_its_l0b_remotely():
     rep = l0b.timing_report(os.environ["NISAR_TEST_L0B_RSLC"])
     assert rep.timings and rep.verdict in ("correctable", "refocus")
     assert any(p["code"] in (l0b.EARLY, l0b.LATE) for p in rep.problems)
+
+
+def test_tags_that_never_follow_the_table_are_reported(tmp_path, table):
+    true = _true_times(20000, 1000.0, table)
+    rng = np.random.default_rng(4)
+    steps = np.diff(true) * rng.uniform(0.0, 1.2, true.size - 1)        # every step wrong, as on 003D 2026-07-20
+    utc = np.concatenate([[true[0]], true[0] + np.cumsum(steps)])
+    path = _write_l0b(tmp_path / "corrupt.h5", utc, table)
+    with pytest.raises(l0b.UnanchoredTags, match="no run of the tags follows"):
+        l0b.pulse_timing(path)
