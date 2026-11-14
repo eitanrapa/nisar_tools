@@ -195,7 +195,7 @@ def _runconfig(tmp_path, times=True):
 def test_run_focus_hands_the_repaired_times_to_isce3(tmp_path):
     out = focus.run_focus(_runconfig(tmp_path), python=_fake_isce3(tmp_path), threads=6, log=lambda *a: None)
     assert out == tmp_path / "out.h5"
-    assert _args(tmp_path) == ["-c", focus._FOCUS_WRAPPER, "-", str(tmp_path / "pulse_times.npz"),
+    assert _args(tmp_path) == ["-c", focus._FOCUS_WRAPPER, "-", str(tmp_path / "pulse_times.npz"), "develop",
                                str(tmp_path / "run.yaml")]
     assert (tmp_path / "env.txt").read_text().split() == ["6", "TRUE"]
     assert (tmp_path / "focus.log").exists()
@@ -204,7 +204,7 @@ def test_run_focus_hands_the_repaired_times_to_isce3(tmp_path):
 def test_run_focus_selects_polarizations_and_can_keep_the_tags(tmp_path):
     focus.run_focus(_runconfig(tmp_path), python=_fake_isce3(tmp_path), polarizations=["HH"], repair=False,
                     log=lambda *a: None)
-    assert _args(tmp_path)[2:] == ["HH", "-", str(tmp_path / "run.yaml")]
+    assert _args(tmp_path)[2:] == ["HH", "-", "-", str(tmp_path / "run.yaml")]
 
 
 def test_run_focus_needs_an_interpreter_and_the_times(tmp_path, monkeypatch):
@@ -267,7 +267,7 @@ def test_the_wrapper_keeps_only_the_named_channels(monkeypatch):
     import sys
 
     seen, _ = _fake_nisar(monkeypatch, np.zeros(3))
-    monkeypatch.setattr(sys, "argv", ["-c", "HH", "-", "run.yaml"])
+    monkeypatch.setattr(sys, "argv", ["-c", "HH", "-", "-", "run.yaml"])
     exec(focus._FOCUS_WRAPPER, {})
     assert seen["argv"] == ["-c", "run.yaml"]
     assert sorted((c.freq_id, c.pol) for c in seen["mode"]) == [("A", "HH"), ("B", "HH")]
@@ -280,7 +280,7 @@ def test_the_wrapper_hands_the_reader_the_repaired_times(monkeypatch, tmp_path):
     tags, fixed = np.array([10.0, 10.5, 10.5]), np.array([10.0, 10.5, 11.0])
     np.savez(tmp_path / "times.npz", **{"l0b.h5__A__txH": fixed})
     seen, Raw = _fake_nisar(monkeypatch, tags)
-    monkeypatch.setattr(sys, "argv", ["-c", "-", str(tmp_path / "times.npz"), "run.yaml"])
+    monkeypatch.setattr(sys, "argv", ["-c", "-", str(tmp_path / "times.npz"), "-", "run.yaml"])
     exec(focus._FOCUS_WRAPPER, {})
     assert seen["argv"] == ["-c", "run.yaml"]
     np.testing.assert_array_equal(Raw("/data/l0b.h5").getPulseTimes("A", "H")[1], fixed)
@@ -288,6 +288,196 @@ def test_the_wrapper_hands_the_reader_the_repaired_times(monkeypatch, tmp_path):
     epoch, t = Raw("/data/l0b.h5").getPulseTimes("A", "H", epoch=datetime.datetime(2025, 12, 31, 23, 59))
     np.testing.assert_array_equal(t, fixed + 60.0)
     np.testing.assert_array_equal(Raw("/data/other.h5").getPulseTimes("A", "H")[1], tags)   # not repaired
+
+
+# -- the focusing fixes of ISCE3's develop branch, patched in at run time -------------------------
+_BEAMFORMER = """
+import numpy as np
+from scipy.interpolate import interp1d
+
+
+def get_calib_range_line_idx(cal_path_mask):
+    m = np.asarray(cal_path_mask)                     # 0 HPA, 1 LNA, 2 BYPASS; LNA and BYPASS lines are noise-only
+    return np.flatnonzero(m == 0), np.flatnonzero(m == 2), np.flatnonzero(m == 1), np.flatnonzero(m > 0)
+
+
+def compute_transmit_pattern_weights(tx_trm_info, norm=False):
+    hcal_lines_idx, bcal_lines_idx, _, noise_lines_idx = get_calib_range_line_idx(tx_trm_info.cal_path_mask)
+    active_tx_idx = np.asarray(tx_trm_info.channels) - 1
+    tx_weights = tx_trm_info.correlator_tap2[:, active_tx_idx].astype(complex)
+    if bcal_lines_idx.size:
+        for line_start, line_stop in zip(bcal_lines_idx[:-1], bcal_lines_idx[1:]):
+            bcal_rel = tx_weights[line_start] / tx_weights[line_start, 0]
+            tx_weights[line_start:line_stop] /= bcal_rel
+        bcal_rel = tx_weights[bcal_lines_idx[-1]] / tx_weights[bcal_lines_idx[-1], 0]
+        tx_weights[bcal_lines_idx[-1]:] /= bcal_rel
+    nearest = interp1d(hcal_lines_idx, tx_weights[hcal_lines_idx], kind="nearest", fill_value="extrapolate",
+                       assume_sorted=True, axis=0)
+    tx_weights[noise_lines_idx] = nearest(noise_lines_idx)
+    if norm:
+        norm_vals = np.linalg.norm(tx_weights, axis=1)
+        norm_vals[np.isclose(norm_vals, 0)] = 1
+        tx_weights /= norm_vals[:, None]
+    if tx_trm_info.tx_phase is None:
+        return tx_weights
+    return abs(tx_weights) * np.exp(1j * tx_trm_info.tx_phase[:, active_tx_idx])
+"""
+
+_VALID_REGIONS = """
+import numpy as np
+
+
+def rasterize_subswath_polygons(pieces, threshold=2):
+    swaths = np.zeros((1, len(pieces), 2), dtype=np.uint32)
+    later = np.zeros((1, len(pieces), 2), dtype=np.uint32)
+    for itime, (first, second) in enumerate(pieces):
+        swaths[0, itime], later[0, itime] = first, second
+        i0, i1 = swaths[0, itime]
+        j0, j1 = later[0, itime]
+        if abs(int(j0) - i1) <= threshold:
+            swaths[0, itime] = (i0, j1)
+        elif abs(int(i0) - j1) <= threshold:
+            swaths[0, itime] = (j0, i1)
+        elif (j1 - j0) > (i1 - i0):
+            swaths[0, itime] = (j0, j1)
+    return swaths
+
+
+def get_focused_sub_swaths(pieces):
+    return rasterize_subswath_polygons(pieces)
+"""
+
+_RAW = """
+import numpy as np
+
+
+def get_dwp_change_indices(rd, wd, wl):
+    start = np.min(rd + wd, axis=1).astype(np.int64)
+    end = np.max(rd + wd + wl, axis=1).astype(np.int64)
+    return np.where(np.any(np.diff(np.vstack((start, end)), axis=1) != 0, axis=0))[0] + 1
+
+
+class RawBase:
+    polarizations = {"A": ["HH"]}
+
+    def __init__(self, limits, wd, times):
+        self.limits, self.wd, self.times = limits, wd, times
+
+    def getSubSwaths(self, frequency="A", tx="H"):
+        return self.limits
+
+    def getRdWdWl(self, frequency="A", polarization=None):
+        return np.zeros_like(self.wd), self.wd, np.full_like(self.wd, 100)
+
+    def getSubSwathBboxes(self, frequency, polarization=None, epoch=None, num_ignore=0):
+        changes = get_dwp_change_indices(*self.getRdWdWl(frequency, polarization))
+        breaks = np.hstack(([0], changes, [self.times.size - 1]))
+        out = []
+        for a, b in zip(breaks[:-1], breaks[1:]):
+            j0, j1 = self.limits[0, a]
+            if j1 > j0:
+                out.append([(self.times[a], self.times[b], int(j0), int(j1))])
+        return out
+
+
+class Raw(RawBase):
+    pass
+"""
+
+
+def _fake_isce3_modules(monkeypatch, tmp_path):
+    """Stand-ins, in files (the fixes read their source), for the modules the develop fixes patch."""
+    import importlib.util
+    import sys
+    import types
+
+    def load(name, text):
+        path = tmp_path / (name.replace(".", "_") + ".py")
+        path.write_text(text)
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, name, module)
+        spec.loader.exec_module(module)
+        return module
+
+    seen = {}
+    focus_mod = types.ModuleType("nisar.workflows.focus")
+    focus_mod.get_common_mode = lambda raws: []
+    focus_mod.main = lambda argv: seen.update(argv=list(sys.argv))
+    for name in ("nisar", "nisar.workflows", "nisar.products", "nisar.products.readers", "nisar.antenna",
+                 "isce3", "isce3.focus"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "nisar.workflows.focus", focus_mod)
+    raw = load("nisar.products.readers.Raw", _RAW)
+    beamformer = load("nisar.antenna.beamformer", _BEAMFORMER)
+    valid_regions = load("isce3.focus.valid_regions", _VALID_REGIONS)
+    monkeypatch.setattr(sys, "argv", ["-c", "-", "-", "develop", "run.yaml"])
+    return seen, raw, beamformer, valid_regions
+
+
+def _tx_weights_fixed(info, norm, beamformer, original):
+    """develop's compute_transmit_pattern_weights: the lines before the first BCAL line normalised by it too
+    (here by dividing the correlator values of those lines first, which the rest of the function then keeps)."""
+    import types
+
+    _, bcal, _, _ = beamformer.get_calib_range_line_idx(info.cal_path_mask)
+    tap = info.correlator_tap2.copy()
+    active = np.asarray(info.channels) - 1
+    tap[:bcal[0], active] /= tap[bcal[0], active] / tap[bcal[0], active[0]]
+    return original(types.SimpleNamespace(**dict(vars(info), correlator_tap2=tap)), norm)
+
+
+def test_the_tx_weights_before_the_first_bcal_line_are_normalised(monkeypatch, tmp_path):
+    import types
+
+    _, _, beamformer, _ = _fake_isce3_modules(monkeypatch, tmp_path)
+    original = beamformer.compute_transmit_pattern_weights
+    exec(focus._FOCUS_WRAPPER, {})
+    patched = beamformer.compute_transmit_pattern_weights
+    assert patched is not original
+    rng = np.random.default_rng(3)
+    mask = np.zeros(400, int)
+    mask[rng.choice(400, 60, replace=False)] = 1                        # LNA lines
+    mask[[48, 49, 52]] = 1                                              # beside the first BCAL line
+    mask[50::100] = 2                                                   # BYPASS (BCAL), the first after 50 lines
+    tap = (rng.normal(1, 0.3, (400, 8)) + 1j * rng.normal(0, 0.3, (400, 8))) * np.exp(1j * rng.uniform(-3, 3, 8))
+    for phase in (None, rng.uniform(-3, 3, (400, 8))):
+        info = types.SimpleNamespace(cal_path_mask=mask, channels=[1, 2, 3, 4, 6, 7], correlator_tap2=tap,
+                                     tx_phase=phase)
+        for norm in (False, True):
+            got = patched(info, norm)
+            want = _tx_weights_fixed(info, norm, beamformer, original)
+            np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
+            assert not np.allclose(original(info, norm)[:50], want[:50])
+
+
+def test_overlapping_sub_swath_pieces_are_joined(monkeypatch, tmp_path):
+    _, _, _, valid_regions = _fake_isce3_modules(monkeypatch, tmp_path)
+    pieces = [((10, 100), (99, 300)), ((10, 100), (102, 300)), ((10, 100), (150, 160))]
+    assert valid_regions.get_focused_sub_swaths(pieces)[0, 0].tolist() == [99, 300]   # NumPy 2: the bigger wins
+    exec(focus._FOCUS_WRAPPER, {})
+    out = valid_regions.get_focused_sub_swaths(pieces)
+    assert out.dtype == np.uint32 and out[0].tolist() == [[10, 300], [10, 300], [10, 100]]
+    assert valid_regions.np is np
+
+
+def test_a_segment_starting_without_echo_keeps_its_valid_region(monkeypatch, tmp_path):
+    seen, raw, _, _ = _fake_isce3_modules(monkeypatch, tmp_path)
+    times = 100.0 + np.arange(900) / 1900.0
+    limits = np.tile(np.array([[[5, 95]]], np.uint32), (1, 900, 1))
+    limits[0, :50] = np.iinfo(np.uint32).max                            # the datatake's empty first pulses
+    wd = np.full((900, 4), 4720, np.int64)
+    wd[300:] -= 5
+    wd[600:] -= 5
+    reader = raw.Raw(limits, wd, times)
+    assert reader.getSubSwathBboxes("A")[0][0][0] == times[300]          # v0.25.16 loses the first segment
+    exec(focus._FOCUS_WRAPPER, {})
+    assert seen["argv"] == ["-c", "run.yaml"]
+    boxes = reader.getSubSwathBboxes("A")
+    assert [b[0][:2] for b in boxes] == [(times[50], times[300]), (times[300], times[600]), (times[600], times[899])]
+    assert raw.get_dwp_change_indices(*reader.getRdWdWl()).tolist() == [300, 600]   # put back after the call
+    whole = raw.Raw(np.tile(np.array([[[5, 95]]], np.uint32), (1, 900, 1)), wd, times)
+    assert [b[0][0] for b in whole.getSubSwathBboxes("A")] == [times[0], times[300], times[600]]
 
 
 def test_refocused_name():

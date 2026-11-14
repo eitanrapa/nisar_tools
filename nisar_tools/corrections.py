@@ -160,10 +160,33 @@ def _incidence(t, r, grid, orbit):
     return float(np.arccos(abs(enu[2]) / np.linalg.norm(enu)))
 
 
-def tec_luts(json_path, center_frequency, orbit, grid, margin=40.0):
-    """`tec_lut2d_from_json_{az,srg}`: `(azimuth LUT [s], range LUT [m])`."""
+def topside_flagged(tec, ref_epoch, start, stop):
+    """Whether a topside TEC sample flagged low quality falls within `[start, stop]` (s since `ref_epoch`).
+
+    `tec` is an IMAGEN TEC file's contents. ISCE3's develop branch
+    (`should_use_only_total_tec`) then takes the total TEC alone, not the
+    sub-orbital TEC (total minus topside). False for a file without the flags.
+    """
+    keys = ("topTecNrDataFlag", "topTecFrDataFlag")
+    if not all(k in tec for k in keys):
+        return False
+    utc = np.array([np.datetime64(t.replace("Z", ""), "ns") for t in tec["utc"]])
+    t = np.array([radar.seconds_since(ref_epoch, u) for u in utc])
+    a, b = np.searchsorted(t, start, side="left"), np.searchsorted(t, stop, side="right")
+    return bool(np.any(np.concatenate([np.asarray(tec[k])[a:b] for k in keys])))
+
+
+def tec_luts(json_path, center_frequency, orbit, grid, margin=40.0, total_only=False):
+    """`tec_lut2d_from_json_{az,srg}`: `(azimuth LUT [s], range LUT [m])`.
+
+    `total_only` takes the total TEC rather than total minus topside.
+    """
     with open(json_path) as fh:
         tec = json.load(fh)
+
+    def tec_of(key):
+        total = np.array(tec[f"totTec{key}"])
+        return total if total_only else total - np.array(tec[f"topTec{key}"])
     rg_vec = [grid.starting_range, grid.end_range]
 
     # Slant range: delay at near and far range for each TEC sample.
@@ -171,7 +194,7 @@ def tec_luts(json_path, center_frequency, orbit, grid, margin=40.0):
     t_keep = t_all[keep]
     delta = []
     for key, rg in zip(("Nr", "Fr"), rg_vec):
-        sub = (np.array(tec[f"totTec{key}"]) - np.array(tec[f"topTec{key}"]))[keep]
+        sub = tec_of(key)[keep]
         inc = np.array([_incidence(t, rg, grid, orbit) for t in t_keep])
         delta.append(K_IONO * sub * TECU / center_frequency ** 2 / np.cos(inc))
     srg = radar.LUT2d.from_coords(rg_vec, t_keep, np.vstack(delta).T)
@@ -179,8 +202,7 @@ def tec_luts(json_path, center_frequency, orbit, grid, margin=40.0):
     # Azimuth: from the along-track TEC gradient, on a half-sample-staggered grid.
     t_all, keep = _tec_times(tec, grid, orbit, margin, staggered=True)
     t_keep = t_all[keep]
-    sub = np.vstack([(np.array(tec[f"totTec{k}"]) - np.array(tec[f"topTec{k}"]))[keep]
-                     for k in ("Nr", "Fr")]).T
+    sub = np.vstack([tec_of(k)[keep] for k in ("Nr", "Fr")]).T
     spacing = (t_keep[-1] - t_keep[0]) / (t_keep.size - 1)
     t_stag = t_keep[1:] - spacing / 2
     gradient = np.diff(sub, axis=0) / spacing
@@ -211,6 +233,7 @@ class TimingCorrections:
     arrays: dict = field(default_factory=dict)
     tec_file: str = None
     solid_earth_tides: bool = False
+    total_tec_only: bool = False
 
     @property
     def az_vec(self):
@@ -224,11 +247,14 @@ class TimingCorrections:
 
 
 def compute_timing_corrections(radar_grid, orbit, center_frequency, dem=None,
-                               tec_file=None, solid_earth_tides=True):
+                               tec_file=None, solid_earth_tides=True, check_topside=False):
     """`AzSrgCorrections` for one frequency's radar grid.
 
     `dem` is a `nisar_tools.dem.DEMInterpolator` for the SET
-    ground positions (`None` = ellipsoid). Returns `TimingCorrections`.
+    ground positions (`None` = ellipsoid). `check_topside` takes the total TEC
+    alone where a topside sample over the grid is flagged low quality
+    (`topside_flagged`, ISCE3's develop branch; v0.25.16 subtracts it
+    unchecked). Returns `TimingCorrections`.
     """
     scaled = decimated_radar_grid(radar_grid, orbit)
     out = TimingCorrections(grid=scaled, tec_file=str(tec_file) if tec_file else None,
@@ -256,7 +282,11 @@ def compute_timing_corrections(radar_grid, orbit, center_frequency, dem=None,
         set_rg, _ = solid_earth_tides_fn(scaled, lon, lat, hgt, orbit)
 
     if tec_file is not None:
-        az_tec, rg_tec = tec_luts(tec_file, center_frequency, orbit, radar_grid)
+        if check_topside:
+            with open(tec_file) as fh:
+                out.total_tec_only = topside_flagged(json.load(fh), radar_grid.ref_epoch,
+                                                     out.az_vec[0], out.az_vec[-1])
+        az_tec, rg_tec = tec_luts(tec_file, center_frequency, orbit, radar_grid, total_only=out.total_tec_only)
         if set_rg is None:
             out.azimuth, out.slant_range = az_tec, rg_tec
             out.arrays["azimuthIonosphere"] = az_tec.data

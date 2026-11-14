@@ -19,8 +19,12 @@ ISCE3 focuses an L0B's pulse tags as stored. `focus_inputs` repairs them
 (`nisar_tools.l0b.pulse_timings`: slipped, squeezed, relabelled or corrupt
 tags, timed from the commanded pulse sequence and the transmit leakage in the
 echoes) and `run_focus` hands the repaired times to ISCE3's L0B reader at run
-time, so any ISCE3 does the repair; `repair=False` focuses the tags as stored,
-which with ISCE3 v0.25.16 reproduces production, defects included.
+time, so any ISCE3 does the repair. It also patches in the focusing fixes
+ISCE3's develop branch has made since v0.25.16 where the ISCE3 it runs lacks
+them: TX weights before the first calibration line, sub-swath pieces that
+overlap by a sample, and data-window segments that start without echo (a
+datatake's first). `repair=False` focuses as ISCE3 does, which with ISCE3
+v0.25.16 reproduces production, defects included.
 
 `focus_inputs` prepares what production used for an RSLC:
 
@@ -50,16 +54,27 @@ from . import radar
 
 #: Environment variable naming the Python interpreter of an ISCE3 environment.
 ISCE3_PYTHON_ENV = "NISAR_TOOLS_ISCE3_PYTHON"
-#: Run in ISCE3's interpreter: `python -c _FOCUS_WRAPPER POLS TIMES RUNCONFIG`, where POLS restricts the
-#: polarizations (v0.25.16 has no option for it) and TIMES (an `.npz` from `focus_inputs`) replaces the pulse
-#: times its L0B reader returns; `-` for either leaves ISCE3 as it is.
+#: Run in ISCE3's interpreter: `python -c _FOCUS_WRAPPER POLS TIMES FIXES RUNCONFIG`, where POLS restricts the
+#: polarizations (v0.25.16 has no option for it), TIMES (an `.npz` from `focus_inputs`) replaces the pulse times
+#: its L0B reader returns, and FIXES (`develop`) patches in the focusing fixes ISCE3's develop branch has made since
+#: v0.25.16, each only where this ISCE3's own code still lacks it; `-` for any of them leaves ISCE3 as it is.
 _FOCUS_WRAPPER = """
+import inspect
 import sys
 from pathlib import Path
 import numpy as np
 import nisar.workflows.focus as focus
 from nisar.products.readers.Raw import Raw
-pols, times, runconfig = sys.argv[1:4]
+pols, times, fixes, runconfig = sys.argv[1:5]
+
+
+def source_of(function):
+    try:
+        return inspect.getsource(function)
+    except (OSError, TypeError):
+        return None
+
+
 if pols != "-":
     keep = set(pols.split(","))
     common = focus.get_common_mode
@@ -84,6 +99,84 @@ if times != "-":
             return file_epoch, t
         return epoch, t + (file_epoch - epoch).total_seconds()
     owner.getPulseTimes = get_pulse_times
+if fixes != "-":
+    # TX weights of the lines before the first BCAL line, normalised by it (develop 92d85c4f6). Every later step of
+    # compute_transmit_pattern_weights acts line by line, so it is applied to the output: each line whose value
+    # comes from before the first BCAL line (a noise line takes its nearest HCAL line's) is divided by that line's
+    # channel ratio, then normalised again, its phase kept where the weights take TxPhase.
+    import nisar.antenna.beamformer as beamformer
+    tx_weights = beamformer.compute_transmit_pattern_weights
+    if "bcal_lines_idx[0]" not in (source_of(tx_weights) or "bcal_lines_idx[0]"):
+        from scipy.interpolate import interp1d
+        def first_block_normalised(tx_trm_info, norm=False):
+            out = tx_weights(tx_trm_info, norm=norm)
+            hcal, bcal, _, noise = beamformer.get_calib_range_line_idx(tx_trm_info.cal_path_mask)
+            if bcal.size == 0 or bcal[0] == 0:
+                return out
+            active = np.asarray(tx_trm_info.channels) - 1
+            tap = tx_trm_info.correlator_tap2[:, active]
+            ratio = tap[bcal[0]] / tap[bcal[0], 0]
+            source = np.arange(out.shape[0])
+            if noise.size and hcal.size:
+                source[noise] = interp1d(hcal, hcal, kind="nearest", fill_value="extrapolate",
+                                         assume_sorted=True)(noise).astype(int)
+            rows = source < bcal[0]
+            phase = tx_trm_info.tx_phase
+            fixed = np.array(out, dtype=complex)
+            fixed[rows] = out[rows] / ratio if phase is None else np.abs(out[rows]) / np.abs(ratio)
+            if norm:
+                size = np.linalg.norm(fixed[rows], axis=1)
+                size[np.isclose(size, 0)] = 1
+                fixed[rows] /= size[:, None]
+            if phase is not None:
+                fixed[rows] = np.abs(fixed[rows]) * np.exp(1j * phase[:, active][rows])
+            return fixed
+        beamformer.compute_transmit_pattern_weights = first_block_normalised
+        print("nisar_tools: TX weights before the first BCAL line normalised (ISCE3 develop 92d85c4f6)")
+
+    # Sub-swath pieces that overlap by a sample joined: NumPy 2 keeps int - uint32 unsigned (develop deaadf16e).
+    import isce3.focus.valid_regions as valid_regions
+    rasterize = valid_regions.rasterize_subswath_polygons
+    if "int(j0) - i1" in (source_of(rasterize) or ""):
+        class Int64Swaths:
+            def __getattr__(self, name):
+                return np.int64 if name == "uint32" else getattr(np, name)
+        def rasterize_signed(*args, **kwargs):
+            valid_regions.np = Int64Swaths()
+            try:
+                return np.asarray(rasterize(*args, **kwargs)).astype(np.uint32)
+            finally:
+                valid_regions.np = np
+        valid_regions.rasterize_subswath_polygons = rasterize_signed
+        print("nisar_tools: overlapping sub-swath pieces joined (ISCE3 develop deaadf16e)")
+
+    # A data-window segment whose first pulse has no echo keeps its valid region, from its first pulse with echo
+    # (develop deaadf16e): a datatake's first L0B starts with empty pulses. The segment is split there.
+    owner = next(c for c in Raw.__mro__ if "getSubSwathBboxes" in c.__dict__)
+    boxes = owner.getSubSwathBboxes
+    if "min_segment_length" not in inspect.signature(boxes).parameters:
+        raw_module = sys.modules[owner.__module__]
+        dwp_changes = raw_module.get_dwp_change_indices
+        def boxes_from_echo(self, frequency, polarization=None, epoch=None, num_ignore=0):
+            pol = polarization or self.polarizations[frequency][0]
+            limits = self.getSubSwaths(frequency, tx=pol[0])
+            empty = ~np.any(limits[..., 1] > limits[..., 0], axis=0)
+            starts = []
+            if empty.any():
+                changes = np.asarray(dwp_changes(*self.getRdWdWl(frequency, pol)), dtype=int)
+                for a, b in zip(np.r_[0, changes], np.r_[changes, empty.size]):
+                    echo = np.flatnonzero(~empty[a:b])
+                    if empty[a] and echo.size:
+                        starts.append(int(a + echo[0]))
+            if not starts:
+                return boxes(self, frequency, polarization, epoch, num_ignore)
+            raw_module.get_dwp_change_indices = lambda rd, wd, wl: np.union1d(dwp_changes(rd, wd, wl), starts)
+            try:
+                return boxes(self, frequency, polarization, epoch, num_ignore)
+            finally:
+                raw_module.get_dwp_change_indices = dwp_changes
+        owner.getSubSwathBboxes = boxes_from_echo
+        print("nisar_tools: segments that start without echo keep their valid region (ISCE3 develop deaadf16e)")
 sys.argv = [sys.argv[0], runconfig]
 focus.main(sys.argv[1:])
 """
@@ -310,7 +403,12 @@ def run_focus(runconfig, *, python=None, threads=None, polarizations=None, repai
         L0B holds). Each polarization costs as much as the first.
     repair : bool
         Focus with the repaired pulse times `focus_inputs` wrote beside the
-        runconfig (`pulse_times.npz`), not the L0B's tags as stored.
+        runconfig (`pulse_times.npz`), not the L0B's tags as stored, and with
+        the focusing fixes ISCE3's develop branch has made since v0.25.16 (TX
+        weights before the first calibration line, sub-swath pieces that
+        overlap by a sample, data-window segments that start without echo),
+        each patched in only where this ISCE3 lacks it. `False` focuses as
+        ISCE3 does.
     """
     import yaml
 
@@ -328,7 +426,7 @@ def run_focus(runconfig, *, python=None, threads=None, polarizations=None, repai
     if repair and not times.exists():
         raise FileNotFoundError(f"no repaired pulse times at {times}: run focus_inputs, or repair=False")
     command = [python, "-c", _FOCUS_WRAPPER, ",".join(polarizations) if polarizations else "-",
-               str(times) if repair else "-", str(runconfig)]
+               str(times) if repair else "-", "develop" if repair else "-", str(runconfig)]
     logfile = runconfig.with_name("focus.log")
     start = time.perf_counter()
     log(f"focusing {runconfig} with {python} ({_dt.datetime.now():%H:%M})")

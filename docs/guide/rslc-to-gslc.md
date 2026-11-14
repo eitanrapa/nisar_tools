@@ -93,11 +93,14 @@ The port reproduces ISCE3 v0.25.16, defects included, so its GSLCs pair with ASF
 The metadata fixes: the mask tests every row of the interpolation chip (ISCE3 tests its corners and misses a line whose
 valid interval narrows inside it); `validSamplesSubSwath` lines that drop out of the swath for one line are repaired;
 timing corrections are clamped at their table's edge instead of skipped; band B's `inputDataExceptionMask` is written
-on band B's grid; and the cube's ground-track velocity uses its own `rdr2geo` tolerance.
+on band B's grid; the cube's ground-track velocity uses its own `rdr2geo` tolerance; and the real and imaginary
+statistics of complex metadata layers (the crosstalk) are written as real numbers, not complex ones.
 
 The pixel fixes change the phase, so both dates of a pair must use them, and never with an ASF GSLC: a centred DEM
-spline window (ISCE3's is one node off, and never reads the first row or column) and the Doppler table read at
-zero-Doppler coordinates (ISCE3 writes it over beam-centre times, about 2 s earlier, and labels them zero-Doppler).
+spline window (ISCE3's is one node off, and never reads the first row or column), the Doppler table read at
+zero-Doppler coordinates (ISCE3 writes it over beam-centre times, about 2 s earlier, and labels them zero-Doppler),
+and, with a TEC file, the total TEC alone where the file flags a topside sample over the frame as low quality
+(v0.25.16 subtracts the topside TEC unchecked; ISCE3's development branch falls back the same way).
 `GSLC.pixel_convention` reads which a GSLC has, and `GSLCStack.from_gslcs` refuses a mix.
 
 One departure is always there: the port reads the RSLC's last line and range sample, which ISCE3 drops, so along the

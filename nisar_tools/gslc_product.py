@@ -385,12 +385,15 @@ class ComplexStats:
 # ---------------------------------------------------------------------------
 # Metadata LUT datasets (save_hdf5_dataset)
 # ---------------------------------------------------------------------------
-def write_lut(f, root, name, data, grid, compute_stats=False, fill_value=None):
+def write_lut(f, root, name, data, grid, compute_stats=False, fill_value=None, real_stats=True):
     """`save_hdf5_dataset` for one geocoded LUT band.
 
     gzip 9, no shuffle, chunks `min(512, dim)`; attributes `grid_mapping`,
     `_FillValue` (NaN for float, NaN+NaNj for complex, none for integers) and,
-    with `compute_stats`, ISCE3's stats cast to the dataset's own type.
+    with `compute_stats`, ISCE3's stats cast to the dataset's own type. The real
+    and imaginary statistics of a complex layer take its real component's type
+    (as on ISCE3's develop branch); `real_stats=False` writes them complex, as
+    ISCE3 v0.25.16 does.
     """
     yds, xds = set_geo_info(f, root, grid, save_spacing=False)
     group = f[root]
@@ -412,11 +415,12 @@ def write_lut(f, root, name, data, grid, compute_stats=False, fill_value=None):
             st = ComplexStats()
             st.update(data)
             std = np.sqrt(st.ssq / (st.n - 1)) if st.n > 1 else np.zeros(2)
+            part_kind = data.real.dtype.type if real_stats else kind
             for i, part in enumerate(("real", "imag")):
                 for label, value in (("min", st.min[i]), ("mean", st.mean[i]),
                                      ("max", st.max[i])):
-                    ds.attrs.create(f"{label}_{part}_value", data=kind(value))
-                ds.attrs.create(f"sample_stddev_{part}", data=kind(std[i]))
+                    ds.attrs.create(f"{label}_{part}_value", data=part_kind(value))
+                ds.attrs.create(f"sample_stddev_{part}", data=part_kind(std[i]))
         else:
             finite = data[np.isfinite(data)] if np.issubdtype(data.dtype, np.floating) else data.ravel()
             ds.attrs.create("min_value", data=kind(finite.min()) if finite.size else kind(np.nan))

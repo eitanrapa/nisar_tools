@@ -382,12 +382,15 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
           of the interpolation chip (ISCE3: its corners), lines that drop out
           of `validSamplesSubSwath` are repaired, timing corrections are
           clamped at their table's edge (ISCE3: skipped), band B's
-          `inputDataExceptionMask` is on B's own grid, and the cube's
-          ground-track velocity uses a proper `rdr2geo` tolerance.
+          `inputDataExceptionMask` is on B's own grid, the cube's
+          ground-track velocity uses a proper `rdr2geo` tolerance, and the
+          real and imaginary statistics of complex LUTs are real numbers.
         - `True`: ISCE3's masks and metadata too.
         - `False`: also fixes the pixels: a centred DEM spline window (ISCE3's
           is one node off, ~0.4 rad of flattening phase per cm of height it
-          gets wrong) and the Doppler table read at zero-Doppler coordinates.
+          gets wrong), the Doppler table read at zero-Doppler coordinates, and
+          the total TEC alone where the TEC file flags a topside sample over
+          the frame (ISCE3 v0.25.16 subtracts it unchecked).
           Geocode both dates of a pair this way, never with an ASF GSLC.
     block_size : int
         Output block edge in pixels; rounded to a multiple of the 512 chunk.
@@ -443,7 +446,7 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             grid = rslc.radar_grid(freq)
             corrections[freq] = compute_timing_corrections(
                 grid, orbit, rslc.center_frequency(freq), dem=dem_interp,
-                tec_file=tec_file, solid_earth_tides=solid_earth_tides)
+                tec_file=tec_file, solid_earth_tides=solid_earth_tides, check_topside=fix_pixels)
             _write_timing_corrections(f, freq, corrections[freq])
             # ISCE3 samples every band's exception mask at the first band's pixels
             bands = ([freq] if fix_metadata else list(freq_pols) if freq == first else []) if has_exception else []
@@ -480,7 +483,7 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             solid_earth_tides=solid_earth_tides, dem_path=dem,
             dem_description=dem_description or _dem_description(dem, rslc),
             bounds=bounds, snap=snap, epsg=epsg, software_version=SOFTWARE_VERSION,
-            run_config_text=run_text)
+            run_config_text=run_text, fix_metadata=fix_metadata)
         gp.decorate_from_spec(f)
     except BaseException:
         f.close()

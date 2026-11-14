@@ -24,10 +24,10 @@ LUT_1D_EXPANSION_MARGIN = 5
 def populate_metadata(f, rslc, freq_pols, grids, lut_grid, orbit, dem, *,
                       granule_id, processing_datetime, orbit_file, tec_file, flatten,
                       solid_earth_tides, dem_path, dem_description, bounds, snap, epsg,
-                      software_version, run_config_text):
+                      software_version, run_config_text, fix_metadata=True):
     src = rslc._file
     ctx = dict(f=f, src=src, rslc=rslc, freq_pols=freq_pols, grids=grids,
-               lut_grid=lut_grid, orbit=orbit, dem=dem)
+               lut_grid=lut_grid, orbit=orbit, dem=dem, fix_metadata=fix_metadata)
     _identification_common(f, src, granule_id, processing_datetime)
     _identification_l2(f, src, freq_pols)
     _data_parameters(f, src, freq_pols)
@@ -280,7 +280,7 @@ def _geocode_group(ctx, out_group, in_group, names, frequency=None, compute_stat
             result = geocode_lut(data, grid, lut_grid, ctx["dem"], ctx["orbit"], m)
             result = result.astype(data.dtype, copy=False)
         gp.write_lut(ctx["f"], out_group, out_name, result, lut_grid,
-                     compute_stats=compute_stats)
+                     compute_stats=compute_stats, real_stats=ctx.get("fix_metadata", True))
     return True
 
 

@@ -15,6 +15,7 @@ The pulse timing behind an RSLC is checked by `nisar_tools.l0b.timing_report`.
 """
 
 import dataclasses
+import re
 
 import numpy as np
 
@@ -159,6 +160,11 @@ def check_rslc(rslc):
                     f"the swath invalid (lines {lines[:5].tolist()}); geocode_rslc repairs them (repair_drops)")
         if out["input_data_exception"]:
             out["problems"].append("the L0B had input data exceptions (see inputDataExceptionMask)")
+        version = re.match(r"(\d+)\.(\d+)\.(\d+)", out["isce3"] or "")
+        if version and tuple(int(x) for x in version.groups()) < (0, 25, 16):
+            out["problems"].append(
+                f"focused by ISCE3 {out['isce3']}, whose valid-sample masks of dithered data call the unfocused far "
+                "range valid (fixed in v0.25.16): do not trust validSamplesSubSwath's far-range edge")
         return out
     finally:
         if own:

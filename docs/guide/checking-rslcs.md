@@ -7,7 +7,7 @@ flagging them. Three checks find them in seconds; run them before an RSLC goes i
 from nisar_tools.l0b import timing_report
 from nisar_tools.qa import band_offset, check_pair, check_rslc
 
-check_rslc(rslc)["problems"]       # release, PRF, calibration delays, input-data exceptions, dropped mask lines
+check_rslc(rslc)["problems"]       # release, PRF, calibration delays, input-data exceptions, mask defects
 check_pair(reference, secondary)   # [] when the two were focused alike
 print(timing_report(rslc).summary())   # pulse timing, and a datatake start the mask leaves out
 print(band_offset(rslc).summary())

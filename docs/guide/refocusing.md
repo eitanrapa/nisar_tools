@@ -35,12 +35,25 @@ does; v0.25.16 is the release that focused the provisional products.
 
 ISCE3 focuses an L0B's pulse tags as stored. `focus_inputs` repairs them instead (see [Checking an RSLC before
 use](checking-rslcs.md)) and writes the repaired times beside the run configuration; `run_focus` hands them to ISCE3's
-L0B reader as it runs, so the repair needs no patched ISCE3. `run_focus(repair=False)` focuses the tags as stored, and
-with v0.25.16 reproduces production, defects included: that is how a refocus is checked against production.
+L0B reader as it runs, so the repair needs no patched ISCE3.
 
-Some defects of ISCE3 v0.25.16's focusing remain whichever way it is run. They matter little for HH interferometry:
-tone-rank RFI mitigation can zero clean echo beside swath edges and gaps, and the calibration phase reaches HV, VH and
-VV conjugated.
+It patches in, the same way, the focusing fixes ISCE3's development branch has made since v0.25.16, each only where
+the ISCE3 it runs still has the old code:
+
+- the transmit beamforming weights of the lines before an L0B's first calibration (BYPASS) line are normalised like
+  the rest, so the antenna pattern divided out of the first seconds of each L0B is right;
+- sub-swath pieces that overlap by a sample are joined (under NumPy 2 the larger piece won, and a line lost most of
+  its swath in `validSamplesSubSwath`);
+- a data-window segment whose first pulse has no echo keeps its valid region from its first pulse with echo. A
+  datatake's first L0B starts with a few hundred empty pulses, so v0.25.16 masks the first ~10 s of every datatake,
+  and fails outright on an L0B with one segment.
+
+`run_focus(repair=False)` focuses as ISCE3 does, and with v0.25.16 reproduces production, defects included: that is how
+a refocus is checked against production.
+
+Some defects of ISCE3 v0.25.16's focusing remain whichever way it is run, unfixed on its development branch too. They
+matter little for HH interferometry: tone-rank RFI mitigation can zero clean echo beside swath edges and gaps, and the
+calibration phase reaches HV, VH and VV conjugated.
 
 ## Costs
 

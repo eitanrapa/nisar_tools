@@ -80,6 +80,31 @@ def test_tec_file_that_misses_the_acquisition_is_refused(tmp_path):
         tec_luts(early, FREQ, orbit, grid)
 
 
+def test_a_flagged_topside_sample_over_the_frame_leaves_the_total_tec(tmp_path):
+    from nisar_tools.corrections import compute_timing_corrections, topside_flagged
+
+    orbit, grid = rs.orbit(), rs.radar_grid(length=20 * 1520)          # a frame spans TEC samples (10 s apart)
+    path = _tec_file(tmp_path, lambda k: 10.0)
+    doc = json.loads(path.read_text())
+    t = np.array([radar.seconds_since(grid.ref_epoch, np.datetime64(u)) for u in doc["utc"]])
+    inside = int(np.searchsorted(t, 0.5 * (grid.sensing_start + grid.sensing_stop)))
+    assert not topside_flagged(doc, grid.ref_epoch, grid.sensing_start, grid.sensing_stop)   # no flags at all
+    doc["topTecNrDataFlag"] = [0] * len(t)
+    doc["topTecFrDataFlag"] = [0] * len(t)
+    doc["topTecFrDataFlag"][0] = 1                                    # before the frame: no matter
+    assert not topside_flagged(doc, grid.ref_epoch, grid.sensing_start, grid.sensing_stop)
+    doc["topTecNrDataFlag"][inside] = 1
+    assert topside_flagged(doc, grid.ref_epoch, grid.sensing_start, grid.sensing_stop)
+    path.write_text(json.dumps(doc))
+    plain = compute_timing_corrections(grid, orbit, FREQ, tec_file=path, solid_earth_tides=False)
+    checked = compute_timing_corrections(grid, orbit, FREQ, tec_file=path, solid_earth_tides=False,
+                                         check_topside=True)
+    assert not plain.total_tec_only and checked.total_tec_only
+    _, total = tec_luts(path, FREQ, orbit, grid, total_only=True)
+    np.testing.assert_allclose(checked.slant_range.data, total.data, rtol=1e-12)
+    assert np.all(checked.slant_range.data > plain.slant_range.data)    # the topside's 3 TECU back in
+
+
 # -- finding and fetching the file --------------------------------------------------
 def _entry(name, start, end, private_too=True):
     base = "https://nisar.asf.earthdatacloud.nasa.gov"

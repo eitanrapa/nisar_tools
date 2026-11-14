@@ -222,3 +222,15 @@ def test_projection_attributes_for_utm():
     assert attrs["longitude_of_central_meridian"] == -69.0
     assert attrs["false_easting"] == 500000.0 and attrs["scale_factor_at_central_meridian"] == 0.9996
     assert b"WGS 84 / UTM zone 19N" in attrs["spatial_ref"]
+
+
+def test_complex_lut_statistics_are_real_numbers_unless_isce3s_are_kept(tmp_path):
+    g = GeoGrid(1001.0, 5007.0, 5.0, -5.0, 6, 4, 32619)
+    data = (np.arange(24, dtype=np.float32) + 1j * np.arange(24, 0, -1, dtype=np.float32)).reshape(4, 6)
+    with h5py.File(tmp_path / "lut.h5", "w") as f:
+        f.create_group("lut")
+        real = gp.write_lut(f, "lut", "crosstalk", data.astype(np.complex64), g, compute_stats=True)
+        old = gp.write_lut(f, "lut", "kept", data.astype(np.complex64), g, compute_stats=True, real_stats=False)
+        for name in ("min_real_value", "mean_imag_value", "max_imag_value", "sample_stddev_real"):
+            assert real.attrs[name].dtype == np.float32 and old.attrs[name].dtype == np.complex64
+        assert real.attrs["max_real_value"] == 23.0 and real.attrs["min_imag_value"] == 1.0

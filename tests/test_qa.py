@@ -188,3 +188,24 @@ def test_cell_offsets_keep_a_supported_change_across_range():
                                  margin=0.5, agree=0.75, min_blocks=2)
     assert deviant[1].tolist() == [[False, True]]          # two cells disagree: the better supported stays
     np.testing.assert_allclose(supported[0][0], [-4.1, -0.2])
+
+
+@pytest.mark.parametrize("version, flagged", [("0.25.7", True), ("0.25.16", False)])
+def test_check_rslc_flags_the_masks_of_releases_before_v0_25_16(tmp_path, version, flagged):
+    path = tmp_path / "rslc.h5"
+    with h5py.File(path, "w") as f:
+        ident = f.create_group("science/LSAR/identification")
+        ident["lookDirection"], ident["orbitPassDirection"] = np.bytes_("Left"), np.bytes_("Descending")
+        ident["granuleId"] = np.bytes_("NISAR_L1_PR_RSLC_TEST")
+        ident["listOfFrequencies"] = np.array([b"A"])
+        sw = f.create_group("science/LSAR/RSLC/swaths")
+        sw["zeroDopplerTime"] = np.arange(10, dtype=float)
+        sw["zeroDopplerTime"].attrs["units"] = np.bytes_(radar.epoch_units(rs.EPOCH))
+        sw["zeroDopplerTimeSpacing"] = 1.0
+        g = sw.create_group("frequencyA")
+        g["listOfPolarizations"] = np.array([b"HH"])
+        g["numberOfSubSwaths"] = 1
+        g["validSamplesSubSwath1"] = _swath(10, 0, 100).astype(np.uint32)
+        f["science/LSAR/RSLC/metadata/processingInformation/algorithms/softwareVersion"] = np.bytes_(version)
+    problems = qa.check_rslc(path)["problems"]
+    assert any("far-range edge" in p for p in problems) == flagged
