@@ -172,6 +172,8 @@ class PulseTiming:
     tag_shift: int = 0
     anchored: bool = True
     phase_source: str = "tags"
+    limits_phase: int = None
+    tx: str = "txH"
 
     @property
     def residual(self):
@@ -237,6 +239,8 @@ class PulseTiming:
         if self.phase_source != "tags":
             lines.append(f"  the table's phase, {self.table_phase}, from the "
                          + ("transmit leakage in the echoes" if self.phase_source == "leakage" else "sub-swath limits"))
+        if self.phase_source == "leakage" and self.limits_phase is not None and self.limits_phase != self.table_phase:
+            lines.append(f"  the sub-swath limits say phase {self.limits_phase}: they are not the radar's record")
         if self.tag_shift:
             lines.append(f"  the tags follow the table {self.tag_shift} pulses off the radar's sequence")
         behind = float(np.max(self.model - self.utc))
@@ -264,7 +268,7 @@ class GapPhase:
                 f"{self.phase} ({100 * self.match:.1f}% predicted to 3 samples), counted from line {self.first_line}")
 
 
-def tx_gap_phase(source, frequency="A", count=519, tolerance=3.0):
+def tx_gap_phase(source, frequency="A", count=519, tolerance=3.0, tx=None):
     """Which phase of the commanded PRI table the radar flew, read from its transmit gaps, not its tags.
 
     In SweepSAR the radar transmits later pulses while it still receives, and
@@ -292,7 +296,8 @@ def tx_gap_phase(source, frequency="A", count=519, tolerance=3.0):
     """
     f, close, name = _open(source)
     try:
-        tx = f[f"science/LSAR/RRSD/swaths/frequency{frequency}/txH"]
+        band = f[f"science/LSAR/RRSD/swaths/frequency{frequency}"]
+        tx = band[tx or sorted(k for k in band if k.startswith("tx"))[0]]
         table = np.atleast_1d(np.asarray(tx["PRISequence"][()], float))
         lines = tx["rangeLineIndex"]
         n = lines.shape[0]
@@ -364,7 +369,7 @@ def _echo_amplitude(dataset, rows, lut=None):
     return np.abs(raw).astype(float)
 
 
-def tx_leakage_phase(source, frequency="A", count=200, width=1849, offsets=np.arange(-2000, 2001, 40)):
+def tx_leakage_phase(source, frequency="A", count=200, tx=None, leak=38.52e-6, search=41.7e-6):
     """Which phase of the commanded PRI table the radar flew, read from the transmit leakage in its echoes.
 
     While an echo is received the radar transmits later pulses, and each
@@ -378,6 +383,18 @@ def tx_leakage_phase(source, frequency="A", count=200, width=1849, offsets=np.ar
     40 MB), but the L0B's sub-swath limits can be bookkeeping: on one datatake
     they follow the table 44 pulses off, with no leakage inside them.
 
+    Parameters
+    ----------
+    source : str, Path or h5py.File
+        An L0B, as for `pulse_timing`.
+    count : int
+        Echoes read, from the middle of the datatake.
+    tx : str, optional
+        The transmit group, such as `"txH"` (default: the band's first).
+    leak, search : float
+        How long a transmit leaks into the window, and how far either side
+        the hardware offset is searched (s).
+
     Returns
     -------
     LeakagePhase
@@ -385,7 +402,8 @@ def tx_leakage_phase(source, frequency="A", count=200, width=1849, offsets=np.ar
     """
     f, close, name = _open(source)
     try:
-        tx = f[f"science/LSAR/RRSD/swaths/frequency{frequency}/txH"]
+        band = f[f"science/LSAR/RRSD/swaths/frequency{frequency}"]
+        tx = band[tx or sorted(k for k in band if k.startswith("tx"))[0]]
         table = np.atleast_1d(np.asarray(tx["PRISequence"][()], float))
         lines = tx["rangeLineIndex"]
         n = lines.shape[0]
@@ -406,6 +424,9 @@ def tx_leakage_phase(source, frequency="A", count=200, width=1849, offsets=np.ar
     base = a.mean()
     c = radar.SPEED_OF_LIGHT
     fs, tau0 = c / (2 * dr), 2 * r0 / c
+    width = max(1, int(round(leak * fs)))
+    step = max(1, int(round(search * fs / 50)))
+    offsets = np.arange(-50 * step, 50 * step + 1, step)
     lags = np.arange(1, int(np.ceil(4 * tau0 / table.min())) + 2)
     cum = np.concatenate([[0.0], np.cumsum(np.tile(table, int((k.max() + lags[-1]) // table.size) + 3))])
     rows = np.broadcast_to(np.arange(a.shape[0])[:, None], (a.shape[0], lags.size))
@@ -425,7 +446,8 @@ def tx_leakage_phase(source, frequency="A", count=200, width=1849, offsets=np.ar
                         first_line=line0)
 
 
-def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", min_anchor=1.0, echoes="auto"):
+def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", min_anchor=1.0, echoes="auto",
+                 tx=None):
     """Check an L0B's echo times against its commanded pulse sequence.
 
     Parameters
@@ -435,6 +457,8 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
         metadata; see `nisar_tools.download.l0b_url`), or an open file.
     frequency : str
         The band (`"A"` or `"B"`); both share the pulses.
+    tx : str, optional
+        The transmit group, such as `"txH"` (default: the band's first).
     tolerance : float
         Seconds within which a tag matches a table time.
     echoes : {"auto", True, False}
@@ -469,7 +493,8 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
         if ident is not None and "granuleId" in ident:
             name = _decode(ident["granuleId"][()])
         band = f[f"{RRSD}/swaths/frequency{frequency}"]
-        tx = band[sorted(k for k in band if k.startswith("tx"))[0]]
+        tx_name = tx or sorted(k for k in band if k.startswith("tx"))[0]
+        tx = band[tx_name]
         times = tx["UTCtime"]
         epoch = radar.parse_epoch(times.attrs["units"])
         utc = times[()].astype(np.float64)
@@ -479,18 +504,19 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
         else:
             table = np.array([1.0 / float(tx["nominalAcquisitionPRF"][()])])
         try:
-            gaps = tx_gap_phase(f, frequency) if table.size > 1 else None
+            gaps = tx_gap_phase(f, frequency, tx=tx_name) if table.size > 1 else None
         except (KeyError, ValueError, IndexError):
             gaps = None                              # no sub-swaths to read the transmit gaps from
         leak = None
         if table.size > 1 and (echoes is True or (echoes == "auto" and not str(source).startswith("http"))):
             try:
-                leak = tx_leakage_phase(f, frequency)
+                leak = tx_leakage_phase(f, frequency, tx=tx_name)
             except (KeyError, ValueError, IndexError):
                 leak = None                          # no echoes to read the leakage from
     finally:
         if close:
             f.close()
+    limits_phase = gaps.phase if gaps is not None and gaps.match >= 0.98 else None
     if leak is not None and leak.clear:
         phase_source = "leakage"
         gaps = GapPhase(granule=name, phase=leak.phase, match=1.0, pulses=leak.pulses, first_line=leak.first_line)
@@ -527,7 +553,37 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
     return PulseTiming(granule=name, frequency=frequency, epoch=epoch, utc=utc, line_index=line_index, model=model,
                        kind=kind, table=table, table_phase=int(phase), drift=drift,
                        gap_phase=None if gaps is None else gaps.phase, gap_match=None if gaps is None else gaps.match,
-                       tag_shift=int(tag_shift), anchored=anchored, phase_source=phase_source)
+                       tag_shift=int(tag_shift), anchored=anchored, phase_source=phase_source,
+                       limits_phase=limits_phase, tx=tx_name)
+
+
+def pulse_timings(source, **kwargs):
+    """`pulse_timing` for every band and transmit group of an L0B: `{(frequency, tx): PulseTiming}`.
+
+    The bands share their pulses: where band B's tags and line indices are
+    band A's, it gets A's timing rather than a second reading of its echoes.
+    `kwargs` go to `pulse_timing`.
+    """
+
+    f, close, _ = _open(source)
+    try:
+        swaths = f[f"{RRSD}/swaths"]
+        groups = [(k[-1], t) for k in sorted(swaths) if k.startswith("frequency")
+                  for t in sorted(swaths[k]) if t.startswith("tx")]
+        tags = {key: (swaths[f"frequency{key[0]}/{key[1]}/UTCtime"][()],
+                      swaths[f"frequency{key[0]}/{key[1]}/rangeLineIndex"][()]) for key in groups}
+    finally:
+        if close:
+            f.close()
+    out = {}
+    for frequency, tx in groups:
+        same = next((key for key in out if key[1] == tx and np.array_equal(tags[key][0], tags[(frequency, tx)][0])
+                     and np.array_equal(tags[key][1], tags[(frequency, tx)][1])), None)
+        if same is not None:
+            out[(frequency, tx)] = dataclasses.replace(out[same], frequency=frequency)
+        else:
+            out[(frequency, tx)] = pulse_timing(source, frequency, tx=tx, **kwargs)
+    return out
 
 
 @dataclasses.dataclass

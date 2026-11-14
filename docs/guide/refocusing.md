@@ -30,26 +30,17 @@ system.
 ## Which ISCE3
 
 nisar_tools does not import ISCE3. `run_focus` runs its focusing workflow, on the CPU, with the interpreter of an
-environment that has it (`python=`, or the `NISAR_TOOLS_ISCE3_PYTHON` variable).
+environment that has it (`python=`, or the `NISAR_TOOLS_ISCE3_PYTHON` variable). Any ISCE3 with the NISAR workflows
+does; v0.25.16 is the release that focused the provisional products.
 
-Stock ISCE3 v0.25.16, the release that focused the provisional products, reproduces production, defects included;
-`run_focus(require_fork=False)` runs it, which is how a refocus is checked against production. Repairing the defects
-needs ISCE3 patched, and `run_focus` refuses an ISCE3 that does not repair pulse tags. Our patched v0.25.16:
+ISCE3 focuses an L0B's pulse tags as stored. `focus_inputs` repairs them instead (see [Checking an RSLC before
+use](checking-rslcs.md)) and writes the repaired times beside the run configuration; `run_focus` hands them to ISCE3's
+L0B reader as it runs, so the repair needs no patched ISCE3. `run_focus(repair=False)` focuses the tags as stored, and
+with v0.25.16 reproduces production, defects included: that is how a refocus is checked against production.
 
-- replaces pulse tags that disagree with the commanded pulse sequence (slips and squeezed spans) with the sequence's
-  times, fitted to the tags that agree;
-- joins sub-swath pieces that overlap by a sample (under NumPy 2 they were not, and a line lost most of its swath);
-- normalises the transmit weights of the lines before the first calibration-bypass line;
-- fits the RFI threshold of tone-rank mitigation over valid echo only, and stops one block's inverse FFT leaking
-  into the next;
-- trims the receive channel-imbalance mean by magnitude rather than by record position;
-- gives the image the calibration factor's phase rather than its conjugate (HV, VH and VV; HH is unaffected);
-- centres the biquintic spline that interpolates the DEM;
-- estimates the noise-equivalent backscatter from fully compressed samples, and fills and extrapolates it in dB so it
-  stays positive.
-
-For HH interferometry the pulse tags and the RFI fixes matter; the transmit and receive weights move the antenna
-pattern smoothly across range, and the spline changes the focusing geometry negligibly.
+Some defects of ISCE3 v0.25.16's focusing remain whichever way it is run. They matter little for HH interferometry:
+tone-rank RFI mitigation can zero clean echo beside swath edges and gaps, and the calibration phase reaches HV, VH and
+VV conjugated.
 
 ## Costs
 

@@ -15,12 +15,12 @@ runs ISCE3's focusing workflow with the interpreter of an environment that has
 it, from `python=` or the `NISAR_TOOLS_ISCE3_PYTHON` variable. No GPU is
 needed; ISCE3's CPU backprojection is used.
 
-Stock ISCE3 v0.25.16 focuses the pulse tags as stored, so it reproduces
-production, defects included. Repairing slipped and squeezed tags needs ISCE3
-patched to model them from the commanded pulse sequence (our branch of
-v0.25.16 adds `nisar.products.readers.Raw.model_pulse_times` and uses it in
-`getPulseTimes`). `run_focus` refuses an ISCE3 without it unless
-`require_fork=False`.
+ISCE3 focuses an L0B's pulse tags as stored. `focus_inputs` repairs them
+(`nisar_tools.l0b.pulse_timings`: slipped, squeezed, relabelled or corrupt
+tags, timed from the commanded pulse sequence and the transmit leakage in the
+echoes) and `run_focus` hands the repaired times to ISCE3's L0B reader at run
+time, so any ISCE3 does the repair; `repair=False` focuses the tags as stored,
+which with ISCE3 v0.25.16 reproduces production, defects included.
 
 `focus_inputs` prepares what production used for an RSLC:
 
@@ -32,8 +32,9 @@ v0.25.16 adds `nisar.products.readers.Raw.model_pulse_times` and uses it in
 - the NISAR DEM v1.2 over the frame;
 - production's own run configuration with these paths, CPU processing and a
   local output;
-- `pulse_timing.txt`, what `nisar_tools.l0b.pulse_timing` finds in each L0B, and the
-  phase its transmit gaps give (`tx_gap_phase`).
+- `pulse_times.npz`, the repaired times of every L0B's bands and transmit
+  polarizations, and `pulse_timing.txt`, what `nisar_tools.l0b.pulse_timing`
+  finds in them.
 """
 
 import datetime as _dt
@@ -49,18 +50,41 @@ from . import radar
 
 #: Environment variable naming the Python interpreter of an ISCE3 environment.
 ISCE3_PYTHON_ENV = "NISAR_TOOLS_ISCE3_PYTHON"
-#: Imports only in an ISCE3 that repairs pulse time tags.
-_REPAIR_PROBE = "from nisar.products.readers.Raw import model_pulse_times"
-#: ISCE3's focus restricted to some polarizations (v0.25.16 has no option for it).
-_FOCUS_POLS = """
+#: Run in ISCE3's interpreter: `python -c _FOCUS_WRAPPER POLS TIMES RUNCONFIG`, where POLS restricts the
+#: polarizations (v0.25.16 has no option for it) and TIMES (an `.npz` from `focus_inputs`) replaces the pulse
+#: times its L0B reader returns; `-` for either leaves ISCE3 as it is.
+_FOCUS_WRAPPER = """
 import sys
+from pathlib import Path
+import numpy as np
 import nisar.workflows.focus as focus
-pols = set(sys.argv.pop(1).split(","))
-common = focus.get_common_mode
-def some(raws):
-    mode = common(raws)
-    return type(mode)(c for c in mode if c.pol in pols)
-focus.get_common_mode = some
+from nisar.products.readers.Raw import Raw
+pols, times, runconfig = sys.argv[1:4]
+if pols != "-":
+    keep = set(pols.split(","))
+    common = focus.get_common_mode
+    def some(raws):
+        mode = common(raws)
+        return type(mode)(c for c in mode if c.pol in keep)
+    focus.get_common_mode = some
+if times != "-":
+    repaired = dict(np.load(times))
+    owner = next(c for c in Raw.__mro__ if "getPulseTimes" in c.__dict__)
+    original = owner.getPulseTimes
+    def get_pulse_times(self, frequency=None, tx=None, epoch=None, **kwargs):
+        frequency = frequency or sorted(self.frequencies)[0]
+        tx = tx or self.polarizations[frequency][0][0]
+        file_epoch, t = original(self, frequency, tx, **kwargs)
+        key = Path(self.filename).name + "__" + frequency + "__tx" + tx
+        if key in repaired:
+            if repaired[key].size != t.size:
+                raise ValueError("repaired pulse times do not match " + key)
+            t = np.array(repaired[key], dtype=np.float64)
+        if epoch is None:
+            return file_epoch, t
+        return epoch, t + (file_epoch - epoch).total_seconds()
+    owner.getPulseTimes = get_pulse_times
+sys.argv = [sys.argv[0], runconfig]
 focus.main(sys.argv[1:])
 """
 _META = "science/LSAR/RSLC/metadata"
@@ -158,19 +182,20 @@ def _frame_bbox(config, rslc):
     return float(pts[:, 0].min()), float(pts[:, 0].max()), float(pts[:, 1].min()), float(pts[:, 1].max())
 
 
-def _timing_lines(path):
-    """`pulse_timing`'s summary of an L0B, or why it has none, and the phase its transmit gaps give."""
-    from .l0b import UnanchoredTags, pulse_timing, tx_gap_phase
+def _repair_pulse_times(l0bs, workdir):
+    """Write every L0B's repaired pulse times to `pulse_times.npz` and the findings to `pulse_timing.txt`."""
+    from .l0b import UnanchoredTags, pulse_timings
 
-    try:
-        lines = [pulse_timing(path).summary()]
-    except UnanchoredTags as error:
-        lines = [f"{Path(path).stem}: {error}"]
-    try:
-        lines.append(tx_gap_phase(path).summary())
-    except (KeyError, ValueError) as error:
-        lines.append(f"{Path(path).stem}: transmit gaps not read ({error})")
-    return lines
+    times, lines = {}, []
+    for path in l0bs:
+        try:
+            for (frequency, tx), pt in pulse_timings(path).items():
+                times[f"{Path(path).name}__{frequency}__{tx}"] = pt.corrected
+                lines.append(pt.summary())
+        except UnanchoredTags as error:
+            lines.append(f"{Path(path).stem}: {error}; its tags are focused as stored")
+    np.savez(workdir / "pulse_times.npz", **times)
+    (workdir / "pulse_timing.txt").write_text("\n".join(lines) + "\n")
 
 
 def focus_inputs(rslc, workdir, *, l0b_dir=None, ancillary_dir=None, dem=None, download=True, window=None):
@@ -217,7 +242,7 @@ def focus_inputs(rslc, workdir, *, l0b_dir=None, ancillary_dir=None, dem=None, d
             if not download:
                 raise FileNotFoundError(f"missing L0B(s) in {l0b_dir}: {', '.join(missing)}")
             dl.download_l0b(l0b_dir, missing)
-        (workdir / "pulse_timing.txt").write_text("\n".join(line for p in l0bs for line in _timing_lines(p)) + "\n")
+        _repair_pulse_times(l0bs, workdir)
         calibration = {}
         for name in _input_names(r, "auxcalFiles"):
             path = ancillary_dir / name
@@ -268,7 +293,7 @@ def focus_inputs(rslc, workdir, *, l0b_dir=None, ancillary_dir=None, dem=None, d
             r.close()
 
 
-def run_focus(runconfig, *, python=None, threads=None, polarizations=None, require_fork=True, log=print):
+def run_focus(runconfig, *, python=None, threads=None, polarizations=None, repair=True, log=print):
     """Run ISCE3's focusing on `runconfig`. Returns the output RSLC path.
 
     Parameters
@@ -283,9 +308,9 @@ def run_focus(runconfig, *, python=None, threads=None, polarizations=None, requi
     polarizations : list of str, optional
         Focus only these, such as `["HH"]`, in every band (default: all the
         L0B holds). Each polarization costs as much as the first.
-    require_fork : bool
-        Refuse an ISCE3 that does not repair pulse time tags. False runs stock
-        ISCE3, which reproduces production, defects included.
+    repair : bool
+        Focus with the repaired pulse times `focus_inputs` wrote beside the
+        runconfig (`pulse_times.npz`), not the L0B's tags as stored.
     """
     import yaml
 
@@ -299,14 +324,11 @@ def run_focus(runconfig, *, python=None, threads=None, polarizations=None, requi
     env = dict(os.environ, KMP_DUPLICATE_LIB_OK="TRUE")
     if threads:
         env["OMP_NUM_THREADS"] = str(int(threads))
-    if require_fork and subprocess.run([python, "-c", _REPAIR_PROBE], capture_output=True, env=env).returncode:
-        raise RuntimeError(f"the ISCE3 of {python} does not repair pulse time tags, so it would focus slipped "
-                           "and squeezed tags as stored; use a patched build, or require_fork=False to "
-                           "reproduce production")
-    if polarizations:
-        command = [python, "-c", _FOCUS_POLS, ",".join(polarizations), str(runconfig)]
-    else:
-        command = [python, "-m", "nisar.workflows.focus", str(runconfig)]
+    times = runconfig.with_name("pulse_times.npz")
+    if repair and not times.exists():
+        raise FileNotFoundError(f"no repaired pulse times at {times}: run focus_inputs, or repair=False")
+    command = [python, "-c", _FOCUS_WRAPPER, ",".join(polarizations) if polarizations else "-",
+               str(times) if repair else "-", str(runconfig)]
     logfile = runconfig.with_name("focus.log")
     start = time.perf_counter()
     log(f"focusing {runconfig} with {python} ({_dt.datetime.now():%H:%M})")
@@ -318,11 +340,10 @@ def run_focus(runconfig, *, python=None, threads=None, polarizations=None, requi
     return output
 
 
-def refocus(rslc, workdir, *, python=None, threads=None, polarizations=None, require_fork=True, log=print,
-            **inputs):
+def refocus(rslc, workdir, *, python=None, threads=None, polarizations=None, repair=True, log=print, **inputs):
     """`focus_inputs` then `run_focus`. Returns the refocused RSLC's path."""
     return run_focus(focus_inputs(rslc, workdir, **inputs), python=python, threads=threads,
-                     polarizations=polarizations, require_fork=require_fork, log=log)
+                     polarizations=polarizations, repair=repair, log=log)
 
 
 if __name__ == "__main__":     # python -m nisar_tools.focus RSLC WORKDIR

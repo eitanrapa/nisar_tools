@@ -39,11 +39,17 @@ def _table():
     return np.random.default_rng(1).uniform(0.423e-3, 0.621e-3, 173)
 
 
-def _write_l0b(path, slip_at=None):
+def _true_utc():
     table = _table()
     k = np.arange(6000)
     cum = np.concatenate([[0.0], np.cumsum(np.tile(table, k.size // table.size + 3))])
-    utc = 36640.0 + cum[k]
+    return 36640.0 + cum[k]
+
+
+def _write_l0b(path, slip_at=None):
+    table = _table()
+    k = np.arange(6000)
+    utc = _true_utc()
     if slip_at is not None:
         utc[slip_at:] = utc[slip_at - 1:-1].copy()         # tagged with the previous pulse's time
     with h5py.File(path, "w") as f:
@@ -126,6 +132,10 @@ def test_runconfig_is_production_with_local_inputs(rslc, inputs, tmp_path):
     assert groups["processing"]["range_window"] == PRODUCTION["processing"]["range_window"]
     timing = (work / "pulse_timing.txt").read_text()
     assert "2000 echoes tagged with the previous" in timing
+    # the repaired times the run hands to ISCE3: the slipped echoes back on their pulses
+    repaired = np.load(work / "pulse_times.npz")
+    assert list(repaired) == [f"{L0B}__A__txH"]
+    np.testing.assert_allclose(repaired[f"{L0B}__A__txH"], _true_utc(), rtol=0, atol=1e-9)
 
 
 def test_unknown_window_keys_are_refused(rslc, inputs, tmp_path):
@@ -158,48 +168,53 @@ def test_orbit_and_attitude_xml(rslc, tmp_path):
     assert len(states) == 5 and states[2].find("q3") is not None
 
 
-def _fake_isce3(tmp_path, repairs=True, fails=False):
-    """An interpreter stand-in: records its arguments and environment, writes nothing."""
+def _fake_isce3(tmp_path, fails=False):
+    """An interpreter stand-in: records its arguments (NUL-separated) and environment, writes nothing."""
     script = tmp_path / "python"
     script.write_text("#!/bin/sh\n"
-                      f'if [ "$1" = "-c" ] && [ "$#" -eq 2 ]; then exit {0 if repairs else 1}; fi\n'
-                      f'echo "$@" > "{tmp_path}/args.txt"\n'
+                      f'printf "%s\\0" "$@" > "{tmp_path}/args.bin"\n'
                       f'echo "$OMP_NUM_THREADS $KMP_DUPLICATE_LIB_OK" > "{tmp_path}/env.txt"\n'
                       f"exit {3 if fails else 0}\n")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     return str(script)
 
 
-def _runconfig(tmp_path):
+def _args(tmp_path):
+    return (tmp_path / "args.bin").read_bytes().decode().split("\0")[:-1]
+
+
+def _runconfig(tmp_path, times=True):
     path = tmp_path / "run.yaml"
     path.write_text(yaml.safe_dump({"runconfig": {"groups": {
         "product_path_group": {"sas_output_file": str(tmp_path / "out.h5")}}}}))
+    if times:
+        np.savez(tmp_path / "pulse_times.npz", x=np.zeros(3))
     return path
 
 
-def test_run_focus_calls_the_workflow(tmp_path):
+def test_run_focus_hands_the_repaired_times_to_isce3(tmp_path):
     out = focus.run_focus(_runconfig(tmp_path), python=_fake_isce3(tmp_path), threads=6, log=lambda *a: None)
     assert out == tmp_path / "out.h5"
-    assert (tmp_path / "args.txt").read_text().split() == ["-m", "nisar.workflows.focus", str(tmp_path / "run.yaml")]
+    assert _args(tmp_path) == ["-c", focus._FOCUS_WRAPPER, "-", str(tmp_path / "pulse_times.npz"),
+                               str(tmp_path / "run.yaml")]
     assert (tmp_path / "env.txt").read_text().split() == ["6", "TRUE"]
     assert (tmp_path / "focus.log").exists()
 
 
-def test_run_focus_selects_polarizations(tmp_path):
-    focus.run_focus(_runconfig(tmp_path), python=_fake_isce3(tmp_path), polarizations=["HH"], log=lambda *a: None)
-    args = (tmp_path / "args.txt").read_text().split()
-    assert args[0] == "-c" and args[-2:] == ["HH", str(tmp_path / "run.yaml")]
+def test_run_focus_selects_polarizations_and_can_keep_the_tags(tmp_path):
+    focus.run_focus(_runconfig(tmp_path), python=_fake_isce3(tmp_path), polarizations=["HH"], repair=False,
+                    log=lambda *a: None)
+    assert _args(tmp_path)[2:] == ["HH", "-", str(tmp_path / "run.yaml")]
 
 
-def test_run_focus_refuses_isce3_without_the_repair(tmp_path, monkeypatch):
+def test_run_focus_needs_an_interpreter_and_the_times(tmp_path, monkeypatch):
     monkeypatch.delenv(focus.ISCE3_PYTHON_ENV, raising=False)
     with pytest.raises(RuntimeError, match="pass python="):
         focus.run_focus(_runconfig(tmp_path), log=lambda *a: None)
-    stock = _fake_isce3(tmp_path, repairs=False)
-    with pytest.raises(RuntimeError, match="does not repair pulse time tags"):
-        focus.run_focus(_runconfig(tmp_path), python=stock, log=lambda *a: None)
-    monkeypatch.setenv(focus.ISCE3_PYTHON_ENV, stock)
-    assert focus.run_focus(_runconfig(tmp_path), require_fork=False, log=lambda *a: None) == tmp_path / "out.h5"
+    monkeypatch.setenv(focus.ISCE3_PYTHON_ENV, _fake_isce3(tmp_path))
+    (tmp_path / "pulse_times.npz").unlink()
+    with pytest.raises(FileNotFoundError, match="pulse times"):
+        focus.run_focus(_runconfig(tmp_path, times=False), log=lambda *a: None)
 
 
 def test_run_focus_reports_a_failed_run(tmp_path):
@@ -207,8 +222,9 @@ def test_run_focus_reports_a_failed_run(tmp_path):
         focus.run_focus(_runconfig(tmp_path), python=_fake_isce3(tmp_path, fails=True), log=lambda *a: None)
 
 
-def test_polarization_wrapper_keeps_only_the_named_channels(monkeypatch):
-    """The wrapper's own code, with ISCE3's module replaced by a stand-in."""
+def _fake_nisar(monkeypatch, tags):
+    """Stand-ins for the ISCE3 modules the wrapper touches: the focus workflow and the L0B reader."""
+    import datetime
     import sys
     import types
 
@@ -216,19 +232,62 @@ def test_polarization_wrapper_keeps_only_the_named_channels(monkeypatch):
         def __init__(self, freq_id, pol):
             self.freq_id, self.pol = freq_id, pol
 
+    class RawBase:
+        frequencies = ["A", "B"]
+        polarizations = {"A": ["HH", "HV"], "B": ["HH"]}
+
+        def __init__(self, filename):
+            self.filename = filename
+
+        def getPulseTimes(self, frequency=None, tx=None, epoch=None):
+            file_epoch = datetime.datetime(2026, 1, 1)
+            t = tags.copy()
+            if epoch is None:
+                return file_epoch, t
+            return epoch, t + (file_epoch - epoch).total_seconds()
+
+    class Raw(RawBase):
+        pass
+
     seen = {}
-    fake = types.ModuleType("nisar.workflows.focus")
-    fake.get_common_mode = lambda raws: set(Channel(f, p) for f in "AB" for p in ("HH", "HV"))
-    fake.main = lambda argv: seen.update(argv=list(sys.argv), mode=fake.get_common_mode([]))
-    pkg, workflows = types.ModuleType("nisar"), types.ModuleType("nisar.workflows")
-    pkg.workflows, workflows.focus = workflows, fake
-    monkeypatch.setitem(sys.modules, "nisar", pkg)
-    monkeypatch.setitem(sys.modules, "nisar.workflows", workflows)
-    monkeypatch.setitem(sys.modules, "nisar.workflows.focus", fake)
-    monkeypatch.setattr(sys, "argv", ["-c", "HH", "run.yaml"])
-    exec(focus._FOCUS_POLS, {})
+    focus_mod = types.ModuleType("nisar.workflows.focus")
+    focus_mod.get_common_mode = lambda raws: set(Channel(f, p) for f in "AB" for p in ("HH", "HV"))
+    focus_mod.main = lambda argv: seen.update(argv=list(sys.argv), mode=focus_mod.get_common_mode([]))
+    raw_mod = types.ModuleType("nisar.products.readers.Raw")
+    raw_mod.Raw = Raw
+    for name, module in (("nisar", types.ModuleType("nisar")), ("nisar.workflows", types.ModuleType("nisar.workflows")),
+                         ("nisar.workflows.focus", focus_mod), ("nisar.products", types.ModuleType("nisar.products")),
+                         ("nisar.products.readers", types.ModuleType("nisar.products.readers")),
+                         ("nisar.products.readers.Raw", raw_mod)):
+        monkeypatch.setitem(sys.modules, name, module)
+    return seen, Raw
+
+
+def test_the_wrapper_keeps_only_the_named_channels(monkeypatch):
+    import sys
+
+    seen, _ = _fake_nisar(monkeypatch, np.zeros(3))
+    monkeypatch.setattr(sys, "argv", ["-c", "HH", "-", "run.yaml"])
+    exec(focus._FOCUS_WRAPPER, {})
     assert seen["argv"] == ["-c", "run.yaml"]
     assert sorted((c.freq_id, c.pol) for c in seen["mode"]) == [("A", "HH"), ("B", "HH")]
+
+
+def test_the_wrapper_hands_the_reader_the_repaired_times(monkeypatch, tmp_path):
+    import datetime
+    import sys
+
+    tags, fixed = np.array([10.0, 10.5, 10.5]), np.array([10.0, 10.5, 11.0])
+    np.savez(tmp_path / "times.npz", **{"l0b.h5__A__txH": fixed})
+    seen, Raw = _fake_nisar(monkeypatch, tags)
+    monkeypatch.setattr(sys, "argv", ["-c", "-", str(tmp_path / "times.npz"), "run.yaml"])
+    exec(focus._FOCUS_WRAPPER, {})
+    assert seen["argv"] == ["-c", "run.yaml"]
+    np.testing.assert_array_equal(Raw("/data/l0b.h5").getPulseTimes("A", "H")[1], fixed)
+    np.testing.assert_array_equal(Raw("/data/l0b.h5").getPulseTimes()[1], fixed)          # the defaults
+    epoch, t = Raw("/data/l0b.h5").getPulseTimes("A", "H", epoch=datetime.datetime(2025, 12, 31, 23, 59))
+    np.testing.assert_array_equal(t, fixed + 60.0)
+    np.testing.assert_array_equal(Raw("/data/other.h5").getPulseTimes("A", "H")[1], tags)   # not repaired
 
 
 def test_refocused_name():
