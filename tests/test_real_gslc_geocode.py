@@ -99,9 +99,11 @@ def test_real_gslc_pixels_match_asf(tmp_path):
     r0 = top + dy * np.floor((ya[ya.size // 2] - top) / dy)
     bounds = (c0, r0, c0 + 1920.0, r0 + 1920.0 * np.sign(dy))
     out = tmp_path / "gslc_on_asf_grid.h5"
-    geocode_rslc(RSLC_PATH, out, DEM_PATH, bounds=bounds, epsg=epsg, polarizations=["HH"],
-                 tec_file=TEC_PATH, workers=4, log=lambda *a: None)
-    with h5py.File(out, "r") as mine, h5py.File(REF_PATH, "r") as ref:
+    full = tmp_path / "gslc_isce3_compatible.h5"
+    for path, compatible in ((out, "pixels"), (full, True)):
+        geocode_rslc(RSLC_PATH, path, DEM_PATH, bounds=bounds, epsg=epsg, polarizations=["HH"],
+                     tec_file=TEC_PATH, isce3_compatible=compatible, workers=4, log=lambda *a: None)
+    with h5py.File(out, "r") as mine, h5py.File(full, "r") as isce3, h5py.File(REF_PATH, "r") as ref:
         for freq in [k[-1] for k in mine[GRIDS] if k.startswith("frequency")]:
             g, r = mine[f"{GRIDS}/frequency{freq}"], ref[f"{GRIDS}/frequency{freq}"]
             x, y = g["xCoordinates"][()], g["yCoordinates"][()]
@@ -112,7 +114,10 @@ def test_real_gslc_pixels_match_asf(tmp_path):
             a = g["HH"][()]
             b = r["HH"][i0:i0 + y.size, j0:j0 + x.size]
             assert np.array_equal(np.isnan(a), np.isnan(b)), f"{freq}: NaN pattern differs"
-            assert np.array_equal(g["mask"][()], r["mask"][i0:i0 + y.size, j0:j0 + x.size]), f"{freq}: mask differs"
+            # the default fixes only masks and metadata; isce3_compatible=True reproduces those too
+            assert np.array_equal(a.view(np.uint64), isce3[f"{GRIDS}/frequency{freq}/HH"][()].view(np.uint64))
+            assert np.array_equal(isce3[f"{GRIDS}/frequency{freq}/mask"][()],
+                                  r["mask"][i0:i0 + y.size, j0:j0 + x.size]), f"{freq}: mask differs"
             ok = np.isfinite(a)
             same = (a.view(np.uint64) == b.view(np.uint64))[ok]
             # the rest are a few steps of the 10-bit mantissa truncation apart (measured: <= 1.6e-3 of |z|)

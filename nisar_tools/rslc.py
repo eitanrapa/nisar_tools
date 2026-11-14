@@ -195,13 +195,33 @@ class RSLC:
             ref_epoch=self.ref_epoch,
         )
 
-    def doppler_centroid(self, frequency):
-        """The native Doppler centroid LUT (Hz), bilinear, bounds-checked."""
+    def doppler_centroid(self, frequency, zero_doppler=False):
+        """The native Doppler centroid LUT (Hz), bilinear, bounds-checked.
+
+        ISCE3 writes it over the times and ranges at which the beam centre
+        crosses each target, though it labels them `zeroDopplerTime`, and
+        geocoding reads it at the pixel's zero-Doppler time -- about 2 s off
+        across NISAR's ~0.9 deg squint. `zero_doppler=True` re-indexes it: each
+        node of the same axes gets the value of the target whose zero-Doppler
+        time and range it is.
+        """
         group = self._root[f"metadata/processingInformation/parameters/frequency{frequency}"]
         parent = self._root["metadata/processingInformation/parameters"]
         t = group["zeroDopplerTime"][()] if "zeroDopplerTime" in group else parent["zeroDopplerTime"][()]
         r = group["slantRange"][()] if "slantRange" in group else parent["slantRange"][()]
-        return radar.LUT2d.from_coords(r, t, group["dopplerCentroid"][()])
+        lut = radar.LUT2d.from_coords(r, t, group["dopplerCentroid"][()])
+        if not zero_doppler:
+            return lut
+        grid = self.radar_grid(frequency)
+        T, R = np.meshgrid(t, r, indexing="ij")
+        llh, ok = radar.rdr2geo(T.ravel(), R.ravel(), self.orbit, height=0.0, wavelength=grid.wavelength,
+                                look_side=grid.look_side, threshold=1e-5)
+        loose = radar.LUT2d(lut.x_start, lut.y_start, lut.dx, lut.dy, lut.data, lut.method, bounds_error=False)
+        tn, rn, ok2 = radar.geo2rdr(llh, self.orbit, loose, grid.wavelength, grid.look_side, t0=T.ravel())
+        good = ok & ok2
+        values = lut.data.ravel().astype(float).copy()
+        values[good] = loose.eval(tn[good], rn[good])
+        return radar.LUT2d.from_coords(r, t, values.reshape(T.shape))
 
     def valid_samples(self, frequency):
         """Per-subswath `(lines, 2)` arrays of `[first, end)` valid samples.

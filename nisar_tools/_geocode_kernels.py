@@ -88,13 +88,21 @@ def subswath_number(valid_samples, az_index, rg_index, length, width):
 
 def radar_indices(lon, lat, height, radar_grid, orbit, native_doppler,
                   valid_samples, az_correction=None, rg_correction=None,
-                  threshold=1e-8, maxiter=25, flatten_with_corrected_range=False):
+                  threshold=1e-8, maxiter=25, flatten_with_corrected_range=False,
+                  chip_rows=False, clamp_corrections=False):
     """Steps 2-5 for a set of output pixels.
 
     `lon`/`lat` in radians and `height` in metres, all 1-D. Returns
     `(az_index, rg_index, flatten_range, mask)`: fractional full-grid indices
     (NaN where the pixel is not geocoded), the slant range to flatten with, and
     the uint8 subswath mask (255 = not in the radar grid).
+
+    The mask is 0 where the interpolation chip is not wholly inside one
+    subswath. ISCE3 tests the chip's 4 corners only, which misses a line whose
+    valid interval narrows inside the chip; `chip_rows=True` tests both ends of
+    every row. ISCE3 skips a timing correction where the pixel lies outside the
+    correction's table; `clamp_corrections=True` evaluates it there too, at the
+    nearest edge.
     """
     n = lon.size
     llh = np.stack([lon, lat, height], axis=1)
@@ -105,11 +113,11 @@ def radar_indices(lon, lat, height, radar_grid, orbit, native_doppler,
     t = np.where(ok, t, np.nan)
     r = np.where(ok, r, np.nan)
     if az_correction is not None and az_correction.have_data:
-        inside = ok & az_correction.contains(t, r)
+        inside = ok if clamp_corrections else ok & az_correction.contains(t, r)
         t = np.where(inside, t + az_correction.eval(np.where(inside, t, az_correction.y_start),
                                                      np.where(inside, r, az_correction.x_start)), t)
     if rg_correction is not None and rg_correction.have_data:
-        inside = ok & rg_correction.contains(t, r)
+        inside = ok if clamp_corrections else ok & rg_correction.contains(t, r)
         r = np.where(inside, r + rg_correction.eval(np.where(inside, t, rg_correction.y_start),
                                                      np.where(inside, r, rg_correction.x_start)), r)
     if flatten_with_corrected_range:
@@ -127,9 +135,15 @@ def radar_indices(lon, lat, height, radar_grid, orbit, native_doppler,
         centre = subswath_number(valid_samples, iaz, irg, L, W)
         half = SINC_ONE // 2
         corner_bad = np.zeros(sel.size, bool)
-        for daz in (-half, half):
-            for drg in (-half, half):
-                corner_bad |= subswath_number(valid_samples, iaz + daz, irg + drg, L, W) == 0
+        if chip_rows:
+            for daz in range(-half, half + 1):
+                left = subswath_number(valid_samples, iaz + daz, irg - half, L, W)
+                right = subswath_number(valid_samples, iaz + daz, irg + half, L, W)
+                corner_bad |= (left == 0) | (right == 0) | (left != right)
+        else:
+            for daz in (-half, half):
+                for drg in (-half, half):
+                    corner_bad |= subswath_number(valid_samples, iaz + daz, irg + drg, L, W) == 0
         mask[sel] = np.where((centre != 0) & corner_bad, 0, centre)
     return az_index, rg_index, flatten_range, mask
 

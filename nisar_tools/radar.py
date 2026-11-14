@@ -526,19 +526,22 @@ def _spline1d(x, Y, dtype):
     return np.where(x < 1.0, low, np.where(x > n, high, mid))
 
 
-def spline2d_interp(z, x, y, order=6):
+def spline2d_interp(z, x, y, order=6, centered=False):
     """`Spline2dInterpolator(order)` -- what ISCE3 calls "biquintic".
 
     It is a natural *cubic* spline through `order` samples per axis (6 for
     "biquintic"), fitted along each row of the window and then down the column
-    of row results. The window is not centred: for even orders it spans
-    `floor(v) - 1 ... floor(v) + 4`. Complex input is interpolated per part,
-    which is exact because every coefficient is real.
+    of row results. ISCE3's window is not centred: for even orders it spans
+    `floor(v) - 1 ... floor(v) + 4`, a leftover of ISCE2's 1-based indexing that
+    also keeps it from ever reading row or column 0, and it interpolates 3-7
+    times worse than a centred window. `centered=True` uses `floor(v) - 2 ...
+    floor(v) + 3` (even orders) and clamps at 0. Complex input is interpolated
+    per part, which is exact because every coefficient is real.
     """
     z = np.asarray(z)
     if np.iscomplexobj(z):
-        return (spline2d_interp(z.real, x, y, order)
-                + 1j * spline2d_interp(z.imag, x, y, order)).astype(z.dtype)
+        return (spline2d_interp(z.real, x, y, order, centered)
+                + 1j * spline2d_interp(z.imag, x, y, order, centered)).astype(z.dtype)
     dtype = z.dtype if z.dtype in (np.float32, np.float64) else np.dtype(np.float64)
     x = np.asarray(x, float)
     y = np.asarray(y, float)
@@ -550,11 +553,17 @@ def spline2d_interp(z, x, y, order=6):
                     * (np.trunc(np.max(x)) - np.trunc(np.min(x)) + 1))
             if span <= 16 * x.size + 4096:
                 return _spline2d_even_table(z.astype(dtype, copy=False), x.ravel(),
-                                            y.ravel(), order, dtype).reshape(x.shape)
-    return _spline2d_pointwise(z, x, y, order, dtype)
+                                            y.ravel(), order, dtype, centered).reshape(x.shape)
+    return _spline2d_pointwise(z, x, y, order, dtype, centered)
 
 
-def _spline2d_pointwise(z, x, y, order, dtype):
+def _window(start, n, size, centered):
+    """Indices of a spline window: ISCE3's (shifted by one, never 0) or a centred one."""
+    index = np.add.outer(start, np.arange(size))
+    return np.clip(index, 0, n - 1) if centered else np.clip(index, 0, n - 2) + 1
+
+
+def _spline2d_pointwise(z, x, y, order, dtype, centered=False):
     """`spline2d_interp`'s general path: a 6x6 window gathered per point."""
     ny, nx = z.shape
     if order % 2:
@@ -565,12 +574,13 @@ def _spline2d_pointwise(z, x, y, order, dtype):
         j0 = np.trunc(x).astype(np.int64)
     i0 = i0 - order // 2 + 1
     j0 = j0 - order // 2 + 1
-    k = np.arange(order)
-    rows = np.clip(i0[..., None] + k, 0, ny - 2) + 1
-    cols = np.clip(j0[..., None] + k, 0, nx - 2) + 1
+    rows = _window(i0, ny, order, centered)
+    cols = _window(j0, nx, order, centered)
     A = z.astype(dtype, copy=False)[rows[..., :, None], cols[..., None, :]]
-    HC = _spline1d((x - j0)[..., None], A, dtype)
-    return _spline1d(y - i0, HC, dtype)
+    # positions are 1-based within the window; a centred window starts one node earlier
+    one = 1.0 if centered else 0.0
+    HC = _spline1d((x - j0 + one)[..., None], A, dtype)
+    return _spline1d(y - i0 + one, HC, dtype)
 
 
 def _spline_second_derivatives(Y, dtype):
@@ -587,34 +597,35 @@ def _spline_second_derivatives(Y, dtype):
     return R
 
 
-def _spline2d_even_table(z, x, y, order, dtype):
+def _spline2d_even_table(z, x, y, order, dtype, centered=False):
     """`spline2d_interp` for even orders and non-negative coordinates.
 
-    There every row spline is evaluated on the same interval, `j = order/2 -
-    1`, so the terms of `_spline` that depend only on the data -- `Y[j-1]`,
-    `t0` and the two parenthesised factors of `t1` -- are the same for every
-    point sharing a window. They are computed once per window over the patch
-    the points touch; per point only the powers of the fractional coordinate
-    remain. Every float operation is the general path's, so the results are
-    bit-identical to it.
+    There every row spline is evaluated on the same interval of its window
+    (`j = order/2 - 1` in ISCE3's, `order/2` in a centred one), so the terms of
+    `_spline` that depend only on the data -- `Y[j]`, `t0` and the two
+    parenthesised factors of `t1` -- are the same for every point sharing a
+    window. They are computed once per window over the patch the points touch;
+    per point only the powers of the fractional coordinate remain. Every float
+    operation is the general path's, so the results are bit-identical to it.
     """
     U = dtype.type
     n = order
     m = n // 2 - 1
+    j = m if centered else m - 1
     ny, nx = z.shape
     j0 = np.trunc(x).astype(np.int64) - m
     i0 = np.trunc(y).astype(np.int64) - m
     jlo, jhi = int(j0.min()), int(j0.max())
     ilo, ihi = int(i0.min()), int(i0.max())
-    rows = np.clip(np.arange(ilo, ihi + n), 0, ny - 2) + 1
-    cols = np.clip(np.arange(jlo, jhi + n), 0, nx - 2) + 1
+    rows = _window(ilo, ny, ihi - ilo + n, centered)
+    cols = _window(jlo, nx, jhi - jlo + n, centered)
     A = np.lib.stride_tricks.sliding_window_view(z[np.ix_(rows, cols)], n, axis=1)
     R = _spline_second_derivatives(A, dtype)
     table = np.stack([
-        A[..., m - 1],
-        A[..., m] - A[..., m - 1] - R[..., m - 1] / U(3.0) - R[..., m] / U(6.0),
-        R[..., m - 1] / U(2.0),
-        (R[..., m] - R[..., m - 1]) / U(6.0),
+        A[..., j],
+        A[..., j + 1] - A[..., j] - R[..., j] / U(3.0) - R[..., j + 1] / U(6.0),
+        R[..., j] / U(2.0),
+        (R[..., j + 1] - R[..., j]) / U(6.0),
     ], axis=-1)                                           # (rows, windows, 4)
     k = np.arange(n)
     terms = table[(i0 - ilo)[:, None] + k, (j0 - jlo)[:, None]]    # (P, n, 4)
@@ -622,9 +633,9 @@ def _spline2d_even_table(z, x, y, order, dtype):
     HC = terms[..., 0] + xx * (terms[..., 1] + xx * (terms[..., 2] + xx * terms[..., 3]))
     R = _spline_second_derivatives(HC, dtype)
     yy = ((y - i0) - m).astype(dtype)
-    t0 = HC[:, m] - HC[:, m - 1] - R[:, m - 1] / U(3.0) - R[:, m] / U(6.0)
-    t1 = yy * (R[:, m - 1] / U(2.0) + yy * ((R[:, m] - R[:, m - 1]) / U(6.0)))
-    return HC[:, m - 1] + yy * (t0 + t1)
+    t0 = HC[:, j + 1] - HC[:, j] - R[:, j] / U(3.0) - R[:, j + 1] / U(6.0)
+    t1 = yy * (R[:, j] / U(2.0) + yy * ((R[:, j + 1] - R[:, j]) / U(6.0)))
+    return HC[:, j] + yy * (t0 + t1)
 
 
 _INTERPOLATORS = {
@@ -1102,8 +1113,13 @@ CUBE_LAYERS = {
 
 
 def radar_grid_cube_layer(lon, lat, height, radar_grid, orbit, native_doppler,
-                          threshold=1e-8, maxiter=25, delta_range=1e-8):
+                          threshold=1e-8, maxiter=25, delta_range=1e-8, rdr2geo_threshold=None):
     """One height of the `metadata/radarGrid` cube at nodes `(lon, lat)`.
+
+    ISCE3 v0.25.16 hands the ground-velocity `rdr2geo` its `geo2rdr`
+    parameters (the azimuth-time `threshold` as a height tolerance in metres,
+    and no extra iterations); `rdr2geo_threshold` (m) gives that `rdr2geo` its
+    own tolerance and ISCE3's 10 extra iterations instead.
 
     `lon`/`lat` are radians of any shape; returns a dict of arrays of that
     shape keyed like `CUBE_LAYERS`. Port of `makeRadarGridCubes` with
@@ -1152,6 +1168,8 @@ def radar_grid_cube_layer(lon, lat, height, radar_grid, orbit, native_doppler,
         kw = dict(height=float(height), doppler_hz=0.0, wavelength=wvl,
                   look_side=side, threshold=threshold, maxiter=maxiter,
                   extraiter=0, h0=float(height))
+        if rdr2geo_threshold is not None:
+            kw.update(threshold=float(rdr2geo_threshold), extraiter=10)
         llh_b, conv_b = rdr2geo(tz - dt / 2.0, rz, orbit, **kw)
         llh_a, conv_a = rdr2geo(tz + dt / 2.0, rz, orbit, **kw)
         step = np.full(sel.size, dt)

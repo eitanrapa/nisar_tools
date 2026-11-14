@@ -74,6 +74,7 @@ nav:
   - User guide:
       - Conventions: guide/conventions.md
       - Finding and reading products: guide/inputs.md
+      - Checking an RSLC before use: guide/checking-rslcs.md
       - Making GSLCs from RSLCs: guide/rslc-to-gslc.md
       - Workspaces: guide/workspaces.md
       - Interferograms: guide/interferograms.md

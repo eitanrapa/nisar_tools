@@ -129,14 +129,17 @@ class DEMInterpolator:
 
     `dem` is a path to anything rasterio opens (GeoTIFF, VRT), in EPSG:4326 or
     a projected CRS. Thread-safe for concurrent `heights` calls: each
-    call reads its own window through its own dataset handle.
+    call reads its own window through its own dataset handle. `centered=True`
+    centres the spline window, which ISCE3 does not (`radar.spline2d_interp`):
+    heights change, so geocode both dates of a pair the same way.
     """
 
-    def __init__(self, dem, ref_height=0.0):
+    def __init__(self, dem, ref_height=0.0, centered=False):
         import rasterio
 
         self.path = str(dem)
         self.ref_height = float(ref_height)
+        self.centered = bool(centered)
         with rasterio.open(self.path) as src:
             if src.crs is None:
                 raise ValueError(f"{self.path}: DEM has no CRS")
@@ -233,7 +236,7 @@ class DEMInterpolator:
 
         def sample(lon_rad, lat_rad):
             x, y = self.to_dem_xy(np.asarray(lon_rad, float), np.asarray(lat_rad, float))
-            return interpolate_dem_window(arr, xstart, ystart, dx, dy, x, y, self.ref_height)
+            return interpolate_dem_window(arr, xstart, ystart, dx, dy, x, y, self.ref_height, self.centered)
 
         return sample
 
@@ -257,17 +260,19 @@ class DEMInterpolator:
         if arr is None:
             return out
         out[finite] = interpolate_dem_window(arr, xstart, ystart, self.dx, self.dy,
-                                             x[finite], y[finite], self.ref_height)
+                                             x[finite], y[finite], self.ref_height, self.centered)
         return out
 
 
-def interpolate_dem_window(arr, xstart, ystart, dx, dy, x, y, ref_height=0.0):
+def interpolate_dem_window(arr, xstart, ystart, dx, dy, x, y, ref_height=0.0, centered=False):
     """`DEMInterpolator::interpolateXY` over a loaded window.
 
     `(xstart, ystart)` is the centre of `arr[0, 0]`. A point whose floor row
     or column is within 2 of the top/left edge, or within 1 of the bottom/right,
     returns `ref_height` -- ISCE3's bounds test, reproduced exactly because it
     decides which pixels near a DEM edge fall back to the ellipsoid.
+    `centered=True` uses a centred spline window (`radar.spline2d_interp`) and
+    the bounds test that window needs: 2 nodes before the point, 3 after.
     """
     x = np.asarray(x, float)
     y = np.asarray(y, float)
@@ -276,8 +281,11 @@ def interpolate_dem_window(arr, xstart, ystart, dx, dy, x, y, ref_height=0.0):
     irow = np.floor(row)
     icol = np.floor(col)
     ny, nx = arr.shape
-    inside = (irow >= 2) & (irow < ny - 1) & (icol >= 2) & (icol < nx - 1)
+    if centered:
+        inside = (irow >= 2) & (irow < ny - 3) & (icol >= 2) & (icol < nx - 3)
+    else:
+        inside = (irow >= 2) & (irow < ny - 1) & (icol >= 2) & (icol < nx - 1)
     out = np.full(x.shape, float(ref_height))
     if inside.any():
-        out[inside] = radar.spline2d_interp(arr, col[inside], row[inside], order=6)
+        out[inside] = radar.spline2d_interp(arr, col[inside], row[inside], order=6, centered=centered)
     return out

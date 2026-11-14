@@ -79,3 +79,45 @@ secondary = geocode_rslc("data/<date 2 RSLC>.h5", "data/", dem,
 
 The [InSAR pipeline](../insar_pipeline.md#1-registration) page describes how registration fits into a coseismic
 workflow.
+
+## ISCE3's defects, and which to keep
+
+The port reproduces ISCE3 v0.25.16, defects included, so its GSLCs pair with ASF's. `isce3_compatible` chooses:
+
+| `isce3_compatible` | Pixels | Masks and metadata |
+| --- | --- | --- |
+| `"pixels"` (default) | ISCE3's | fixed |
+| `True` | ISCE3's | ISCE3's |
+| `False` | fixed | fixed |
+
+The metadata fixes: the mask tests every row of the interpolation chip (ISCE3 tests its corners and misses a line whose
+valid interval narrows inside it); `validSamplesSubSwath` lines that drop out of the swath for one line are repaired;
+timing corrections are clamped at their table's edge instead of skipped; band B's `inputDataExceptionMask` is written
+on band B's grid; and the cube's ground-track velocity uses its own `rdr2geo` tolerance.
+
+The pixel fixes change the phase, so both dates of a pair must use them, and never with an ASF GSLC: a centred DEM
+spline window (ISCE3's is one node off, and never reads the first row or column) and the Doppler table read at
+zero-Doppler coordinates (ISCE3 writes it over beam-centre times, about 2 s earlier, and labels them zero-Doppler).
+
+One departure is always there: the port reads the RSLC's last line and range sample, which ISCE3 drops, so along the
+far-range edge a ribbon about a pixel wide is finite here and NaN in ASF's products, with mask 0 in both.
+
+## Correcting an RSLC's own errors
+
+Two errors of delivered RSLCs are corrected where a band samples its RSLC, like a registration, with the flattening left
+on the geometric range (see [Checking an RSLC before use](checking-rslcs.md)):
+
+```python
+from nisar_tools import geocode_rslc
+from nisar_tools.l0b import timing_report
+from nisar_tools.qa import band_offset
+
+offset = band_offset(rslc)         # band B's range against A, per data window and range bin
+report = timing_report(rslc)       # the L0B's pulse times, read remotely
+gslc = geocode_rslc(rslc, "data/", dem, range_shift={"B": offset.shift}, azimuth_shift=report)
+```
+
+`range_shift` aligns band B's ground with A's, which split-spectrum ionosphere screens need; `azimuth_shift` moves
+spans tagged a pulse early or late back by a pulse and sets the mask to 0 where a slip's edge mixes good and bad
+echoes. Do not pass `azimuth_shift` together with a `registration` measured on the same RSLC, which already holds the
+shift.

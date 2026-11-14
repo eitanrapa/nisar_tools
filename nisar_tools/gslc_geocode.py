@@ -239,7 +239,8 @@ def _timing_hooks(azimuth_shift):
 
 
 def pixel_radar_indices(x, y, epsg, dem, grid, orbit, doppler, valid, corrections=None,
-                        registration=None, range_shift=None, azimuth_shift=None):
+                        registration=None, range_shift=None, azimuth_shift=None,
+                        chip_rows=False, clamp_corrections=False):
     """Steps 1-5 of the geocoding for output pixels at map `x`, `y` (1-D).
 
     The DEM height, zero-Doppler `geo2rdr`, the timing `corrections`, the
@@ -251,13 +252,16 @@ def pixel_radar_indices(x, y, epsg, dem, grid, orbit, doppler, valid, correction
     *before* the shifts -- a shift of a line or two does not change it except
     at a subswath edge -- except that a `TimingReport` given as `azimuth_shift`
     sets it to 0 where a timing defect's transition mixes good and bad echoes.
+    `chip_rows` and `clamp_corrections` are `radar_indices`'s fixes of ISCE3's
+    mask and correction-domain tests.
     """
     lon, lat = _to_lonlat(epsg, x, y)
     lon, lat = np.deg2rad(lon), np.deg2rad(lat)
     h = dem.heights(lon, lat)
     az_corr = corrections.azimuth if corrections is not None else None
     rg_corr = corrections.slant_range if corrections is not None else None
-    az, rg, rng, mask = radar_indices(lon, lat, h, grid, orbit, doppler, valid, az_corr, rg_corr)
+    az, rg, rng, mask = radar_indices(lon, lat, h, grid, orbit, doppler, valid, az_corr, rg_corr,
+                                      chip_rows=chip_rows, clamp_corrections=clamp_corrections)
     shift, transition = _timing_hooks(azimuth_shift)
     if shift is not None or range_shift is not None:
         t = grid.sensing_start + az / grid.prf
@@ -313,8 +317,8 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
                  epsg=None, bounds=None, like=None, posting=None, snap=240.0,
                  orbit_file=None, tec_file=None, solid_earth_tides=True,
                  flatten=True, registration=None, range_shift=None, azimuth_shift=None,
-                 block_size=1024, workers=None, granule_id=None, dem_description=None,
-                 overwrite=False, log=print):
+                 isce3_compatible="pixels", block_size=1024, workers=None, granule_id=None,
+                 dem_description=None, overwrite=False, log=print):
     """Geocode an RSLC into a NISAR L2 GSLC HDF5 file. Returns the output path.
 
     Parameters
@@ -368,6 +372,20 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         a pulse where a slip fully decides the pixel and sets the mask to 0
         where a slip's edge mixes good and bad echoes. Do not combine with a
         `registration` measured on this RSLC, which already holds the shift.
+    isce3_compatible : {"pixels", True, False}
+        Which of ISCE3 v0.25.16's defects to reproduce.
+        - `"pixels"` (default): pixels identical to ISCE3's, so this GSLC
+          pairs with ASF's; masks and metadata fixed. The mask tests every row
+          of the interpolation chip (ISCE3: its corners), lines that drop out
+          of `validSamplesSubSwath` are repaired, timing corrections are
+          clamped at their table's edge (ISCE3: skipped), band B's
+          `inputDataExceptionMask` is on B's own grid, and the cube's
+          ground-track velocity uses a proper `rdr2geo` tolerance.
+        - `True`: ISCE3's masks and metadata too.
+        - `False`: also fixes the pixels: a centred DEM spline window (ISCE3's
+          is one node off, ~0.4 rad of flattening phase per cm of height it
+          gets wrong) and the Doppler table read at zero-Doppler coordinates.
+          Geocode both dates of a pair this way, never with an ASF GSLC.
     block_size : int
         Output block edge in pixels; rounded to a multiple of the 512 chunk.
     workers : int, optional
@@ -396,10 +414,13 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         bounds, epsg = product_bounds(like)
     epsg = int(epsg or rslc.utm_epsg(first))
 
+    if isce3_compatible not in (True, False, "pixels"):
+        raise ValueError(f"isce3_compatible must be True, False or 'pixels', not {isce3_compatible!r}")
+    fix_metadata, fix_pixels = isce3_compatible is not True, isce3_compatible is False
     grids = _product_grids(rslc, freq_pols, epsg, bounds, posting, snap)
     cube_grid = metadata_geogrid(grids[first], 500.0, cube=True)
     lut_grid = metadata_geogrid(grids[first], 1000.0)
-    dem_interp = DEMInterpolator(dem)
+    dem_interp = DEMInterpolator(dem, centered=fix_pixels)
     for f_, g in grids.items():
         log(f"frequency {f_}: {g.length} x {g.width} px at {g.spacing_x:g} x {-g.spacing_y:g} m, "
             f"EPSG:{epsg}, x {g.start_x:.1f}..{g.end_x:.1f}, y {g.end_y:.1f}..{g.start_y:.1f}")
@@ -412,26 +433,28 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         stats = {}
         for freq, pols in freq_pols.items():
             gp.create_image_datasets(f, freq, grids[freq], pols)
-            _create_exception_mask(f, freq, grids[first])
+            _create_exception_mask(f, freq, grids[freq] if fix_metadata else grids[first])
         corrections = {}
+        has_exception = _has_input_data_exception(src)
         for freq, pols in freq_pols.items():
             grid = rslc.radar_grid(freq)
             corrections[freq] = compute_timing_corrections(
                 grid, orbit, rslc.center_frequency(freq), dem=dem_interp,
                 tec_file=tec_file, solid_earth_tides=solid_earth_tides)
             _write_timing_corrections(f, freq, corrections[freq])
+            # ISCE3 samples every band's exception mask at the first band's pixels
+            bands = ([freq] if fix_metadata else list(freq_pols) if freq == first else []) if has_exception else []
             stats.update(_geocode_frequency(
                 f, rslc, freq, pols, grids[freq], grid, orbit, dem_interp,
-                corrections[freq], flatten, block_size, workers, log,
-                exception_masks=(freq == first and _has_input_data_exception(src)),
-                exception_grid=grids[first], freq_pols=freq_pols,
+                corrections[freq], flatten, block_size, workers, log, bands,
                 registration=registration, range_shift=(range_shift or {}).get(freq),
-                azimuth_shift=azimuth_shift))
+                azimuth_shift=azimuth_shift, fix_metadata=fix_metadata, fix_pixels=fix_pixels))
         for (freq, pol), st in stats.items():
             st.write(f[f"{gp.PRODUCT}/grids/frequency{freq}/{pol}"])
 
         log("radar grid cubes ...")
-        _write_cubes(f, rslc, first, cube_grid, orbit, workers)
+        _write_cubes(f, rslc, first, cube_grid, orbit, workers,
+                     rdr2geo_threshold=1e-5 if fix_metadata else None)
         log("metadata ...")
         run_text = _gslc_metadata.describe_run(
             software=SOFTWARE_VERSION, input_file=rslc.path, output_file=str(output),
@@ -442,6 +465,7 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             range_shift=None if not range_shift else {
                 k: _describe(v) for k, v in range_shift.items() if k in freq_pols},
             azimuth_shift=None if azimuth_shift is None else _describe(azimuth_shift),
+            isce3_compatible=isce3_compatible,
             frequencies=dict(freq_pols), epsg=epsg, bounds=bounds,
             like=str(like) if like is not None else None, snap=snap,
             geo2rdr_threshold=1e-8, geo2rdr_maxiter=25, block_size=block_size,
@@ -508,11 +532,11 @@ def _has_input_data_exception(src):
     return path in src and int(np.asarray(src[path][()])) != 0
 
 
-def _create_exception_mask(f, freq, first_grid):
-    """`inputDataExceptionMask`: uint8 on the *first* frequency's grid."""
+def _create_exception_mask(f, freq, grid):
+    """`inputDataExceptionMask`: uint8 on `grid` (ISCE3: the *first* frequency's, for every band)."""
     root = f"{gp.PRODUCT}/grids/frequency{freq}"
     group = f[root]
-    shape = (first_grid.length, first_grid.width)
+    shape = (grid.length, grid.width)
     ds = group.create_dataset("inputDataExceptionMask", shape=shape, dtype=np.uint8,
                               chunks=gp._chunks(shape), compression="gzip",
                               compression_opts=9, shuffle=False)
@@ -602,16 +626,20 @@ def _block_may_touch_swath(geogrid, row0, row1, col0, col1, grid, orbit, margin_
 
 
 def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
-                       flatten, block_size, workers, log, exception_masks,
-                       exception_grid, freq_pols, registration=None, range_shift=None,
-                       azimuth_shift=None):
+                       flatten, block_size, workers, log, exception_bands,
+                       registration=None, range_shift=None, azimuth_shift=None,
+                       fix_metadata=False, fix_pixels=False):
+    from .qa import repair_drops
+
     root = f"{gp.PRODUCT}/grids/frequency{freq}"
     writers = {pol: gp.ChunkWriter(f[f"{root}/{pol}"]) for pol in pols}
     mask_writer = gp.ChunkWriter(f[f"{root}/mask"])
     stats = {(freq, pol): gp.ComplexStats() for pol in pols}
     readers = {pol: rslc.reader(freq, pol) for pol in pols}
-    doppler = rslc.doppler_centroid(freq)
+    doppler = rslc.doppler_centroid(freq, zero_doppler=fix_pixels)
     valid = rslc.valid_samples(freq)
+    if fix_metadata:
+        valid = repair_drops(valid)
 
     blocks = []
     for row0 in range(0, geogrid.length, block_size):
@@ -633,7 +661,8 @@ def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
         X, Y = np.meshgrid(xs, ys)
         lon, lat, h, az, rg, rng, mask = pixel_radar_indices(
             X.ravel(), Y.ravel(), geogrid.epsg, dem, grid, orbit, doppler, valid,
-            corr, registration, range_shift=range_shift, azimuth_shift=azimuth_shift)
+            corr, registration, range_shift=range_shift, azimuth_shift=azimuth_shift,
+            chip_rows=fix_metadata, clamp_corrections=fix_metadata)
         shape = (row1 - row0, col1 - col0)
         ok = np.isfinite(az)
         if ok.any():
@@ -656,8 +685,8 @@ def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
         for r_ in range(0, shape[0], gp.CHUNK):
             for c_ in range(0, shape[1], gp.CHUNK):
                 mask_writer.write(row0 + r_, col0 + c_, mask[r_:r_ + gp.CHUNK, c_:c_ + gp.CHUNK])
-        if exception_masks:
-            _exception_mask_block(f, rslc, freq_pols, lon, lat, h, grid, orbit,
+        if exception_bands:
+            _exception_mask_block(f, rslc, exception_bands, lon, lat, h, grid, orbit,
                                   row0, col0, shape)
         with lock:
             progress["done"] += 1
@@ -678,15 +707,15 @@ def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
     return stats
 
 
-def _exception_mask_block(f, rslc, freq_pols, lon, lat, h, grid, orbit, row0, col0, shape):
-    """Nearest-neighbour `inputDataExceptionMask` on the first frequency's grid.
+def _exception_mask_block(f, rslc, bands, lon, lat, h, grid, orbit, row0, col0, shape):
+    """Nearest-neighbour `inputDataExceptionMask` of each of `bands` at these pixels.
 
     GeocodeCov with a Byte raster: zero-Doppler geo2rdr without timing
     corrections, nearest sample, 0 where not geocoded.
     """
     t, r, ok = radar.geo2rdr(np.stack([lon, lat, h], axis=1), orbit, None,
                              grid.wavelength, grid.look_side, t0=grid.sensing_mid)
-    for freq in freq_pols:
+    for freq in bands:
         fgrid = rslc.radar_grid(freq)
         row = (t - fgrid.sensing_start) * fgrid.prf
         col = (r - fgrid.starting_range) / fgrid.range_pixel_spacing
@@ -708,7 +737,7 @@ def _exception_mask_block(f, rslc, freq_pols, lon, lat, h, grid, orbit, row0, co
                 writer.write(row0 + r_, col0 + c_, out[r_:r_ + gp.CHUNK, c_:c_ + gp.CHUNK])
 
 
-def _write_cubes(f, rslc, freq, cube_grid, orbit, workers):
+def _write_cubes(f, rslc, freq, cube_grid, orbit, workers, rdr2geo_threshold=None):
     """`add_radar_grid_cubes_to_hdf5` with the RSLC's (first) frequency grid."""
     from pyproj import Transformer
 
@@ -722,7 +751,8 @@ def _write_cubes(f, rslc, freq, cube_grid, orbit, workers):
     lon, lat = np.deg2rad(lon), np.deg2rad(lat)
 
     def layer(k):
-        return k, radar.radar_grid_cube_layer(lon, lat, CUBE_HEIGHTS[k], grid, orbit, doppler)
+        return k, radar.radar_grid_cube_layer(lon, lat, CUBE_HEIGHTS[k], grid, orbit, doppler,
+                                              rdr2geo_threshold=rdr2geo_threshold)
 
     with ThreadPoolExecutor(workers) as pool:
         for k, out in pool.map(layer, range(len(CUBE_HEIGHTS))):
