@@ -30,6 +30,10 @@ Departures, each deliberate:
   GSLC of the same frame reuses its box exactly (`product_bounds`).
 - `softwareVersion`, `processingType` ("Custom"), `processingCenter` and
   `runConfigurationContents` describe this run, not an SDS one.
+- The RSLC's last line and last range sample are read. ISCE3's radar blocks
+  end one short (an exclusive end on an inclusive box), so along the far-range
+  edge a ribbon about one pixel wide is NaN in ASF's products and finite here.
+  Its `mask` is 0 in both.
 """
 
 import datetime as _dt
