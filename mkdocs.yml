@@ -76,6 +76,7 @@ nav:
       - Finding and reading products: guide/inputs.md
       - Checking an RSLC before use: guide/checking-rslcs.md
       - Making GSLCs from RSLCs: guide/rslc-to-gslc.md
+      - Refocusing an RSLC from its L0B: guide/refocusing.md
       - Workspaces: guide/workspaces.md
       - Interferograms: guide/interferograms.md
       - Unwrapping and cleaning: guide/unwrapping.md
@@ -90,6 +91,7 @@ nav:
       - Processing stages: api/stages.md
       - Geocoding RSLCs: api/geocoding.md
       - Checking products: api/checks.md
+      - Refocusing RSLCs: api/focusing.md
       - Offsets: api/offsets.md
       - Ionosphere: api/ionosphere.md
       - Utilities: api/utilities.md

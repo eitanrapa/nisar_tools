@@ -16,6 +16,7 @@ dependencies:
   - pyproj
   - pysolid           # solid Earth tides, for making GSLCs from RSLCs
   - requests          # download_tec: re-applies ~/.netrc across the URS redirect
+  - pyyaml            # ISCE3 run configurations, for refocusing RSLCs from L0Bs
   - snaphu
   - pygmt             # optional; only needed for water masking
   - matplotlib

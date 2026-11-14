@@ -30,7 +30,8 @@ dither table). ISCE3 focuses with the tags as stored. `pulse_timing` fits the se
 - `"correctable"`: slipped spans cover parts of the frame whole, and `geocode_rslc(azimuth_shift=report)` moves them
   back;
 - `"refocus"`: a wrong PRF, an inconsistent span, or the edge of a slip inside the frame, where one synthetic aperture
-  mixes good and slipped echoes; nothing done to the RSLC undoes it. Use another date, or refocus the L0B.
+  mixes good and slipped echoes; nothing done to the RSLC undoes it. Use another date, or [refocus the
+  L0B](refocusing.md).
 
 The L0B's `radarTime` carries the same slips, so the record alone cannot say which side of a slip is right. The run
 whose tags are latest is taken as right: every slip measured against corner reflectors put the image early.
