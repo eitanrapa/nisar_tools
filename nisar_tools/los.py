@@ -438,14 +438,14 @@ class LOSStack(RasterStackMixin):
         """Map of pair `pair`'s line-of-sight displacement."""
         from .plot import plot_los_displacement
 
-        return plot_los_displacement(self.ds["los"].isel(pair=pair), epsg_code=self.epsg)
+        return plot_los_displacement(self.ds["los"].isel(pair=pair), epsg_code=self.crs)
 
     def plot_incidence(self):
         """Incidence angle: at the target, from the local vertical."""
         from .plot import plot_angle
 
         return plot_angle(
-            self.ds["incidence_angle"], epsg_code=self.epsg,
+            self.ds["incidence_angle"], epsg_code=self.crs,
             title="Incidence angle", label="Incidence (deg)",
         )
 
@@ -457,7 +457,7 @@ class LOSStack(RasterStackMixin):
         from .plot import plot_angle
 
         return plot_angle(
-            self.ds["look_angle"], epsg_code=self.epsg,
+            self.ds["look_angle"], epsg_code=self.crs,
             title="Look angle", label="Look angle (deg)",
         )
 
@@ -465,7 +465,9 @@ class LOSStack(RasterStackMixin):
         s = self.sizes
         wl = self.ds.attrs.get("wavelength")
         wl = f"{wl:.4f}m" if wl is not None else "?"
+        # a stack resampled into a slip inversion's LocalFrame has a CRS but no EPSG code
+        where = f"EPSG:{self.ds.attrs['epsg']}" if self.ds.attrs.get("epsg") is not None else "local frame"
         return (
-            f"<LOSStack EPSG:{self.epsg} lambda={wl} "
+            f"<LOSStack {where} lambda={wl} "
             f"pair={s.get('pair')} y={s.get('y')} x={s.get('x')}>"
         )

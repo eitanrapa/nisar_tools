@@ -19,9 +19,10 @@ NAN_COLOR = "0.62"
 
 
 def _to_latlon(data, epsg_code):
+    """`data` in lon/lat; `epsg_code` (an EPSG code or any CRS, `geo.as_crs`) for data that carry none."""
     if isinstance(data, xr.DataArray):
         return geo.project_to_latlon(data if data.rio.crs is not None
-                                     else data.rio.write_crs(f"EPSG:{epsg_code}"))
+                                     else data.rio.write_crs(geo.as_crs(epsg_code)))
     raise TypeError("Expected an xarray.DataArray")
 
 

@@ -90,3 +90,25 @@ def test_persisted_stores_stream_per_slice(gslc_factory, tmp_path):
     # First element of the chunk tuple for the stack dim must be 1.
     assert slc.chunksizes["time"][0] == 1
     assert ig.chunksizes["pair"][0] == 1
+
+
+def test_a_stack_in_a_local_frame_can_be_shown_and_plotted():
+    """A transverse Mercator centred on the study area has a CRS but no EPSG code."""
+    import xarray as xr
+
+    from nisar_tools import LOSStack
+
+    n = 20
+    xy = 150.0 * (np.arange(n) - n / 2)
+    geometry = {v: (("y", "x"), np.full((n, n), value, np.float32))
+                for v, value in (("los_east", -0.6), ("los_north", -0.1), ("los_up", 0.79), ("incidence_angle", 38.0))}
+    ds = xr.Dataset({"los": (("pair", "y", "x"), np.zeros((1, n, n), np.float32)), **geometry},
+                    coords={"pair": [0], "y": xy[::-1], "x": xy})
+    ds = ds.rio.write_crs("+proj=tmerc +lat_0=10.5 +lon_0=-68.0 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs")
+    ds.attrs.update(wavelength=0.24)
+    stack = LOSStack(ds)
+    assert "local frame" in repr(stack)
+    fig, ax = stack.plot()
+    assert fig is not None
+    fig, ax = stack.plot_incidence()
+    assert fig is not None
