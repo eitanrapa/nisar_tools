@@ -314,3 +314,25 @@ def test_explicit_mask_name_overrides_the_derived_one(tmp_path, monkeypatch):
     mask_mod.water_mask_for_grid(x, y, 32611, workspace=ws, name="my_mask",
                                  resolution="i")
     assert ws.exists("my_mask")
+
+
+def test_a_box_across_the_central_meridian_keeps_the_bow_of_its_parallels():
+    """The envelope of the edges, not the corners: in UTM a parallel's extreme y is on the central meridian."""
+    from pyproj import Transformer
+
+    from nisar_tools import geo
+
+    lon_min, lon_max, lat_min, lat_max = 36.0, 40.0, 36.5, 38.5          # across zone 37's meridian, 39 E
+    x0, x1, y0, y1 = geo.bbox_to_native(lon_min, lon_max, lat_min, lat_max, 32637)
+    t = Transformer.from_crs("EPSG:4326", "EPSG:32637", always_xy=True)
+    lon, lat = np.linspace(lon_min, lon_max, 20001), np.linspace(lat_min, lat_max, 20001)
+    xs, ys = [], []
+    for a, b in ((lon, np.full_like(lon, lat_min)), (lon, np.full_like(lon, lat_max)),
+                 (np.full_like(lat, lon_min), lat), (np.full_like(lat, lon_max), lat)):
+        x, y = t.transform(a, b)
+        xs.append(x)
+        ys.append(y)
+    xs, ys = np.concatenate(xs), np.concatenate(ys)
+    assert x0 <= xs.min() + 0.01 and x1 >= xs.max() - 0.01 and y0 <= ys.min() + 0.01 and y1 >= ys.max() - 0.01
+    _, corner_y = t.transform([lon_min, lon_max], [lat_min, lat_min])
+    assert min(corner_y) - y0 > 400.0                                    # the strip the corners would cut off

@@ -46,17 +46,14 @@ def bbox_to_native(lon_min, lon_max, lat_min, lat_max, epsg_code):
     """Transform a lon/lat bounding box to native-CRS x/y bounds.
 
     Returns `(x_min, x_max, y_min, y_max)` in the projection given by
-    `epsg_code` (an EPSG code or a `pyproj.CRS`; see `as_crs`).
-    All four corners are transformed (not just two) so the bounds are correct
-    even when the box edges are not axis-aligned in the native projection.
+    `epsg_code` (an EPSG code or a `pyproj.CRS`; see `as_crs`): the envelope
+    of the box's edges, not just its corners, since a parallel bows in a
+    transverse Mercator and lies furthest from them where it crosses the
+    central meridian.
     """
     transformer = Transformer.from_crs("EPSG:4326", as_crs(epsg_code), always_xy=True)
-
-    corners_lon = [lon_min, lon_max, lon_max, lon_min]
-    corners_lat = [lat_min, lat_min, lat_max, lat_max]
-    x_corners, y_corners = transformer.transform(corners_lon, corners_lat)
-
-    return min(x_corners), max(x_corners), min(y_corners), max(y_corners)
+    x_min, y_min, x_max, y_max = transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max, densify_pts=1001)
+    return x_min, x_max, y_min, y_max
 
 
 def native_bbox_to_lonlat(x_min, x_max, y_min, y_max, epsg_code):
