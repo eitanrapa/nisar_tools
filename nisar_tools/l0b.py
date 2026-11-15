@@ -94,12 +94,15 @@ def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min
     """
     if anchor not in ("latest", "majority"):
         raise ValueError(f"anchor must be 'latest' or 'majority', not {anchor!r}")
+    if np.isfinite(utc).sum() < 2:
+        raise UnanchoredTags(f"{int(np.isfinite(utc).sum())} finite tag(s): no step to check against the "
+                             "commanded pulse sequence")
     k = (line_index - line_index[0]).astype(np.int64)
     if gap_phase is not None:
         phases = [int(gap_phase) % table.size]
     else:
         steps = np.diff(utc)
-        errors = [np.median(np.abs(steps - np.diff(_table_times(k, table, p)))) for p in range(table.size)]
+        errors = [np.nanmedian(np.abs(steps - np.diff(_table_times(k, table, p)))) for p in range(table.size)]
         phase = int(np.argmin(errors))
         # the tags must follow the table (at this phase or a slip or two away) for min_anchor seconds, or mostly
         need = min_anchor * table.size / table.sum()
@@ -128,7 +131,7 @@ def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min
     else:
         phase = phases[0]
         lag = utc - _table_times(k, table, phase)
-        level = float(np.minimum(lag[:-1], lag[1:]).max())
+        level = float(np.nanmax(np.fmin(lag[:-1], lag[1:])))
     seq = _table_times(k, table, phase)
     model, drift = seq + level, 0.0
     for _ in range(2):
@@ -550,7 +553,7 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
     if gaps is not None and utc.size > 2:
         # tags that follow the table at another phase than their transmits: relabelled
         steps = np.diff(utc)
-        errors = [np.median(np.abs(steps - np.diff(_table_times(k, table, p)))) for p in range(table.size)]
+        errors = [np.nanmedian(np.abs(steps - np.diff(_table_times(k, table, p)))) for p in range(table.size)]
         own = int(np.argmin(errors))
         if own != phase:
             follows = np.r_[False, np.abs(steps - np.diff(_table_times(k, table, own))) < tolerance]

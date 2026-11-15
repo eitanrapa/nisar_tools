@@ -467,3 +467,14 @@ def test_a_slip_over_most_of_the_l0b_is_not_a_tag_shift(tmp_path, table):
     assert [(s["code"], s["first"], s["count"]) for s in pt.segments()] == [(l0b.EARLY, 3000, 5000)]
     assert pt.tag_shift == 0 and "pulses off the radar's sequence" not in pt.summary()
     assert np.max(np.abs(pt.corrected - true)) < 1e-9
+
+
+def test_a_nan_tag_is_one_inconsistent_echo_and_one_echo_is_unanchored(tmp_path, table):
+    true = _true_times(6000, 1000.0, table, drift=0.0)
+    utc = true.copy()
+    utc[3000] = np.nan
+    pt = l0b.pulse_timing(_write_l0b(tmp_path / "nan.h5", utc, table))
+    assert pt.anchored and [(s["code"], s["first"], s["count"]) for s in pt.segments()] == [(l0b.INCONSISTENT, 3000, 1)]
+    assert np.max(np.abs(pt.corrected - true)) < 1e-9
+    with pytest.raises(l0b.UnanchoredTags, match="1 finite tag"):
+        l0b.pulse_timing(_write_l0b(tmp_path / "one.h5", true[:1], table))
