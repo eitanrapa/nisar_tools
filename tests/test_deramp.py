@@ -661,3 +661,24 @@ def test_deramp_mask_changes_persist_hash(tmp_path):
     u.deramp(degree=1).persist(ws, "plain")
     u.deramp(degree=1, mask=mask).persist(ws, "masked")
     assert ws.stored_params_hash("plain") != ws.stored_params_hash("masked")
+
+
+@pytest.mark.parametrize("extra", [False, True])
+def test_a_rank_deficient_plane_is_deramped_alike_in_memory_and_in_chunks(extra):
+    """One valid row leaves the y-gradient free: both paths take lstsq's minimum-norm fit, exact on the row."""
+    da = pytest.importorskip("dask.array")
+    from nisar_tools._kernels import deramp_planes, deramp_poly_dask
+
+    field = np.full((1, 60, 80), np.nan)
+    field[0, 30, :] = np.linspace(0.0, 5.0, 80)
+    if extra:
+        field[0, 31, 10:12] = 1.0
+    in_memory = deramp_planes(field, degree=1, method="poly", scale=None)
+    chunked = deramp_poly_dask(da.from_array(field, chunks=(1, 30, 40)), 1).compute()
+    np.testing.assert_array_equal(np.isfinite(chunked), np.isfinite(field))
+    np.testing.assert_allclose(chunked, in_memory, atol=1e-9, equal_nan=True)
+    if not extra:
+        np.testing.assert_allclose(chunked[0, 30], 0.0, atol=1e-9)    # a line on a line: nothing left
+    too_few = np.full((1, 60, 80), np.nan)
+    too_few[0, 5, 5:7] = 1.0                                           # fewer pixels than coefficients
+    assert np.isnan(deramp_poly_dask(da.from_array(too_few, chunks=(1, 30, 40)), 1).compute()).all()

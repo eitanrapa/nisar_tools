@@ -1307,16 +1307,17 @@ def poly_normal_equations(field, degree, y_index, x_index, ny, nx, exclude=None)
 def poly_solve_parts(parts, ncoef):
     """Sum per-block normal equations and solve, per plane.
 
-    Returns NaN coefficients for a plane the surviving pixels cannot constrain,
-    matching `poly_surface`'s all-NaN return in that case. `lstsq` (SVD)
-    rather than `solve`, so a deficient system degrades instead of raising.
+    As `poly_surface`: NaN coefficients for a plane with fewer valid pixels
+    than coefficients (the constant column's entry of `A^T A` counts them), and
+    otherwise `lstsq`'s minimum-norm fit, so a rank-deficient plane (one valid
+    row, say) is still fitted exactly where it has data instead of blanked.
     """
     ata = sum(part[0] for part in parts)
     atb = sum(part[1] for part in parts)
     out = np.full((ata.shape[0], ncoef), np.nan)
     for k in range(ata.shape[0]):
-        if np.linalg.matrix_rank(ata[k]) < ncoef:
-            continue  # fewer independent samples than coefficients
+        if ata[k][0, 0] < ncoef:
+            continue
         out[k], *_ = np.linalg.lstsq(ata[k], atb[k], rcond=None)
     return out
 
