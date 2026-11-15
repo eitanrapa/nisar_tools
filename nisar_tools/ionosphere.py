@@ -451,12 +451,17 @@ def _provenance(f_self, f_other, f_ref, a_self, a_other, ground, sigma_self,
     }
 
 
-def as_screen(screen, y, x, npair):
+def as_screen(screen, y, x, npair, stack=None, time_tolerance=600.0):
     """Coerce a screen argument onto a `(pair, y, x)` grid.
 
     Accepts the DataArray `dual_frequency_screen` returns, an
     `nisar_tools.unwrap.UnwrappedStack` carrying one as its
     `phase_screen` layer, or a plain array. Returns `(field, provenance)`.
+
+    When the screen and `stack` (the dataset it is for) both carry `ref_time`
+    and `sec_time`, the screen's pairs are put in the stack's order by those
+    times, within `time_tolerance` seconds (`None`: by position), and a pair
+    with no screen raises; a plain array is taken by position.
     """
     ds = getattr(screen, "ds", None)
     if ds is not None:
@@ -478,6 +483,9 @@ def as_screen(screen, y, x, npair):
             f"The screen has {screen.sizes.get('pair')} pairs and the stack has "
             f"{npair}. Estimate the screen from stacks with the same pairs."
         )
+    if stack is not None and all(k in screen.coords and k in stack.coords for k in ("ref_time", "sec_time")):
+        order = match_pairs(stack, screen, time_tolerance, action="apply the ionospheric screen")
+        screen = screen.isel(pair=order)
     field = interp_to_grid(
         screen.drop_vars(["ref_time", "sec_time"], errors="ignore"), y, x
     )

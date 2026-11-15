@@ -438,7 +438,7 @@ class InterferogramStack(RasterStackMixin):
         }
         return InterferogramStack(ds)
 
-    def correct_ionosphere(self, screen):
+    def correct_ionosphere(self, screen, time_tolerance=600.0):
         """Rotate the wrapped interferogram by an ionospheric screen (lazy).
 
         `screen` is what
@@ -458,7 +458,9 @@ class InterferogramStack(RasterStackMixin):
         `nisar_tools.ionosphere`) -- but those can be unwrapped from a
         coarsely multilooked pair, which is both easier and, for a
         kilometre-scale screen, no less accurate. The screen is interpolated onto
-        this stack's grid, so the two need not match.
+        this stack's grid, so the two need not match. Its pairs are matched to
+        this stack's by acquisition time, within `time_tolerance` seconds, when
+        it carries them (`None`, or a plain array: by position).
 
         Coherence is untouched: a phase rotation changes no amplitude.
         """
@@ -472,6 +474,7 @@ class InterferogramStack(RasterStackMixin):
         field, provenance = ionosphere.as_screen(
             screen, np.asarray(self.ds["y"].values),
             np.asarray(self.ds["x"].values), self.sizes["pair"],
+            stack=self.ds, time_tolerance=time_tolerance,
         )
         field = field.assign_coords(pair=self.ds["pair"].values)
 

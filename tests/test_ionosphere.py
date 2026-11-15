@@ -526,3 +526,30 @@ def test_a_stack_cannot_mix_the_two_sub_bands(gslc_factory):
     finally:
         a.close()
         b.close()
+
+
+def test_a_screen_is_applied_to_its_own_pairs():
+    """A screen's pairs are matched to the stack's by time; a plain array goes by position."""
+    from nisar_tools.interferogram import InterferogramStack
+
+    t = np.array(["2025-01-01", "2025-01-13", "2025-01-25", "2025-02-06"], "datetime64[ns]")
+    ny, nx = 8, 9
+    y, x = 4e6 - 50.0 * np.arange(ny), 4e5 + 50.0 * np.arange(nx)
+    ig = InterferogramStack(xr.Dataset(
+        {"igram": (("pair", "y", "x"), np.ones((2, ny, nx), np.complex64)),
+         "coherence": (("pair", "y", "x"), np.ones((2, ny, nx), np.float32))},
+        coords={"pair": [0, 1], "y": y, "x": x, "ref_time": ("pair", t[[0, 1]]), "sec_time": ("pair", t[[1, 2]])},
+        attrs={"epsg": 32611}))
+    values = np.stack([np.full((ny, nx), 2.0), np.full((ny, nx), 1.0)]).astype(np.float32)
+
+    def screen(ref, sec):
+        return xr.DataArray(values, dims=("pair", "y", "x"),
+                            coords={"pair": [0, 1], "y": y, "x": x, "ref_time": ("pair", ref),
+                                    "sec_time": ("pair", sec)})
+
+    out = ig.correct_ionosphere(screen(t[[1, 0]], t[[2, 1]]))        # the same pairs, the other way round
+    np.testing.assert_allclose(np.angle(out.ds["igram"].values[:, 0, 0]), [-1.0, -2.0], atol=1e-6)
+    with pytest.raises(ValueError, match="no pair in the other stack matches"):
+        ig.correct_ionosphere(screen(t[[1, 2]], t[[2, 3]]))           # other pairs
+    by_position = ig.correct_ionosphere(values)
+    np.testing.assert_allclose(np.angle(by_position.ds["igram"].values[:, 0, 0]), [-2.0, -1.0], atol=1e-6)
