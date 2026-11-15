@@ -133,4 +133,25 @@ def test_gaussian_sigma_option_defaults_to_looks_and_narrows_the_filter():
     c = K.multilook(ramp, nx, ny, looks, True, "Gaussian", sigma=looks / 2)
     inner = (slice(3, -3), slice(3, -3))
     assert np.abs(c[inner]).mean() > 2 * np.abs(a[inner]).mean()
-    assert K._overlap_depth(looks, "Gaussian", looks / 2) == int(4.0 * looks / 2 + 0.5)
+    assert K._overlap_depth(looks, "Gaussian", looks / 2) == int(4.0 * looks / 2 + 0.5) + 1   # even: half a sample early
+
+
+@pytest.mark.parametrize("looks", [4, 5, 10])
+@pytest.mark.parametrize("sigma", [None, 2.5])
+def test_a_downsampled_gaussian_sits_on_its_blocks_coordinates(looks, sigma):
+    """A linear field multilooked is the field at the block's mean coordinate, even looks included."""
+    reach = _kernels._overlap_depth(looks, "Gaussian", sigma)
+    margin = reach // looks + 2                             # output pixels clear of the zero padding
+    ny, nx = (2 * margin + 4) * looks + 3, (2 * margin + 6) * looks + 1
+    yy, xx = np.mgrid[0:ny, 0:nx].astype(float)
+    ramp = 0.3 * xx - 0.2 * yy
+    max_x, max_y = _max_xy(ny, nx, looks)
+    x = _kernels.downsampled_coords(np.arange(nx, dtype=float), looks, max_x)
+    y = _kernels.downsampled_coords(np.arange(ny, dtype=float), looks, max_y)
+    want = 0.3 * x[None, :] - 0.2 * y[:, None]
+    weight = _kernels.boundary_response(ny, nx, max_x, max_y, looks, True, "Gaussian", sigma=sigma)
+    inner = (slice(margin, -margin), slice(margin, -margin))
+    for out in (_kernels.multilook(ramp, max_x, max_y, looks, True, "Gaussian", sigma=sigma),
+                _kernels.multilook_dask(da.from_array(ramp, chunks=(7, 9)), max_x, max_y, looks, True, "Gaussian",
+                                        sigma=sigma).compute()):
+        np.testing.assert_allclose((out / weight)[inner], want[inner], atol=1e-9)

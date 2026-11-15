@@ -27,6 +27,7 @@ from collections.abc import Mapping
 import numpy as np
 from scipy.ndimage import (
     binary_erosion,
+    correlate1d,
     gaussian_filter,
     gaussian_filter1d,
     generate_binary_structure,
@@ -92,10 +93,12 @@ def _overlap_depth(looks, convolution, sigma=None):
 
     - Uniform filter of `size=looks` reaches at most `looks // 2` samples.
     - Gaussian filter of `sigma` (default `looks`) reaches
-      `int(truncate*sigma + 0.5)` samples, where scipy's default `truncate` is 4.0.
+      `int(truncate*sigma + 0.5)` samples, where scipy's default `truncate` is 4.0,
+      and one more for an even `looks`, whose kernel sits half a sample early
+      (`_block_centred_gaussian`).
     """
     if convolution == "Gaussian":
-        return int(4.0 * gaussian_sigma(looks, sigma) + 0.5)
+        return int(4.0 * gaussian_sigma(looks, sigma) + 0.5) + (looks % 2 == 0)
     if convolution == "Uniform":
         return looks // 2 + 1
     raise ValueError("convolution must be Uniform or Gaussian")
@@ -115,6 +118,27 @@ def gaussian_sigma(looks, sigma=None):
     return s
 
 
+def _gaussian_taps(looks, sigma, shifted):
+    """The Gaussian multilook's 1-D taps, scipy's (`truncate` 4.0): centred on a sample, or with `shifted` half a
+    sample before it (an even number of taps)."""
+    s = gaussian_sigma(looks, sigma)
+    r = int(4.0 * s + 0.5)
+    j = np.arange(-r - 1, r + 1) + 0.5 if shifted else np.arange(-r, r + 1, dtype=float)
+    w = np.exp(-0.5 * (j / s) ** 2)
+    return w / w.sum()
+
+
+def _block_centred_gaussian(arr, looks, sigma):
+    """The Gaussian multilook along the last two axes, each output centred half a sample before its sample.
+
+    A downsampled output is labelled with its block's mean coordinate, `kL + (L - 1)/2`, and sampled at
+    `kL + L // 2`: for an even `L` those differ by half a sample, so the kernel is centred there instead.
+    """
+    taps = _gaussian_taps(looks, sigma, shifted=True)
+    out = correlate1d(arr, taps, axis=-1, mode="constant", cval=0.0)
+    return correlate1d(out, taps, axis=-2, mode="constant", cval=0.0)
+
+
 def multilook(arr, max_x, max_y, looks, downsample, convolution, *, sigma=None):
     """Convolve and (optionally) downsample a 2D array. Verbatim numpy kernel.
 
@@ -122,7 +146,9 @@ def multilook(arr, max_x, max_y, looks, downsample, convolution, *, sigma=None):
     numpy arrays via scipy's filters directly. `sigma` (Gaussian only) is the
     filter's sigma in input samples, default `looks` (see `gaussian_sigma`).
     """
-    if convolution == "Gaussian":
+    if convolution == "Gaussian" and downsample and looks % 2 == 0:
+        smoothed = _block_centred_gaussian(arr, looks, sigma)
+    elif convolution == "Gaussian":
         smoothed = gaussian_filter(arr, sigma=gaussian_sigma(looks, sigma), mode="constant", cval=0.0)
     elif convolution == "Uniform":
         smoothed = uniform_filter(arr, size=looks, mode="constant", cval=0.0)
@@ -152,7 +178,10 @@ def multilook_dask(arr, max_x, max_y, looks, downsample, convolution, *, sigma=N
     # Filter only the trailing two spatial axes. A per-axis parameter of
     # 0 (Gaussian sigma) or 1 (uniform size) leaves the leading stack axes
     # untouched, so pairs/dates never mix even when chunked together.
-    if convolution == "Gaussian":
+    if convolution == "Gaussian" and downsample and looks % 2 == 0:
+        def _f(block):
+            return _block_centred_gaussian(block, looks, sigma)
+    elif convolution == "Gaussian":
         g = gaussian_sigma(looks, sigma)
         sigmas = (0.0,) * n_lead + (g, g)
 
@@ -208,7 +237,12 @@ def boundary_response_profiles(ny, nx, max_x, max_y, looks, downsample,
     each vector in turn: the outer product is a full-grid float64 array, and
     multiplying it into a dask expression embeds it in every task's payload.
     """
-    if convolution == "Gaussian":
+    if convolution == "Gaussian" and downsample and looks % 2 == 0:
+        taps = _gaussian_taps(looks, sigma, shifted=True)
+
+        def _f(n):
+            return correlate1d(np.ones(n), taps, mode="constant", cval=0.0)
+    elif convolution == "Gaussian":
         def _f(n):
             return gaussian_filter1d(
                 np.ones(n), gaussian_sigma(looks, sigma), mode="constant", cval=0.0
