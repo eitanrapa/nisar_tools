@@ -363,6 +363,34 @@ def test_merge_rejects_unpairable_times(gslc_factory):
     g3.close()
 
 
+def test_persist_refuses_another_band_or_polarization(gslc_factory, tmp_path):
+    """A granule holds both bands and every polarization, so its files cannot tell the stores apart."""
+    import h5py
+
+    from nisar_tools.workspace import WorkspaceError
+
+    paths = []
+    for k in range(2):
+        p = gslc_factory(ny=32, nx=32, seed=k, datetime_str=f"2025-11-{10 + k:02d}T00:00:00.000000000")
+        rng = np.random.default_rng(10 + k)
+        with h5py.File(p, "r+") as f:
+            a = f["science/LSAR/GSLC/grids/frequencyA"]
+            a["HV"] = (0.3 * np.exp(1j * rng.uniform(-np.pi, np.pi, a["HH"].shape))).astype(np.complex64)
+            f.copy(a, "science/LSAR/GSLC/grids/frequencyB")
+            b = f["science/LSAR/GSLC/grids/frequencyB"]
+            b["HH"][...] = np.exp(1j * rng.uniform(-np.pi, np.pi, b["HH"].shape)).astype(np.complex64)
+        paths.append(p)
+    ws = Workspace(tmp_path)
+    stored = GSLCStack.from_gslcs([GSLC(p) for p in paths]).persist(ws, "slc_stack", files=paths)
+    assert stored.ds.attrs["polarization"] == "HH"
+    GSLCStack.from_gslcs([GSLC(p) for p in paths]).persist(ws, "slc_stack", files=paths)   # the same band resumes
+    for kwargs, differs in ((dict(frequency="B"), "frequency"), (dict(polarization="HV"), "polarization")):
+        with pytest.raises(WorkspaceError, match=f"differs in {differs}"):
+            GSLCStack.from_gslcs([GSLC(p, **kwargs) for p in paths]).persist(ws, "slc_stack", files=paths)
+    with pytest.raises(ValueError, match="several polarizations"):
+        GSLCStack.from_gslcs([GSLC(paths[0]), GSLC(paths[1], polarization="HV")])
+
+
 def test_persist_resume_roundtrip(gslc_factory, tmp_path):
     g1, g2 = _two_gslcs(gslc_factory)
     ws = Workspace(tmp_path)

@@ -70,6 +70,11 @@ class GSLCStack(RasterStackMixin):
                 "interferometric with each other; build one stack per band (that "
                 "is what the dual-frequency ionosphere correction combines)."
             )
+        polarizations = {g.polarization for g in gslcs}
+        if len(polarizations) > 1:
+            raise ValueError(
+                f"GSLCs span several polarizations: {sorted(polarizations)}; build one stack per polarization."
+            )
         conventions = {g.pixel_convention for g in gslcs}
         if len(conventions) > 1:
             raise ValueError(
@@ -109,6 +114,7 @@ class GSLCStack(RasterStackMixin):
             x_spacing=float(gslcs[0].x_spacing),
             y_spacing=float(gslcs[0].y_spacing),
             frequency=str(gslcs[0].frequency),
+            polarization=str(gslcs[0].polarization),
         )
         if carriers:
             ds.attrs["center_frequency"] = float(carriers.pop())
@@ -336,7 +342,10 @@ class GSLCStack(RasterStackMixin):
             full_params["water_mask"] = self.ds.attrs["water_mask"]
         if self.ds.attrs.get("edges_masked") is not None:
             full_params["edges_masked"] = self.ds.attrs["edges_masked"]
-        reopened = workspace.store(name, ds, full_params, overwrite=overwrite)
+        # A granule holds both bands and every polarization, so `files` cannot tell them apart: they are recorded
+        # beside the parameters (every existing store keeps its hash), and another band or polarization raises.
+        provenance = {k: self.ds.attrs[k] for k in ("frequency", "polarization") if self.ds.attrs.get(k) is not None}
+        reopened = workspace.store(name, ds, full_params, overwrite=overwrite, provenance=provenance or None)
         return GSLCStack(reopened)
 
     def make_pairs(self, pairs="sequential"):
