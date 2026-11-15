@@ -373,8 +373,8 @@ class RasterStackMixin:
         into an `amplitude` and a wrapped `phase` field.
 
         `fields` selects which fields to write by name; the default set is
-        per stage (see each class's `_grd_specs`), and passing an unknown
-        name raises with the available menu. `indices` selects which slices
+        per stage (see each class's `_grd_specs`), less any this stack lacks,
+        and passing an unknown name raises with the available menu. `indices` selects which slices
         along the stack dimension to write for the stacked fields (default:
         all). `outdir` is created if needed. Returns the written paths, in
         field order.
@@ -410,9 +410,9 @@ class RasterStackMixin:
         """Yield `(filename_stem, 2-D DataArray)` for each field to export."""
         specs = {name: (da, stacked) for name, da, stacked in self._grd_specs()}
         if fields is None:
-            fields = self.GRD_DEFAULT_FIELDS
-            if fields is None:
-                fields = list(specs)
+            # the stage's defaults this stack has: an imported LOS stack has no look angle, say
+            fields = list(specs) if self.GRD_DEFAULT_FIELDS is None else [
+                name for name in self.GRD_DEFAULT_FIELDS if name in specs]
         dim = self.GRD_STACK_DIM
         for name in fields:
             try:

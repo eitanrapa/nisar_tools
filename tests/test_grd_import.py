@@ -357,3 +357,15 @@ def test_recovers_slip_from_alos_style_grids(alos_scenes):
     # Right-lateral in, right-lateral out -- and to within 20% of the true peak,
     # which is what catches a units or sign error that correlation would not.
     assert model.strike_slip.min() == pytest.approx(strike.min(), rel=0.2)
+
+
+def test_an_imported_stack_exports_with_the_default_fields(alos_scenes, tmp_path):
+    """It has no look angle, so the defaults are the ones it has; naming a missing field still raises."""
+    *_, scenes = alos_scenes
+    stack = _load(scenes["desc"])
+    assert "look_angle" not in stack.ds
+    written = stack.to_grd(tmp_path / "out", workers=1)
+    assert sorted(p.name for p in written) == sorted(
+        ["los_pair0.grd", "los_east.grd", "los_north.grd", "los_up.grd", "incidence_angle.grd"])
+    with pytest.raises(KeyError, match="unknown field 'look_angle'"):
+        stack.to_grd(tmp_path / "out", fields=["look_angle"], workers=1)
