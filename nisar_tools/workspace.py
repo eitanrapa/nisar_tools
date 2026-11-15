@@ -403,6 +403,10 @@ class Workspace:
             shutil.rmtree(target)
 
         ds = ds.copy()
+        # The chunks a variable was read with are not the stage's: a pair coordinate of a region-written store is one
+        # chunk of every pair, and the stage is rechunked one pair at a time, which to_zarr refuses to reconcile.
+        for variable in ds.variables.values():
+            variable.encoding = {k: v for k, v in variable.encoding.items() if k not in ("chunks", "preferred_chunks")}
         if provenance is not None:
             ds.attrs["provenance"] = json.dumps(provenance, default=_json_default)
             ds.attrs["provenance_hash"] = hash_params(provenance)

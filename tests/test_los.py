@@ -148,6 +148,23 @@ def test_a_band_b_stack_is_converted_with_band_bs_wavelength(gslc_factory):
         unw_stack.to_los(p, frequency="A")
 
 
+def test_the_los_of_a_multi_pair_unwrapped_store_persists(gslc_factory, tmp_path):
+    """The pair coordinates of a region-written store are one chunk of every pair; the stage writes one per pair."""
+    from nisar_tools import GSLCStack
+
+    paths = [gslc_factory(ny=64, nx=64, seed=k, write_geometry=True,
+                          datetime_str=f"2025-11-{10 + k:02d}T00:00:00.000000000") for k in range(3)]
+    ws = Workspace(tmp_path / "ws")
+    stack = GSLCStack.from_gslcs([GSLC(p) for p in paths]).persist(ws, "slc", files=paths)
+    unw = stack.form_interferograms(pairs="sequential", looks=4).unwrap(ws, name="unw", nproc=1)
+    assert unw.sizes["pair"] == 2
+    los = unw.to_los(paths[0])
+    stored = los.persist(ws, "los")
+    np.testing.assert_array_equal(stored.ds["los"].values, los.ds["los"].values)
+    np.testing.assert_array_equal(stored.ds["sec_time"].values, unw.ds["sec_time"].values)
+    assert unw.mask_edges(edge_pixels=1).persist(ws, "unw_masked").sizes["pair"] == 2
+
+
 def test_los_persist_roundtrip(gslc_factory, tmp_path):
     p = gslc_factory(ny=40, nx=40, write_geometry=True)
     unw_stack, *_ = _synthetic_unwrapped(p)
