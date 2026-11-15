@@ -209,3 +209,17 @@ def test_check_rslc_flags_the_masks_of_releases_before_v0_25_16(tmp_path, versio
         f["science/LSAR/RSLC/metadata/processingInformation/algorithms/softwareVersion"] = np.bytes_(version)
     problems = qa.check_rslc(path)["problems"]
     assert any("far-range edge" in p for p in problems) == flagged
+
+
+def test_a_drop_beside_an_empty_sub_swath_is_not_widened_to_the_near_edge():
+    """A sub-swath empty on one neighbour ([0, 0]) keeps the line's own extent; one valid on both is repaired."""
+    def swath(start, end):
+        return np.column_stack([np.full(40, start), np.full(40, end)]).astype(np.int64)
+
+    near, far = swath(1000, 5000), swath(6000, 9000)
+    far[:20] = (0, 0)                                        # the far sub-swath starts at line 20
+    near[19] = (1000, 2000)                                  # line 19 drops three quarters of the near one
+    lines, _ = qa.isolated_drops([near, far])
+    assert lines.tolist() == [19]
+    fixed_near, fixed_far = qa.repair_drops([near, far])
+    assert fixed_near[19].tolist() == [1000, 5000] and fixed_far[19].tolist() == [0, 0]

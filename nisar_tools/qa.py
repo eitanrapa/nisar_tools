@@ -50,13 +50,18 @@ def isolated_drops(valid_samples, threshold=0.1):
 
 
 def repair_drops(valid_samples, threshold=0.1):
-    """`valid_samples` with each isolated dropped line given its neighbours' extent."""
+    """`valid_samples` with each isolated dropped line given its neighbours' extent.
+
+    Per sub-swath, and only where it is valid on both neighbours: one that is
+    empty (`[0, 0]`) on either, as where it starts or ends, keeps the line's own.
+    """
     lines, _ = isolated_drops(valid_samples, threshold)
     out = [v.copy() for v in valid_samples]
     for v in out:
         for i in lines:
-            v[i, 0] = min(v[i - 1, 0], v[i + 1, 0])
-            v[i, 1] = max(v[i - 1, 1], v[i + 1, 1])
+            if v[i - 1, 1] > v[i - 1, 0] and v[i + 1, 1] > v[i + 1, 0]:
+                v[i, 0] = min(v[i - 1, 0], v[i + 1, 0])
+                v[i, 1] = max(v[i - 1, 1], v[i + 1, 1])
     return out
 
 
