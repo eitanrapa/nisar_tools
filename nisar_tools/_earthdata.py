@@ -88,6 +88,10 @@ def download(urls, dest, username=None, password=None, progress=True):
 
 def _fetch(open_url, url, path, label, progress):
     with _open(open_url, url) as response:
+        if response.headers.get_content_type() == "text/html":
+            # a login or "approve the application" page, not the granule: never saved under its name
+            raise OSError("the server sent a web page instead of the file; the account may first have to "
+                          "approve the data provider's application in Earthdata Login")
         total = response.headers.get("Content-Length")
         total = int(total) if total is not None else None
         if path.exists() and path.stat().st_size == total:

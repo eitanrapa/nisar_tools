@@ -17,6 +17,7 @@ from nisar_tools import _earthdata
 
 USER, PASSWORD = "someone", "secret"
 FILES = {"/data/a.bin": os.urandom(3_000_000), "/data/b.bin": b"b" * 1234, "/data/slow.bin": b"ready"}
+PAGES = {"/data/page.h5": b"<!DOCTYPE html><html><body>Approve the application in Earthdata Login</body></html>"}
 
 
 class _Server:
@@ -52,6 +53,13 @@ class _Server:
                 if outer.accepted.get(url.path, 0) > 0:
                     outer.accepted[url.path] -= 1
                     return self._empty(202)
+                if url.path in PAGES:                    # a 200 that is a web page, not the file
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(PAGES[url.path])))
+                    self.end_headers()
+                    self.wfile.write(PAGES[url.path])
+                    return
                 if url.path not in FILES:
                     return self._empty(404)
                 body = FILES[url.path]
@@ -133,3 +141,11 @@ def test_credentials_come_from_netrc_then_the_environment(tmp_path, monkeypatch)
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     with pytest.raises(RuntimeError, match="no Earthdata Login credentials"):
         _earthdata.credentials()
+
+
+def test_a_web_page_is_not_saved_as_the_file(server, tmp_path):
+    """A login or approval page answered with 200 is a failure, never a file under the granule's name."""
+    for _ in range(2):                                       # and a rerun does not take it as complete
+        with pytest.raises(RuntimeError, match="web page instead of the file"):
+            _get(server, tmp_path, "page.h5")
+        assert not (tmp_path / "page.h5").exists() and not list(tmp_path.glob("*.part"))
