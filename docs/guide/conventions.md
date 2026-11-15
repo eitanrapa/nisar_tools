@@ -39,8 +39,9 @@ sensor shortens the range and makes the phase decrease.
 d_\mathrm{LOS} = -\frac{\lambda}{4\pi}\,\phi
 \]
 
-in metres, **positive toward the sensor** (a decrease in range). The wavelength comes from the granule's
-`centerFrequency`. `to_los(sign=-1)` (and `geometry.phase_to_los(sign=-1)`) is for data whose fringe sense is
+in metres, **positive toward the sensor** (a decrease in range). The wavelength is the stack's own band's, from its
+GSLCs' `centerFrequency` (else the granule's, for that band); `to_los(frequency=)` naming another band raises.
+`to_los(sign=-1)` (and `geometry.phase_to_los(sign=-1)`) is for data whose fringe sense is
 inverted; whatever `sign` is, the stored `los` is positive toward the sensor, and nothing downstream applies the sign
 again.
 

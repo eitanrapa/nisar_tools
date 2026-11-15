@@ -126,6 +126,28 @@ def test_los_persist_refuses_a_store_made_from_another_input(gslc_factory, tmp_p
     first.to_los(str(moved / Path(p).name)).persist(ws, "los")                   # a granule by its name
 
 
+def test_a_band_b_stack_is_converted_with_band_bs_wavelength(gslc_factory):
+    """A granule holds both bands; the stack's own band, not A, sets the wavelength."""
+    import h5py
+
+    p = gslc_factory(ny=40, nx=40, write_geometry=True)
+    with h5py.File(p, "r+") as f:
+        f.copy(f["science/LSAR/GSLC/grids/frequencyA"], "science/LSAR/GSLC/grids/frequencyB")
+        b = f["science/LSAR/GSLC/grids/frequencyB"]
+        if "centerFrequency" in b:
+            del b["centerFrequency"]
+        b["centerFrequency"] = 1_293_500_000.0
+    wavelength_b = G.SPEED_OF_LIGHT / 1_293_500_000.0
+    unw_stack, unw, *_ = _synthetic_unwrapped(p)
+    unw_stack.ds.attrs.update(frequency="B")
+    los = unw_stack.to_los(p)
+    assert los.ds.attrs["frequency"] == "B"
+    assert los.ds.attrs["wavelength"] == pytest.approx(wavelength_b, rel=1e-12)
+    np.testing.assert_allclose(los.ds["los"].values, -wavelength_b / (4 * np.pi) * unw, rtol=1e-6)
+    with pytest.raises(ValueError, match="band B's"):
+        unw_stack.to_los(p, frequency="A")
+
+
 def test_los_persist_roundtrip(gslc_factory, tmp_path):
     p = gslc_factory(ny=40, nx=40, write_geometry=True)
     unw_stack, *_ = _synthetic_unwrapped(p)

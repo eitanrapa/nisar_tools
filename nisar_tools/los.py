@@ -136,7 +136,7 @@ class LOSStack(RasterStackMixin):
         self.ds = ds
 
     @classmethod
-    def from_unwrapped(cls, unwrapped, gslc, dem=None, frequency="A",
+    def from_unwrapped(cls, unwrapped, gslc, dem=None, frequency=None,
                        wavelength=None, sign=1, mask_geometry=True,
                        product="GSLC"):
         """Build a `LOSStack` from an unwrapped stack.
@@ -148,6 +148,11 @@ class LOSStack(RasterStackMixin):
         the rest of a merged stack without geometry. The cubes are sampled in
         order and combined, earlier granules taking precedence where they
         overlap, matching `merge`'s own rule.
+
+        `frequency` is the stack's own sub-band (`attrs["frequency"]`, else
+        `"A"`); another one raises, since it would convert the phase with that
+        band's wavelength. `wavelength` defaults to the stack's own
+        (`attrs["wavelength"]`), else the granule's for the band.
 
         `product` names the granule's product group (`"GSLC"`, or `"GUNW"`
         when the geometry comes from a NASA GUNW's own embedded cube). `dem` is
@@ -169,6 +174,14 @@ class LOSStack(RasterStackMixin):
         du = unwrapped.ds
         x, y, epsg = unwrapped.x, unwrapped.y, unwrapped.epsg
         granules = _as_granule_list(gslc)
+        band = du.attrs.get("frequency")
+        if frequency is None:
+            frequency = band or "A"
+        elif band is not None and frequency != band:
+            raise ValueError(f"this stack's phase is band {band}'s; frequency={frequency!r} would convert it "
+                             f"with band {frequency}'s wavelength")
+        if wavelength is None:
+            wavelength = du.attrs.get("wavelength")
         if wavelength is None:
             wavelength = geometry.radar_wavelength(granules[0], frequency, product)
 

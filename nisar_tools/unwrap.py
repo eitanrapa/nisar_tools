@@ -1043,7 +1043,7 @@ class UnwrappedStack(RasterStackMixin):
         return UnwrappedStack(reopened)
 
     # -- LOS conversion ----------------------------------------------------
-    def to_los(self, gslc=None, dem=None, frequency="A", wavelength=None, sign=1,
+    def to_los(self, gslc=None, dem=None, frequency=None, wavelength=None, sign=1,
                mask_geometry=True):
         """Convert to LOS displacement + per-pixel look geometry.
 
@@ -1055,8 +1055,9 @@ class UnwrappedStack(RasterStackMixin):
         - **SNAPHU** stacks need a `gslc` granule (one per frame for a merged
           stack) for the geometry cube.
 
-        `dem`, `sign` and `mask_geometry` behave as in
-        `nisar_tools.los.LOSStack.from_unwrapped`.
+        `dem`, `frequency`, `wavelength`, `sign` and `mask_geometry` behave as in
+        `nisar_tools.los.LOSStack.from_unwrapped`: the band and wavelength are the
+        stack's own unless given.
         """
         from .los import LOSStack
 
@@ -1075,8 +1076,6 @@ class UnwrappedStack(RasterStackMixin):
                 # One cube per frame: a single-frame GUNW has one file, a merged
                 # one has both, each covering its own part of the footprint.
                 gslc = list(files)
-            if wavelength is None:
-                wavelength = self.ds.attrs.get("wavelength")
             product = "GUNW"
         else:
             if gslc is None:
