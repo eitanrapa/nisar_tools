@@ -336,3 +336,32 @@ def test_a_box_across_the_central_meridian_keeps_the_bow_of_its_parallels():
     assert x0 <= xs.min() + 0.01 and x1 >= xs.max() - 0.01 and y0 <= ys.min() + 0.01 and y1 >= ys.max() - 0.01
     _, corner_y = t.transform([lon_min, lon_max], [lat_min, lat_min])
     assert min(corner_y) - y0 > 400.0                                    # the strip the corners would cut off
+
+
+def test_the_water_mask_is_registered_to_the_pixel_centres(monkeypatch):
+    """Water south of a parallel: each pixel centre lands on its own side of it, to the coastline grid's step."""
+    pygmt = pytest.importorskip("pygmt")
+    from pyproj import Transformer
+
+    from nisar_tools import mask as mask_mod
+
+    epsg, coast, step = 32611, 33.95, 1e-4                  # a ~10 m coastline grid under 100 m pixels
+    x = 360_000.0 + 100.0 * np.arange(300) + 50.0           # a grid and coastline grid that a reprojection onto
+    y = 3_760_000.0 - 100.0 * np.arange(300) - 50.0         # a grid of its own put half a pixel off
+
+    def fake_grdlandmask(region, spacing, maskvalues, resolution, registration):
+        lon = np.arange(region[0] + step / 2, region[1], step)
+        lat = np.arange(region[2] + step / 2, region[3], step)
+        data = np.where(lat[:, None] > coast, np.float32(1.0), np.float32(np.nan)) * np.ones(lon.size, np.float32)
+        return xr.DataArray(data, dims=("lat", "lon"),                   # named and tagged as pygmt's are
+                            coords={"lat": ("lat", lat, {"axis": "Y", "standard_name": "latitude"}),
+                                    "lon": ("lon", lon, {"axis": "X", "standard_name": "longitude"})})
+
+    monkeypatch.setattr(pygmt, "grdlandmask", fake_grdlandmask)
+    for ys in (y, y[::-1]):                                  # north-up and south-up grids
+        land = mask_mod.make_water_mask(x, ys, epsg).notnull().values
+        X, Y = np.meshgrid(x, ys)
+        _, lat = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True).transform(X, Y)
+        clear = np.abs(lat - coast) > 2 * step
+        assert 0.02 < land.mean() < 0.98                     # both land and water
+        np.testing.assert_array_equal(land[clear], (lat > coast)[clear])

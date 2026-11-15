@@ -171,16 +171,20 @@ def make_water_mask(x_coords, y_coords, epsg_code, buffer=0.05,
         registration="p",
     )
     mask_latlon = mask_latlon.rio.write_crs("EPSG:4326")
-    mask_xy = mask_latlon.rio.reproject(
-        f"EPSG:{epsg_code}", resolution=(x_spacing, y_spacing)
-    )
+    # One nearest-neighbour warp straight onto the target's pixels: reprojecting onto a grid of its own first and
+    # then sampling that put the mask up to half a pixel off.
+    from affine import Affine
+    from rasterio.enums import Resampling
 
-    grid = xr.DataArray(
-        np.zeros((len(y_coords), len(x_coords))),
-        coords={"y": y_coords, "x": x_coords},
-        dims=["y", "x"],
-    )
-    mask = mask_xy.interp_like(grid, method="nearest")
+    x_coords, y_coords = np.asarray(x_coords, float), np.asarray(y_coords, float)
+    descending = y_coords[1] < y_coords[0]
+    ys = y_coords if descending else y_coords[::-1]
+    transform = Affine(x_spacing, 0.0, x_coords[0] - x_spacing / 2, 0.0, -y_spacing, ys[0] + y_spacing / 2)
+    mask = mask_latlon.rio.reproject(f"EPSG:{epsg_code}", shape=(len(ys), len(x_coords)), transform=transform,
+                                     resampling=Resampling.nearest)
+    mask = mask.assign_coords(x=x_coords, y=ys)
+    if not descending:
+        mask = mask.isel(y=slice(None, None, -1))
     # Drop rio's CRS bookkeeping (the scalar ``spatial_ref`` coordinate):
     # applying the mask via ``.where`` would propagate it onto the result,
     # where it collides with the ``spatial_ref`` variable already in the
