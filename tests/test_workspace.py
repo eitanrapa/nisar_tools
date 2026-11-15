@@ -334,3 +334,19 @@ def test_store_refuses_the_same_parameters_on_other_coordinates(tmp_path):
     with pytest.raises(WorkspaceError, match="differs in sec_time"):
         later.persist(ws, "igrams")
     assert cropped.persist(ws, "igrams", overwrite=True).sizes["x"] == 20
+
+
+def test_hash_params_takes_arrays_and_hashes_sets_the_same_in_every_process():
+    import os
+    import subprocess
+    import sys
+
+    from nisar_tools.workspace import hash_params
+
+    box = [-118.0, -117.0, 35.0, 36.0]
+    assert hash_params({"bbox": np.array(box)}) == hash_params({"bbox": box})
+    assert hash_params({"x": np.array([2.5])}) == hash_params({"x": 2.5})       # as before
+    code = "from nisar_tools.workspace import hash_params; print(hash_params({'files': {'a.h5', 'b.h5', 'c.h5'}}))"
+    seen = {subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                           env={**os.environ, "PYTHONHASHSEED": str(seed)}).stdout.strip() for seed in range(4)}
+    assert len(seen) == 1

@@ -126,9 +126,13 @@ def hash_params(params):
 
 
 def _json_default(obj):
-    # Best-effort serialization for numpy scalars, Paths, tuples of paths, etc.
+    # Best-effort serialization for numpy scalars and arrays, Paths, sets, etc.
     if isinstance(obj, Path):
         return str(obj)
+    if isinstance(obj, (set, frozenset)):
+        return sorted(obj, key=str)              # str(set) follows the process's hash seed
+    if isinstance(obj, np.ndarray) and obj.size != 1:
+        return obj.tolist()                      # .item() raises; a size-1 array keeps its old hash
     if hasattr(obj, "item"):
         return obj.item()
     return str(obj)
