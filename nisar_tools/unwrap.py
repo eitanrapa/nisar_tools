@@ -102,8 +102,8 @@ class UnwrappedStack(RasterStackMixin):
         """Unwrap every pair with SNAPHU into a region-written, resumable store.
 
         A store already under `name` is resumed when it was made with the same settings from the
-        same interferogram (its looks, pairs, masks, filtering, corrections and grid). Otherwise
-        this raises `WorkspaceError`, unless `overwrite=True`.
+        same interferogram (its dates, looks, pairs, masks, filtering, corrections and grid, and the
+        store it was read from). Otherwise this raises `WorkspaceError`, unless `overwrite=True`.
 
         `cost` is SNAPHU's statistical cost mode: `"smooth"` (default) or `"defo"` (deformation: phase
         discontinuities are cheap where coherence is low, for a pair across a coseismic step). An interferogram

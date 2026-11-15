@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import xarray as xr
 
 
@@ -440,6 +441,11 @@ class Workspace:
         interferogram, for the unwrap stage). It is recorded beside the parameters,
         outside their hash, and a store made from a different input raises. A store
         that predates the record is kept, with a warning.
+
+        A kept store must also carry the template's coordinates (an interferogram's
+        pair dates, say) and, when it records one, the `params_hash` of the store
+        `source` was read from; otherwise it was made from a different input and
+        raises too.
         """
         target = self.path(name)
         if target.exists():
@@ -461,6 +467,12 @@ class Workspace:
                             f"Stage '{name}' was made from a different input (it differs in "
                             f"{', '.join(keys) or 'its record'}). Pass overwrite=True or use another name."
                         )
+                keys = self._input_differs(name, template, source)
+                if keys:
+                    raise WorkspaceError(
+                        f"Stage '{name}' was made from a different input (it differs in {', '.join(keys)}). "
+                        "Pass overwrite=True or use another name."
+                    )
                 return
             if not same and not overwrite:
                 raise WorkspaceError(
@@ -476,6 +488,8 @@ class Workspace:
         if provenance is not None:
             template.attrs["provenance"] = json.dumps(provenance, default=_json_default)
             template.attrs["provenance_hash"] = hash_params(provenance)
+        if source is not None and source.attrs.get("params_hash") is not None:
+            template.attrs["source_params_hash"] = source.attrs["params_hash"]
         template.attrs["params"] = json.dumps(params, default=_json_default)
         template.attrs["params_hash"] = hash_params(params)
         encoding = _encoding_for(template)
@@ -490,6 +504,21 @@ class Workspace:
         # re-consolidation after the last pair.
         self.consolidate(name)
         self._done_path(name).write_text(json.dumps({"pairs_done": []}))
+
+    def _input_differs(self, name, template, source):
+        """What of an existing store's input differs from `template` and `source`: the coordinates both carry,
+        and the stored store `source` was read from, if both record it."""
+        ds = xr.open_zarr(self.path(name))
+        try:
+            keys = [k for k in template.coords
+                    if k in ds.coords and not np.array_equal(ds[k].values, template[k].values)]
+            stored = ds.attrs.get("source_params_hash")
+            new = None if source is None else source.attrs.get("params_hash")
+            if stored is not None and new is not None and stored != new:
+                keys.append("the store it was read from")
+            return keys
+        finally:
+            ds.close()
 
     def write_region(self, name, ds, region):
         """Write a slice of `ds` into an initialised store at `region`."""

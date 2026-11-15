@@ -12,12 +12,12 @@ from nisar_tools.interferogram import InterferogramStack
 from nisar_tools.unwrap import UnwrappedStack, _snaphu_error_detail
 
 
-def _igram_stack(gslc_factory, ws_dir, ndates=3, ny=80, nx=80):
+def _igram_stack(gslc_factory, ws_dir, ndates=3, ny=80, nx=80, day=10):
     gslcs = []
     for k in range(ndates):
         p = gslc_factory(
             ny=ny, nx=nx, seed=k,
-            datetime_str=f"2025-11-{10 + k:02d}T00:00:00.000000000",
+            datetime_str=f"2025-11-{day + k:02d}T00:00:00.000000000",
         )
         gslcs.append(GSLC(p))
     # Persist the SLC stack first (reopens from Zarr) so the granule file
@@ -354,6 +354,30 @@ def test_unwrap_refuses_a_store_made_from_another_interferogram(gslc_factory, tm
 
     filtered.unwrap(ws, nproc=1, overwrite=True)
     assert ws._stored_attr("unwrapped", "provenance_hash") != record
+    assert ws.pairs_done("unwrapped") == set(range(npair))
+
+
+def test_unwrap_refuses_a_store_made_from_other_dates_or_another_store(gslc_factory, tmp_path):
+    """The same settings and grid from other acquisitions, or from another store, are another input."""
+    import json
+
+    from nisar_tools.workspace import WorkspaceError
+
+    first = _igram_stack(gslc_factory, tmp_path / "ws0").persist(Workspace(tmp_path / "ws0"), "igrams")
+    later = _igram_stack(gslc_factory, tmp_path / "ws2", day=20).persist(Workspace(tmp_path / "ws2"), "igrams")
+    elsewhere = first.persist(Workspace(tmp_path / "ws3"), "igrams", files=["reprocessed"])
+    ws = Workspace(tmp_path / "ws1")
+    first.unwrap(ws, nproc=1)
+    npair = first.sizes["pair"]
+    with pytest.raises(WorkspaceError, match="different input .it differs in ref_time, sec_time"):
+        later.unwrap(ws, nproc=1)
+    ws._done_path("unwrapped").write_text(json.dumps({"pairs_done": [0]}))      # interrupted after its first pair
+    with pytest.raises(WorkspaceError, match="ref_time, sec_time"):
+        later.unwrap(ws, nproc=1)                                              # not finished from the other dates
+    assert ws.pairs_done("unwrapped") == {0}
+    with pytest.raises(WorkspaceError, match="differs in the store it was read from"):
+        elsewhere.unwrap(ws, nproc=1)
+    first.unwrap(ws, nproc=1)                                                  # its own input finishes it
     assert ws.pairs_done("unwrapped") == set(range(npair))
 
 
