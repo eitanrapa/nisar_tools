@@ -323,10 +323,13 @@ def focus_inputs(rslc, workdir, *, l0b_dir=None, ancillary_dir=None, dem=None, d
     own = not isinstance(rslc, RSLC)
     r = RSLC(rslc) if own else rslc
     try:
-        workdir = Path(workdir).expanduser()
+        # absolute, since ISCE3 runs in the runconfig's folder (`run_focus`) and reads these from the runconfig
+        workdir = Path(workdir).expanduser().resolve()
         workdir.mkdir(parents=True, exist_ok=True)
-        l0b_dir = Path(l0b_dir or workdir).expanduser()
-        ancillary_dir = Path(ancillary_dir or workdir).expanduser()
+        l0b_dir = Path(l0b_dir or workdir).expanduser().resolve()
+        ancillary_dir = Path(ancillary_dir or workdir).expanduser().resolve()
+        if dem is not None:
+            dem = Path(dem).expanduser().resolve()
         config = production_runconfig(r)
 
         l0bs = [l0b_dir / n for n in _input_names(r, "l0bGranules")]
@@ -415,10 +418,10 @@ def run_focus(runconfig, *, python=None, threads=None, polarizations=None, repai
     python = python or os.environ.get(ISCE3_PYTHON_ENV)
     if not python:
         raise RuntimeError(f"no ISCE3 interpreter: pass python= or set {ISCE3_PYTHON_ENV}")
-    runconfig = Path(runconfig)
+    runconfig = Path(runconfig).expanduser().resolve()      # ISCE3 runs in its folder
     config = yaml.safe_load(runconfig.read_text())
     groups = config.get("runconfig", {}).get("groups", config)
-    output = Path(groups["product_path_group"]["sas_output_file"])
+    output = runconfig.parent / Path(groups["product_path_group"]["sas_output_file"]).expanduser()   # where ISCE3 writes
     env = dict(os.environ, KMP_DUPLICATE_LIB_OK="TRUE")
     if threads:
         env["OMP_NUM_THREADS"] = str(int(threads))

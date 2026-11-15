@@ -495,3 +495,35 @@ def test_real_rslc_runconfig(tmp_path):
         assert config["input_file_group"]["input_file_path"]
         assert focus._input_names(r, "l0bGranules")[0].startswith("NISAR_L0_")
         assert any("_EXT_CAL_" in n for n in focus._input_names(r, "auxcalFiles"))
+
+
+def test_a_relative_workdir_is_focused_from_absolute_paths(rslc, inputs, tmp_path, monkeypatch):
+    """ISCE3 runs in the runconfig's folder, so the runconfig and run_focus name every file absolutely."""
+    import os
+    from pathlib import Path
+
+    l0b_dir, anc = inputs
+    monkeypatch.chdir(tmp_path)
+    path = focus.focus_inputs(rslc, "work", l0b_dir=os.path.relpath(l0b_dir), ancillary_dir=os.path.relpath(anc),
+                              dem="dem.tif", download=False)
+    assert path == tmp_path / "work" / "run.yaml"
+    groups = yaml.safe_load(path.read_text())["runconfig"]["groups"]
+    anc_group, out = groups["dynamic_ancillary_file_group"], groups["product_path_group"]
+    named = (groups["input_file_group"]["input_file_path"]
+             + [anc_group[k] for k in ("dem_file", "orbit", "pointing", "external_calibration")]
+             + [out[k] for k in ("sas_output_file", "scratch_path", "product_path")])
+    assert all(Path(p).is_absolute() for p in named) and anc_group["dem_file"] == str(tmp_path / "dem.tif")
+    product = focus.run_focus(Path("work") / "run.yaml", python=_fake_isce3(tmp_path), log=lambda *a: None)
+    assert product == Path(out["sas_output_file"])
+    args = _args(tmp_path)
+    assert args[-1] == str(path) and args[3] == str(tmp_path / "work" / "pulse_times.npz")
+
+
+def test_a_relative_output_is_where_isce3_writes_it(tmp_path):
+    """A runconfig naming its output relatively has it written from the runconfig's folder."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    path = sub / "run.yaml"
+    path.write_text(yaml.safe_dump({"runconfig": {"groups": {"product_path_group": {"sas_output_file": "out.h5"}}}}))
+    np.savez(sub / "pulse_times.npz", x=np.zeros(3))
+    assert focus.run_focus(path, python=_fake_isce3(tmp_path), log=lambda *a: None) == sub / "out.h5"
