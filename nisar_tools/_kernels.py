@@ -1636,6 +1636,19 @@ def snaphu_params_check(igram_shape, ntiles, tile_overlap, min_region_size=100):
         )
 
 
+def kernel_looks(looks, convolution, sigma=None, downsample=True):
+    """The multilook kernel's equivalent number of samples per axis, `(sum w)^2 / sum w^2`.
+
+    `looks` for the boxcar. For the Gaussian (sigma `looks` by default) it is
+    about `2 sqrt(pi) sigma`, 3.5 times `looks`: SNAPHU wants the looks the
+    coherence was actually estimated with, filter included.
+    """
+    if convolution == "Gaussian":
+        taps = _gaussian_taps(looks, sigma, shifted=bool(downsample) and int(looks) % 2 == 0)
+        return float(taps.sum() ** 2 / (taps ** 2).sum())
+    return float(looks)
+
+
 def snaphu_nlooks(looks_az, looks_rg, spacing_az, spacing_rg, res_az, res_rg):
     """Equivalent number of independent looks for SNAPHU. Verbatim.
 

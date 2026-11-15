@@ -99,12 +99,18 @@ class UnwrappedStack(RasterStackMixin):
         overwrite=False, ntiles=None, tile_overlap=None,
         max_tile_pixels=_kernels.DEFAULT_MAX_TILE_PIXELS, min_region_size=100,
         tile_cost_thresh=500, single_tile_reoptimize=True, pairs_in_flight=1, cost="smooth",
+        nlooks=None,
     ):
         """Unwrap every pair with SNAPHU into a region-written, resumable store.
 
         A store already under `name` is resumed when it was made with the same settings from the
         same interferogram (its dates, looks, pairs, masks, filtering, corrections and grid, and the
         store it was read from). Otherwise this raises `WorkspaceError`, unless `overwrite=True`.
+
+        `nlooks` is SNAPHU's equivalent number of looks. By default it is the multilook kernel's (the Gaussian's
+        `(sum w)^2 / sum w^2`, several times its `looks`) times the resolution cells per sample (`res_az`,
+        `res_rg`); it is in the params hash, so a store unwrapped with another value resumes only when that value is
+        passed.
 
         `cost` is SNAPHU's statistical cost mode: `"smooth"` (default) or `"defo"` (deformation: phase
         discontinuities are cheap where coherence is low, for a pair across a coseismic step). An interferogram
@@ -142,9 +148,12 @@ class UnwrappedStack(RasterStackMixin):
         spacing_az = float(ds.attrs.get("y_spacing", 1.0))
         spacing_rg = float(ds.attrs.get("x_spacing", 1.0))
 
-        nlooks = _kernels.snaphu_nlooks(
-            looks, looks, spacing_az, spacing_rg, res_az, res_rg
-        )
+        # The equivalent looks of the multilook kernel (the Gaussian's are several times its `looks`), times the
+        # resolution cells per sample, as SNAPHU defines nlooks; an explicit `nlooks` (an older store's) overrides.
+        per_axis = _kernels.kernel_looks(looks, ds.attrs.get("convolution", "Uniform"), ds.attrs.get("sigma"),
+                                         ds.attrs.get("downsample", True))
+        nlooks = (_kernels.snaphu_nlooks(per_axis, per_axis, spacing_az, spacing_rg, res_az, res_rg)
+                  if nlooks is None else int(nlooks))
         ntiles, overlap = _kernels.snaphu_params(
             (ny, nx), nproc, ntiles=ntiles, tile_overlap=tile_overlap,
             max_tile_pixels=max_tile_pixels, min_region_size=min_region_size,

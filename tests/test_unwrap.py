@@ -508,3 +508,29 @@ def test_add_cycles_carries_into_los(gslc_factory):
     # moves the displacement half a wavelength *away* from the sensor.
     lam = G.radar_wavelength(p)
     np.testing.assert_allclose(bumped - base, -lam / 2.0, rtol=1e-5)
+
+
+def test_snaphu_is_given_the_looks_of_the_multilook_kernel(gslc_factory, tmp_path):
+    """A Gaussian of sigma `looks` averages about 4 pi looks^2 samples, not looks^2; an explicit nlooks overrides."""
+    import json
+
+    gslcs = [GSLC(gslc_factory(ny=80, nx=80, seed=k, datetime_str=f"2025-11-{10 + k:02d}T00:00:00.000000000"))
+             for k in range(2)]
+    stack = GSLCStack.from_gslcs(gslcs).persist(Workspace(tmp_path / "ws0"), "slc_stack")
+    for g in gslcs:
+        g.close()
+    ws = Workspace(tmp_path / "ws")
+
+    def stored_nlooks(name):
+        return json.loads(ws._stored_attr(name, "params"))["nlooks"]
+
+    gaussian = stack.form_interferograms(looks=5, downsample=True, convolution="Gaussian")
+    gaussian.unwrap(ws, name="gaussian", nproc=1)
+    per_axis = _kernels.kernel_looks(5, "Gaussian")
+    assert per_axis == pytest.approx(2 * np.sqrt(np.pi) * 5, rel=0.01)
+    spacing = float(gaussian.ds.attrs["x_spacing"]), float(gaussian.ds.attrs["y_spacing"])
+    assert stored_nlooks("gaussian") == round(per_axis ** 2 * abs(spacing[1]) / 8 * abs(spacing[0]) / 3)
+    stack.form_interferograms(looks=5, downsample=True, convolution="Uniform").unwrap(ws, name="boxcar", nproc=1)
+    assert stored_nlooks("boxcar") == round(25 * abs(spacing[1]) / 8 * abs(spacing[0]) / 3)
+    gaussian.unwrap(ws, name="older", nproc=1, nlooks=7)
+    assert stored_nlooks("older") == 7
