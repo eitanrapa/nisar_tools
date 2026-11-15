@@ -538,8 +538,10 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
                                                gap_phase=None if gaps is None else gaps.phase)
     k = line_index - line_index[0]
     d = utc - model
-    pri_before = np.r_[np.nan, np.diff(model)]               # the interval before each echo
-    pri_after = np.r_[np.diff(model), np.nan]
+    # the intervals before and after each echo's pulse, from the table: the first echo can be early and the last
+    # late too, as a slip continued from the datatake before or into the next
+    pri_before = table[(phase + k - 1) % table.size] * (1.0 + drift)
+    pri_after = table[(phase + k) % table.size] * (1.0 + drift)
     kind = np.full(utc.size, INCONSISTENT, np.int8)
     kind[np.abs(d + pri_before) < tolerance] = EARLY          # tagged with the previous pulse's time
     kind[np.abs(d - pri_after) < tolerance] = LATE            # the next pulse's

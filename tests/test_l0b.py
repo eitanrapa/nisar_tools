@@ -398,3 +398,16 @@ def test_empty_echoes_leave_the_phase_to_the_sub_swath_limits(tmp_path, table):
     assert not l0b.tx_leakage_phase(path).clear
     pt = l0b.pulse_timing(path)
     assert pt.phase_source == "sub-swaths" and pt.table_phase == 64 and np.max(np.abs(pt.corrected - true)) < 1e-9
+
+
+def test_a_slip_through_either_end_of_the_l0b_is_still_a_slip(tmp_path, table):
+    """An L0B starts and ends mid-datatake, so a run of mislabelled tags can begin at its first echo or end at its last."""
+    true = _true_times(30000, 1000.0, table)
+    utc = true.copy()
+    utc[1:3000] = true[:2999]                                    # from the start: the previous pulse's time ...
+    utc[0] = true[0] - table[(37 - 1) % table.size] * (1 + 0.12e-6)   # ... the first echo's too
+    utc[29600:-1] = true[29601:]                                  # to the end: the next pulse's time ...
+    utc[-1] = true[-1] + table[(37 + true.size - 1) % table.size] * (1 + 0.12e-6)
+    pt = l0b.pulse_timing(_write_l0b(tmp_path / "ends.h5", utc, table), echoes=False)
+    assert [(s["code"], s["first"], s["count"]) for s in pt.segments()] == [(l0b.EARLY, 0, 3000), (l0b.LATE, 29600, 400)]
+    assert np.max(np.abs(pt.corrected - true)) < 1e-9
