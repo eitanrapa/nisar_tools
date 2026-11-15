@@ -598,3 +598,22 @@ def test_correct_ionosphere_refers_its_screen_to_the_stacks_own_carrier():
         np.testing.assert_allclose(out.ds["unw"].values[0], psi, atol=1e-4)
     with pytest.raises(ValueError, match="leave \\+4.2% of the ionosphere"):
         a.correct_ionosphere(b, scale=0, remove_offset=False, reference_frequency=fb)
+
+
+def test_a_screen_a_pixel_off_the_grid_is_interpolated():
+    """On a UTM northing numpy's default tolerance is tens of metres; a grid 50 m off is not the same grid."""
+    y = 5_350_000.0 - 50.0 * np.arange(40)
+    x = 600_000.0 + 50.0 * np.arange(50)
+
+    def plane(yy, xx):
+        Y, X = np.meshgrid(yy, xx, indexing="ij")
+        return 1e-3 * (Y - 5_349_000.0) + 2e-3 * (X - 601_000.0)
+
+    off = xr.DataArray(plane(y - 50.0, x)[None], dims=("pair", "y", "x"), coords={"y": y - 50.0, "x": x})
+    got = iono.interp_to_grid(off, y, x).values[0]
+    np.testing.assert_allclose(got[1:], plane(y, x)[1:], atol=1e-9)
+    assert np.isnan(got[0]).all()                            # beyond the screen's grid
+    last_bit = xr.DataArray(plane(y, x)[None], dims=("pair", "y", "x"), coords={"y": y + 1e-9, "x": x})
+    same = iono.interp_to_grid(last_bit, y, x)
+    np.testing.assert_array_equal(same["y"].values, y)
+    np.testing.assert_array_equal(same.values[0], plane(y, x))

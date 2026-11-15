@@ -233,8 +233,11 @@ def interp_to_grid(field, y, x):
         # A bare array of the right shape is taken to be on the grid already.
         on_grid = True
     else:
-        on_grid = (np.allclose(field["y"].values, y)
-                   and np.allclose(field["x"].values, x))
+        # to a millionth of a pixel, not relative to the coordinates: on a UTM northing numpy's default tolerance is
+        # tens of metres, a whole pixel
+        step = min((float(np.min(np.abs(np.diff(v)))) for v in (y, x) if len(v) > 1), default=1.0)
+        on_grid = (np.allclose(field["y"].values, y, rtol=0.0, atol=1e-6 * step)
+                   and np.allclose(field["x"].values, x, rtol=0.0, atol=1e-6 * step))
     if on_grid:
         # Reassign rather than trust: xarray aligns arithmetic on coordinate
         # *values*, so two lattices that differ in the last bit would inner-join
