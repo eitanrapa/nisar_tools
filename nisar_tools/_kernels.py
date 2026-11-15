@@ -1071,13 +1071,16 @@ def _batch_planes(func, arr, **kwargs):
     if arr.ndim == 2:
         return func(arr, **kwargs)
     flat = arr.reshape((-1,) + arr.shape[-2:])
-    out = np.empty_like(flat)
+    out = None
     for k in range(flat.shape[0]):
-        out[k] = func(flat[k], **kwargs)
-    return out.reshape(arr.shape)
+        plane = func(flat[k], **kwargs)
+        if out is None:
+            out = np.empty(flat.shape, np.asarray(plane).dtype)
+        out[k] = plane
+    return (np.empty_like(flat) if out is None else out).reshape(arr.shape)
 
 
-def halo_planes(func, arr, depth, **kwargs):
+def halo_planes(func, arr, depth, out_dtype=None, **kwargs):
     """Apply a 2D-plane `func` over `arr` with a `depth`-pixel spatial halo.
 
     Decomposes a local plane kernel spatially instead of forcing one whole plane
@@ -1095,22 +1098,26 @@ def halo_planes(func, arr, depth, **kwargs):
     case collapses to one whole plane per task, which is what a globally
     supported kernel (`deramp(method="spline")` at its default scale) always
     wants anyway.
+
+    `out_dtype` is the kernel's output type, when not the input's.
     """
     if not _is_dask(arr):
         return _batch_planes(func, arr, **kwargs)
 
     ndim = arr.ndim
     depth = int(depth)
+    dtype = arr.dtype if out_dtype is None else np.dtype(out_dtype)
+    meta = arr._meta if out_dtype is None else np.empty((0,) * ndim, dtype)
     if depth >= min(arr.shape[-2:]):
         arr = arr.rechunk({ndim - 2: -1, ndim - 1: -1})
         return arr.map_blocks(
             lambda block: _batch_planes(func, block, **kwargs),
-            dtype=arr.dtype, meta=arr._meta,
+            dtype=dtype, meta=meta,
         )
     return arr.map_overlap(
         lambda block: _batch_planes(func, block, **kwargs),
         depth={ndim - 2: depth, ndim - 1: depth},
-        boundary=np.nan, dtype=arr.dtype, meta=arr._meta,
+        boundary=np.nan, dtype=dtype, meta=meta,
     )
 
 
@@ -1172,6 +1179,46 @@ def remove_unconnected_regions_planes(arr, *, min_size=None, connectivity=1,
     return _batch_planes(remove_unconnected_regions, arr, min_size=min_size,
                          connectivity=connectivity,
                          max_drop_fraction=max_drop_fraction)
+
+
+def dropped_component_sizes(field, min_size, connectivity=1):
+    """The size of each pixel's component where `remove_unconnected_regions(min_size=)` drops it, else 0.
+
+    Exact on a block padded by `unconnected_regions_depth(min_size)`, by the argument given there, so a plane's
+    largest dropped component is the largest value over its blocks and its guard can be the whole plane's.
+    """
+    if connectivity not in (1, 2):
+        raise ValueError(f"connectivity must be 1 or 2, got {connectivity!r}")
+    lab, n = label(np.isfinite(np.asarray(field)), structure=generate_binary_structure(2, connectivity))
+    sizes = np.bincount(lab.ravel(), minlength=n + 1)
+    sizes[0] = 0
+    sizes[sizes > int(min_size)] = 0
+    return sizes[lab].astype(np.int64)
+
+
+def dropped_component_sizes_planes(arr, *, min_size, connectivity=1):
+    return _batch_planes(dropped_component_sizes, arr, min_size=min_size, connectivity=connectivity)
+
+
+def drop_guard(biggest, n_valid, dropped, components, max_drop_fraction):
+    """`remove_unconnected_regions`' guard for whole planes from their totals: True per plane, or raise.
+
+    `biggest` is each plane's largest dropped component, `n_valid` its valid pixels, `dropped` the pixels dropped
+    and `components` how many components they make.
+    """
+    biggest, n_valid = np.asarray(biggest), np.asarray(n_valid)
+    for b, n, d, c in zip(biggest.ravel(), n_valid.ravel(), np.ravel(dropped), np.ravel(components)):
+        if n and b / n > float(max_drop_fraction):
+            raise ValueError(
+                f"remove_unconnected_regions would drop a component of "
+                f"{int(b)} pixels ({b / n:.2%} of the {int(n)} valid "
+                f"pixels), above max_drop_fraction={max_drop_fraction:g}; "
+                f"{int(round(float(c)))} components totalling {int(d)} "
+                f"pixels are unconnected. If this scene really is two "
+                f"landmasses, keep both with min_size=; otherwise raise "
+                f"max_drop_fraction= to confirm the removal."
+            )
+    return np.ones(biggest.shape, bool)
 
 
 def unconnected_regions_depth(min_size, ny, nx):

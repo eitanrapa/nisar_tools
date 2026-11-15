@@ -104,7 +104,7 @@ def wrapped_phase(da):
     )
 
 
-def plane_kernel(func, field, depth, target_blocks=None, **kwargs):
+def plane_kernel(func, field, depth, target_blocks=None, out_dtype=None, **kwargs):
     """Run a 2-D plane kernel over a `(stack, y, x)` DataArray, chunk by chunk.
 
     Wraps `_kernels.halo_planes`, which overlaps the spatial axes by
@@ -131,11 +131,38 @@ def plane_kernel(func, field, depth, target_blocks=None, **kwargs):
             field = field.chunk(
                 {field.dims[0]: 1, "y": working[0], "x": working[1]}
             )
-    data = _kernels.halo_planes(func, field.data, depth, **kwargs)
+    data = _kernels.halo_planes(func, field.data, depth, out_dtype=out_dtype, **kwargs)
     return xr.DataArray(
         data, dims=field.dims, coords=field.coords, attrs=field.attrs,
         name=field.name,
     )
+
+
+def unconnected_regions_removed(field, min_size=None, connectivity=1, max_drop_fraction=0.01,
+                                target_blocks=None):
+    """`field` with `_kernels.remove_unconnected_regions` applied to each plane, its guard on the whole plane.
+
+    Keeping the largest component needs whole planes, and they carry their own guard. `min_size=N` runs in blocks
+    with an `N`-pixel halo, where a block's valid pixels are not its plane's: the blocks map each dropped pixel's
+    component size, exact under that halo, and the guard is applied to each plane's totals.
+    """
+    depth = _kernels.unconnected_regions_depth(min_size, field.sizes["y"], field.sizes["x"])
+    if min_size is None:
+        return plane_kernel(_kernels.remove_unconnected_regions_planes, field, depth=depth,
+                            target_blocks=target_blocks, min_size=None, connectivity=connectivity,
+                            max_drop_fraction=max_drop_fraction)
+    sizes = plane_kernel(_kernels.dropped_component_sizes_planes, field, depth=depth, target_blocks=target_blocks,
+                         out_dtype=np.int64, min_size=min_size, connectivity=connectivity)
+    keep = sizes == 0
+    if max_drop_fraction is not None:
+        dropped = sizes > 0
+        ok = xr.apply_ufunc(
+            _kernels.drop_guard, sizes.max(("y", "x")), field.notnull().sum(("y", "x")),
+            dropped.sum(("y", "x")), (1.0 / sizes.where(dropped)).sum(("y", "x")),
+            kwargs={"max_drop_fraction": max_drop_fraction}, dask="parallelized", output_dtypes=[bool],
+        )
+        keep = keep & ok
+    return field.where(keep)
 
 
 def row_plane_kernel(func, field, target_blocks=None, whole="x", **kwargs):

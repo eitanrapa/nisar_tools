@@ -347,3 +347,52 @@ def test_cleaning_changes_the_persist_hash(tmp_path):
 
     with pytest.raises(WorkspaceError, match="different parameters"):
         _igram_stack().remove_unconnected_regions().persist(ws, "igrams")
+
+
+def _islet_stack(chunks):
+    """A mainland west, open water east, and a 30-pixel islet far out in the water."""
+    da = pytest.importorskip("dask.array")
+    igram = np.full((1, 400, 400), np.nan, np.complex64)
+    igram[0, :, :200] = 1 + 0j
+    igram[0, 200:206, 350:355] = 2 + 0j
+    coherence = np.where(np.isfinite(igram.real), 0.8, 0.0).astype(np.float32)
+    ds = xr.Dataset(
+        {"igram": (("pair", "y", "x"), da.from_array(igram, chunks=chunks)),
+         "coherence": (("pair", "y", "x"), da.from_array(coherence, chunks=chunks))},
+        coords={"pair": [0], "y": np.arange(400) * 50.0, "x": np.arange(400) * 50.0},
+        attrs={"epsg": 32611, "looks": 10, "pairs": [[0, 1]]},
+    )
+    return InterferogramStack(ds), igram[0]
+
+
+@pytest.mark.parametrize("target_blocks", [1, 16, None])
+def test_the_min_size_guard_is_the_planes_not_a_blocks(target_blocks):
+    """The islet is 30 of the plane's 80030 valid pixels, though nearly all of its own block's."""
+    stack, plane = _islet_stack((1, 400, 400))
+    out = stack.remove_unconnected_regions(min_size=40, target_blocks=target_blocks)
+    got = out.ds["igram"].isel(pair=0).values
+    want = remove_unconnected_regions(plane, min_size=40)
+    assert got.dtype == np.complex64
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(want))
+    np.testing.assert_array_equal(got[np.isfinite(want)], want[np.isfinite(want)])
+    assert np.isnan(got[200:206, 350:355]).all() and np.isfinite(got[:, :200]).all()
+
+
+@pytest.mark.parametrize("target_blocks", [1, 16])
+def test_the_min_size_guard_still_refuses_what_the_plane_would(target_blocks):
+    """Above the fraction of the plane's valid pixels it raises, when the graph runs, whatever the chunking."""
+    stack, plane = _islet_stack((1, 400, 400))
+    with pytest.raises(ValueError, match="max_drop_fraction"):
+        remove_unconnected_regions(plane, min_size=40, max_drop_fraction=1e-4)
+    out = stack.remove_unconnected_regions(min_size=40, max_drop_fraction=1e-4, target_blocks=target_blocks)
+    with pytest.raises(ValueError, match="30 pixels .0.04% of the 80030 valid pixels"):
+        out.ds["igram"].compute()
+
+
+def test_the_unwrapped_method_takes_the_planes_guard_too():
+    stack, plane = _islet_stack((1, 400, 400))
+    unw = xr.Dataset({"unw": (("pair", "y", "x"), stack.ds["igram"].real.astype(np.float32).data)},
+                     coords=stack.ds.coords, attrs={"epsg": 32611})
+    got = UnwrappedStack(unw).remove_unconnected_regions(min_size=40, target_blocks=16).ds["unw"].values[0]
+    assert got.dtype == np.float32
+    assert np.isnan(got[200:206, 350:355]).all() and np.isfinite(got[:, :200]).all()

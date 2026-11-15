@@ -44,6 +44,7 @@ from ._base import (
     match_pairs as _match_pairs,
     open_stage,
     plane_kernel as _plane_kernel,
+    unconnected_regions_removed,
 )
 
 # -- NASA GUNW HDF5 layout (verified from real granules) ----------------------
@@ -503,14 +504,9 @@ class UnwrappedStack(RasterStackMixin):
         See the interferogram method for `min_size`, `connectivity` and
         `max_drop_fraction`.
         """
-        unw = self.ds["unw"]
-        cleaned = _plane_kernel(
-            _kernels.remove_unconnected_regions_planes, unw,
-            depth=_kernels.unconnected_regions_depth(
-                min_size, unw.sizes["y"], unw.sizes["x"]
-            ),
-            target_blocks=target_blocks, min_size=min_size,
-            connectivity=connectivity, max_drop_fraction=max_drop_fraction,
+        cleaned = unconnected_regions_removed(
+            self.ds["unw"], min_size=min_size, connectivity=connectivity,
+            max_drop_fraction=max_drop_fraction, target_blocks=target_blocks,
         )
         ds = self.ds.copy()
         ds["unw"] = cleaned

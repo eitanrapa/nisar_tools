@@ -19,6 +19,7 @@ from ._base import (
     masked_edges,
     open_stage,
     plane_kernel,
+    unconnected_regions_removed,
     wrapped_phase,
 )
 
@@ -333,7 +334,8 @@ class InterferogramStack(RasterStackMixin):
         `max_drop_fraction` refuses to blank a real landmass -- see
         `nisar_tools._kernels.remove_unconnected_regions` for why the guard
         is on the largest single dropped component rather than the total, and for
-        the `connectivity` convention.
+        the `connectivity` convention. It is a fraction of the plane's valid
+        pixels, whatever the chunking.
 
         Both `igram` and `coherence` are masked, so the two stay consistent
         (the same thing `mask_water` does). Lazy: nothing is written until
@@ -341,14 +343,9 @@ class InterferogramStack(RasterStackMixin):
         this is called -- an eager check would mean a whole extra pass over the
         stack.
         """
-        igram = self.ds["igram"]
-        depth = _kernels.unconnected_regions_depth(
-            min_size, igram.sizes["y"], igram.sizes["x"]
-        )
-        cleaned = plane_kernel(
-            _kernels.remove_unconnected_regions_planes, igram, depth=depth,
-            target_blocks=target_blocks, min_size=min_size,
-            connectivity=connectivity, max_drop_fraction=max_drop_fraction,
+        cleaned = unconnected_regions_removed(
+            self.ds["igram"], min_size=min_size, connectivity=connectivity,
+            max_drop_fraction=max_drop_fraction, target_blocks=target_blocks,
         )
 
         ds = self.ds.copy()
