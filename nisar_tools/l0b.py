@@ -354,8 +354,12 @@ class LeakagePhase:
 
     @property
     def clear(self):
-        """The phase stands out: its ratio is at least 1.3 times any other phase's."""
-        return self.ratio >= 1.3 * self.runner_up
+        """The phase stands out: above the echoes' mean (a ratio over 1) and at least 1.3 times any other phase's.
+
+        Echoes with no leakage in them (empty lines, or the wrong data) give every phase the same ratio, 0 or
+        about 1, and must not decide the pulse times.
+        """
+        return self.ratio > 1.0 and self.ratio >= 1.3 * self.runner_up
 
     def summary(self):
         """One line, for logs."""
@@ -417,7 +421,8 @@ def tx_leakage_phase(source, frequency="A", count=200, tx=None, leak=38.52e-6, s
         line0 = int(lines[0])
         k = np.asarray(lines[sel], np.int64) - line0
         rx = tx[sorted(key for key in tx if key.startswith("rx"))[0]]
-        data = rx[sorted(key for key in rx if len(key) == 2 and key.isupper())[0]]
+        # the echoes are named by the transmit and receive polarisations; the group holds other two-letter tables
+        data = rx[tx.name.rsplit("/", 1)[-1][2:] + rx.name.rsplit("/", 1)[-1][2:]]
         a = _echo_amplitude(data, sel, rx["BFPQLUT"][()] if "BFPQLUT" in rx else None)
         r = tx["slantRange"]
         r0, dr = float(r[0]), float(r[1] - r[0])

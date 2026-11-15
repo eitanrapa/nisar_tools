@@ -342,3 +342,59 @@ def test_the_echoes_transmit_leakage_overrules_the_sub_swath_limits(tmp_path, ta
     assert lp.phase == 64 and lp.clear and abs(lp.offset + 250) <= 40
     pt = l0b.pulse_timing(path)
     assert pt.phase_source == "leakage" and pt.table_phase == 64 and np.max(np.abs(pt.corrected - true)) < 1e-9
+
+
+def _leakage_l0b(path, table, tx="txH", rx="rxH", leak_phase=64, gap_phase=108, empty=False):
+    """An L0B whose echoes leak at `leak_phase` (or are empty) and whose sub-swath limits follow `gap_phase`, with
+    the range-line tables a real receive group holds beside its echoes."""
+    true = _true_times(1200, 1000.0, table, phase=leak_phase, drift=0.0)
+    with h5py.File(path, "w") as f:
+        f["science/LSAR/identification/granuleId"] = np.bytes_("NISAR_L0_PR_RRSD_TEST")
+        g = f.create_group(f"science/LSAR/RRSD/swaths/frequencyA/{tx}")
+        g["UTCtime"] = true
+        g["UTCtime"].attrs["units"] = np.bytes_(UNITS)
+        g["rangeLineIndex"] = (4334 + np.arange(true.size)).astype(np.uint32)
+        g["PRISequence"] = table
+        g["calType"] = np.zeros(true.size, np.uint8)
+    r0, dr, n_samples = 888836.24, 3.1228381041437387, 20000
+    fs, tau0 = 299792458.0 / (2 * dr), 2 * r0 / 299792458.0
+    cum = np.concatenate([[0.0], np.cumsum(np.tile(table, 20))])
+    rng = np.random.default_rng(5)
+    echoes = (rng.normal(size=(true.size, n_samples)) + 1j * rng.normal(size=(true.size, n_samples))).astype(np.complex64)
+    sub = np.full((5, true.size, 2), np.iinfo(np.uint32).max, np.uint32)
+    for kk in range(true.size):
+        leak = np.round((cum[kk + leak_phase + np.arange(1, 20)] - cum[kk + leak_phase] - tau0) * fs - 250).astype(int)
+        for s0 in leak[(leak > 0) & (leak < n_samples - 1849)]:
+            echoes[kk, s0:s0 + 1849] *= 7.0
+        gaps = np.round((cum[kk + gap_phase + np.arange(1, 20)] - cum[kk + gap_phase] - tau0) * fs - 14.5)
+        gaps = gaps[(gaps > 600) & (gaps < n_samples - 2000)]
+        edges = [509] + [v for e in gaps for v in (e, e + 1849)] + [n_samples]
+        for i in range(min(5, len(edges) // 2)):
+            sub[i, kk] = edges[2 * i], edges[2 * i + 1]
+    with h5py.File(path, "r+") as f:
+        g = f[f"science/LSAR/RRSD/swaths/frequencyA/{tx}"]
+        g["numberOfSubSwaths"] = 5
+        for i in range(5):
+            g[f"validSamplesSubSwath{i + 1}"] = sub[i]
+        g["slantRange"] = r0 + dr * np.arange(n_samples)
+        g[f"{rx}/{tx[2:]}{rx[2:]}"] = np.zeros_like(echoes) if empty else echoes
+        for table_name in ("RD", "WD", "WL"):                # these sort before VH, VV and RH
+            g[f"{rx}/{table_name}"] = np.full((true.size, 12), 1403230, np.uint32)
+    return path, true
+
+
+@pytest.mark.parametrize("tx, rx", [("txH", "rxH"), ("txV", "rxH"), ("txV", "rxV"), ("txR", "rxH")])
+def test_the_leakage_is_read_from_the_transmits_own_echoes(tmp_path, table, tx, rx):
+    path, true = _leakage_l0b(tmp_path / "leak.h5", table, tx=tx, rx=rx)
+    lp = l0b.tx_leakage_phase(path)
+    assert lp.phase == 64 and lp.clear
+    pt = l0b.pulse_timing(path)
+    assert pt.table_phase == 64 and np.max(np.abs(pt.corrected - true)) < 1e-9
+
+
+def test_empty_echoes_leave_the_phase_to_the_sub_swath_limits(tmp_path, table):
+    """No leakage to read is no evidence: the limits, which follow the table, decide."""
+    path, true = _leakage_l0b(tmp_path / "empty.h5", table, leak_phase=64, gap_phase=64, empty=True)
+    assert not l0b.tx_leakage_phase(path).clear
+    pt = l0b.pulse_timing(path)
+    assert pt.phase_source == "sub-swaths" and pt.table_phase == 64 and np.max(np.abs(pt.corrected - true)) < 1e-9
