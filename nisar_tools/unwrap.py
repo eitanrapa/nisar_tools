@@ -686,7 +686,9 @@ class UnwrappedStack(RasterStackMixin):
                 "Pass replace=True to overwrite it with the dual-frequency "
                 "estimate."
             )
-        if self.ds.attrs.get("phase_screen_removed"):
+        # a store unwrapped before the screen was carried still records its interferogram's
+        if self.ds.attrs.get("phase_screen_removed") or json.loads(
+                self.ds.attrs.get("provenance") or "{}").get("ionosphere") is not None:
             raise ValueError(
                 "A phase screen has already been removed from this stack; "
                 "correcting again would subtract a second one."
@@ -1299,4 +1301,8 @@ def _template(igram_ds, npair, ny, nx):
     for key in ("frequency", "center_frequency", "wavelength"):
         if igram_ds.attrs.get(key) is not None:
             template.attrs[key] = igram_ds.attrs[key]
+    # A screen removed from the wrapped phase is in the unwrapped phase's past too: a second one is refused.
+    if igram_ds.attrs.get("ionosphere") is not None:
+        template.attrs["ionosphere"] = igram_ds.attrs["ionosphere"]
+        template.attrs["phase_screen_removed"] = True
     return template

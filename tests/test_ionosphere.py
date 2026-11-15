@@ -553,3 +553,23 @@ def test_a_screen_is_applied_to_its_own_pairs():
         ig.correct_ionosphere(screen(t[[1, 2]], t[[2, 3]]))           # other pairs
     by_position = ig.correct_ionosphere(values)
     np.testing.assert_allclose(np.angle(by_position.ds["igram"].values[:, 0, 0]), [-2.0, -1.0], atol=1e-6)
+
+
+def test_a_screen_removed_before_unwrapping_is_not_removed_again(gslc_factory, tmp_path):
+    from nisar_tools import Workspace
+
+    ws = Workspace(tmp_path / "ws")
+    gslcs = [GSLC(gslc_factory(ny=60, nx=60, seed=k, datetime_str=f"2025-01-{1 + 12 * k:02d}T00:00:00.000000000"))
+             for k in range(2)]
+    ig = GSLCStack.from_gslcs(gslcs).persist(ws, "slc").form_interferograms(looks=3)
+    corrected = ig.correct_ionosphere(xr.zeros_like(ig.ds["coherence"], dtype=np.float32) + 0.7)
+    unw = corrected.unwrap(ws, name="unw", nproc=1)
+    assert unw.ds.attrs["phase_screen_removed"] and unw.ds.attrs["ionosphere"]["applied"] == "wrapped"
+    other = UnwrappedStack(xr.Dataset({"unw": unw.ds["unw"].load() * 0, "coherence": unw.ds["coherence"].load()},
+                                      attrs={**unw.ds.attrs, "center_frequency": 1.2935e9}))
+    with pytest.raises(ValueError, match="already been removed"):
+        unw.correct_ionosphere(other, scale=0)
+    # a store unwrapped before the screen was carried: its record of the interferogram still says so
+    older = UnwrappedStack(unw.ds.assign_attrs(phase_screen_removed=False, ionosphere=None))
+    with pytest.raises(ValueError, match="already been removed"):
+        older.correct_ionosphere(other, scale=0)
