@@ -363,6 +363,22 @@ def test_merge_rejects_unpairable_times(gslc_factory):
     g3.close()
 
 
+@pytest.mark.parametrize("convolution", ["Uniform", "Gaussian"])
+@pytest.mark.parametrize("downsample", [False, True])
+def test_a_loaded_stack_forms_the_same_interferograms(gslc_factory, convolution, downsample):
+    """In memory, the pairs are multilooked one plane at a time, as the dask path does."""
+    gslcs = [GSLC(gslc_factory(ny=40, nx=50, seed=k, datetime_str=f"2025-11-{10 + k:02d}T00:00:00.000000000"))
+             for k in range(4)]
+    stack = GSLCStack.from_gslcs(gslcs)
+    lazy = stack.form_interferograms(pairs="sequential", looks=5, downsample=downsample, convolution=convolution)
+    loaded = GSLCStack(stack.ds.load()).form_interferograms(pairs="sequential", looks=5, downsample=downsample,
+                                                            convolution=convolution)
+    for name in ("igram", "coherence"):
+        np.testing.assert_allclose(loaded.ds[name].values, lazy.ds[name].values, rtol=1e-5, atol=1e-6)
+    for g in gslcs:
+        g.close()
+
+
 def test_persist_refuses_another_band_or_polarization(gslc_factory, tmp_path):
     """A granule holds both bands and every polarization, so its files cannot tell the stores apart."""
     import h5py

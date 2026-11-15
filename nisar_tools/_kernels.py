@@ -66,9 +66,25 @@ def _multilook_many(arrays, max_x, max_y, looks, downsample, convolution, *, sig
         )
         return [stacked[i] for i in range(len(arrays))]
     return [
-        multilook(arr, max_x, max_y, looks, downsample, convolution, sigma=sigma)
+        _multilook_planes(arr, max_x, max_y, looks, downsample, convolution, sigma=sigma)
         for arr in arrays
     ]
+
+
+def _multilook_planes(arr, max_x, max_y, looks, downsample, convolution, *, sigma=None):
+    """`multilook` on each trailing plane of a numpy array.
+
+    The legacy kernel filters every axis and slices the first two, so a stacked
+    (pair) axis is looped over, as `multilook_dask` leaves it alone.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        return multilook(arr, max_x, max_y, looks, downsample, convolution, sigma=sigma)
+    flat = arr.reshape((-1,) + arr.shape[-2:])
+    planes = [multilook(p, max_x, max_y, looks, downsample, convolution, sigma=sigma)
+              for p in (flat if flat.shape[0] else np.zeros((1,) + flat.shape[1:], arr.dtype))]
+    out = np.stack(planes)[: flat.shape[0]]
+    return out.reshape(arr.shape[:-2] + out.shape[-2:])
 
 
 def _fillna_zero(arr):
@@ -302,7 +318,7 @@ def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
         raw_int1 = np.abs(c1) ** 2
         raw_int2 = np.abs(c2) ** 2
 
-        ml = multilook_dask if _is_dask(raw_interf) else multilook
+        ml = multilook_dask if _is_dask(raw_interf) else _multilook_planes
         ml_interf = ml(raw_interf, max_x, max_y, looks, downsample, convolution, sigma=sigma)
         ml_int1 = ml(raw_int1, max_x, max_y, looks, downsample, convolution, sigma=sigma)
         ml_int2 = ml(raw_int2, max_x, max_y, looks, downsample, convolution, sigma=sigma)
@@ -321,7 +337,7 @@ def igram_coherence(c1, c2, max_x, max_y, looks, downsample, convolution,
     valid = np.isfinite(c1) & np.isfinite(c2)
     mask = valid.astype(np.float32)
 
-    ml = multilook_dask if _is_dask(c1) else multilook
+    ml = multilook_dask if _is_dask(c1) else _multilook_planes
 
     def _ml(arr):
         return ml(arr, max_x, max_y, looks, downsample, convolution, sigma=sigma)
