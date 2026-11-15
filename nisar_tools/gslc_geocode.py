@@ -351,9 +351,12 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         geolocation correction; see `nisar_tools.download.download_tec`.
     solid_earth_tides : bool
         Apply the solid Earth tide correction (needs `pysolid`).
-    registration : callable, optional
-        `registration(x, y) -> (lines, samples)`: extra fractional radar
-        shifts for output pixels at map `x`, `y` (output projection),
+    registration : callable or dict, optional
+        `registration(x, y) -> (lines, samples)`, or `{frequency: registration}`:
+        extra fractional radar shifts, in that band's own lines and samples, for
+        output pixels at map `x`, `y` (output projection). The bands' range
+        samples differ (band B's are about 8 times A's), so one callable is taken
+        only when a single band is geocoded;
         added after the timing corrections and before interpolation; the
         flattening range is not changed. Usually a `RegistrationField`
         built from dense offsets, to make this GSLC the coregistered
@@ -413,6 +416,13 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
 
     freq_pols = _select(rslc, frequencies, polarizations)
     first = sorted(freq_pols)[0]
+    if registration is not None and not isinstance(registration, dict):
+        if len(freq_pols) > 1:
+            raise ValueError(
+                f"registration shifts are in one band's lines and samples, and bands {sorted(freq_pols)} are "
+                "geocoded: pass registration={band: field} with one field per band, or geocode one band at a time "
+                "(frequencies=)")
+        registration = {first: registration}
     orbit = load_orbit(rslc, orbit_file)
     if like is not None:
         if bounds is not None or epsg is not None:
@@ -453,7 +463,7 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             stats.update(_geocode_frequency(
                 f, rslc, freq, pols, grids[freq], grid, orbit, dem_interp,
                 corrections[freq], flatten, block_size, workers, log, bands,
-                registration=registration, range_shift=(range_shift or {}).get(freq),
+                registration=(registration or {}).get(freq), range_shift=(range_shift or {}).get(freq),
                 azimuth_shift=azimuth_shift, fix_metadata=fix_metadata, fix_pixels=fix_pixels))
         for (freq, pol), st in stats.items():
             st.write(f[f"{gp.PRODUCT}/grids/frequency{freq}/{pol}"])
@@ -466,8 +476,8 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             software=SOFTWARE_VERSION, input_file=rslc.path, output_file=str(output),
             dem_file=dem, orbit_file=orbit_file, tec_file=tec_file,
             solid_earth_tides=solid_earth_tides, flatten=flatten,
-            registration=None if registration is None else getattr(
-                registration, "description", type(registration).__name__),
+            registration=None if not registration else {
+                k: getattr(v, "description", type(v).__name__) for k, v in registration.items() if k in freq_pols},
             range_shift=None if not range_shift else {
                 k: _describe(v) for k, v in range_shift.items() if k in freq_pols},
             azimuth_shift=None if azimuth_shift is None else _describe(azimuth_shift),

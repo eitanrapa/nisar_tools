@@ -54,13 +54,20 @@ from nisar_tools import RegistrationField, geocode_rslc
 
 # Offsets measured between the two RSLCs, interpolated onto a regular map grid x, y
 # (output projection): along_track and slant_range in metres, finite everywhere.
-field = RegistrationField.from_offsets(
-    x, y, along_track, slant_range,
-    along_track_spacing=..., range_spacing=...,    # metres per line and per sample
-)
+# Each band takes them in its own lines and samples.
+fields = {
+    "A": RegistrationField.from_offsets(x, y, along_track, slant_range,
+                                        along_track_spacing=..., range_spacing=...),  # band A's metres per line, sample
+    "B": RegistrationField.from_offsets(x, y, along_track, slant_range,
+                                        along_track_spacing=..., range_spacing=...),  # band B's
+}
 secondary = geocode_rslc("data/<date 2 RSLC>.h5", "data/", dem,
-                         like="data/<date 1 GSLC>.h5", registration=field)
+                         like="data/<date 1 GSLC>.h5", registration=fields)
 ```
+
+- The shifts are in each band's own lines and samples, and band B's range samples are about 8 times A's, so
+  `registration` takes one field per band. A single field is accepted only when one band is geocoded
+  (`frequencies=`).
 
 - `RegistrationField(x, y, lines, samples)` takes the shifts in radar lines and samples directly. It is evaluated
   bilinearly, and beyond its grid it takes the nearest edge node. Fill gaps before building one.

@@ -199,3 +199,101 @@ def test_geocoding_repairs_the_mask_unless_isce3s_masks_are_kept():
     assert _valid_samples(Rslc(), "A", True, Report())[0][4].tolist() == [1, 51]
     assert _valid_samples(Rslc(), "A", True, lambda t: 0.0 * t)[0][4].tolist() == [0, 50]
     assert _valid_samples(Rslc(), "A", False, Report())[0][4].tolist() == [0, 10]
+
+
+def _two_band_rslc(tmp_path):
+    """A small two-band RSLC (band B's range samples 8 times A's) and a flat DEM covering it."""
+    import h5py
+    import rasterio
+    from rasterio.transform import from_origin
+
+    orbit = rs.orbit()
+    grid = rs.radar_grid(length=120, width=160)
+    path = tmp_path / "NISAR_L1_PR_RSLC_023_126_D_083_4005_DHDH_A_20260622T225416_20260622T225450_P05023_N_F_J_002.h5"
+    epoch = radar.epoch_units(rs.EPOCH)
+    rng = np.random.default_rng(0)
+    with h5py.File(path, "w") as f:
+        ident = f.create_group("science/LSAR/identification")
+        ident["lookDirection"] = np.bytes_("Left")
+        ident["orbitPassDirection"] = np.bytes_("Descending")
+        ident["granuleId"] = np.bytes_(path.stem)
+        ident["listOfFrequencies"] = np.array([b"A", b"B"])
+        root = f.create_group("science/LSAR/RSLC")
+        sw = root.create_group("swaths")
+        sw["zeroDopplerTime"] = grid.sensing_start + np.arange(grid.length) / grid.prf
+        sw["zeroDopplerTime"].attrs["units"] = np.bytes_(epoch)
+        sw["zeroDopplerTimeSpacing"] = 1.0 / grid.prf
+        par = root.create_group("metadata/processingInformation/parameters")
+        par["zeroDopplerTime"] = np.linspace(grid.sensing_start - 1, grid.sensing_stop + 1, 6)
+        par["slantRange"] = np.linspace(grid.starting_range - 100, grid.end_range + 100, 5)
+        for band, factor, bandwidth in (("A", 1, 40e6), ("B", 8, 5e6)):
+            width = grid.width // factor
+            fb = sw.create_group(f"frequency{band}")
+            fb["listOfPolarizations"] = np.array([b"HH"])
+            fb["slantRange"] = grid.starting_range + np.arange(width) * grid.range_pixel_spacing * factor
+            fb["processedCenterFrequency"] = radar.SPEED_OF_LIGHT / grid.wavelength
+            fb["processedRangeBandwidth"] = bandwidth
+            fb["numberOfSubSwaths"] = 1
+            fb["validSamplesSubSwath1"] = np.column_stack(
+                [np.zeros(grid.length), np.full(grid.length, width)]).astype(np.uint32)
+            fb["HH"] = (rng.standard_normal((grid.length, width))
+                        + 1j * rng.standard_normal((grid.length, width))).astype(np.complex64)
+            par[f"frequency{band}/dopplerCentroid"] = np.full((6, 5), 950.0)
+        o = root.create_group("metadata/orbit")
+        o["time"] = orbit.time
+        o["time"].attrs["units"] = np.bytes_(epoch)
+        o["position"] = orbit.position
+        o["velocity"] = orbit.velocity
+        o["interpMethod"] = np.bytes_("Hermite")
+        o["orbitType"] = np.bytes_("MOE")
+    t = grid.sensing_start + np.array([0.0, 0.0, 1.0, 1.0]) * (grid.length - 1) / grid.prf
+    r = grid.starting_range + np.array([0.0, 1.0, 0.0, 1.0]) * (grid.width - 1) * grid.range_pixel_spacing
+    llh, ok = radar.rdr2geo(t, r, orbit, height=0.0, wavelength=grid.wavelength, look_side=grid.look_side,
+                            threshold=1e-9)
+    assert ok.all()
+    lon, lat = np.degrees(llh[:, 0]), np.degrees(llh[:, 1])
+    dem = tmp_path / "dem.tif"
+    step = 0.001
+    west, north = lon.min() - 0.1, lat.max() + 0.1
+    nx, ny = int((lon.max() + 0.1 - west) / step) + 1, int((north - lat.min() + 0.1) / step) + 1
+    with rasterio.open(dem, "w", driver="GTiff", width=nx, height=ny, count=1, dtype="float32",
+                       crs="EPSG:4326", transform=from_origin(west, north, step, step)) as dst:
+        dst.write(np.zeros((1, ny, nx), np.float32))
+    return path, dem
+
+
+def test_one_field_is_refused_for_two_bands(tmp_path):
+    """The shifts are in one band's lines and samples; band B's samples are 8 times A's."""
+    from nisar_tools import geocode_rslc
+    rslc, dem = _two_band_rslc(tmp_path)
+    field = RegistrationField(np.array([0.0, 1.0]), np.array([1.0, 0.0]), np.zeros((2, 2)), np.full((2, 2), 3.0))
+    with pytest.raises(ValueError, match="one field per band"):
+        geocode_rslc(rslc, tmp_path / "out.h5", dem, registration=field)
+
+
+def test_each_band_is_registered_with_its_own_field(tmp_path, monkeypatch):
+    from nisar_tools import geocode_rslc, gslc_geocode
+    rslc, dem = _two_band_rslc(tmp_path)
+    fields = {band: RegistrationField(np.array([0.0, 1.0]), np.array([1.0, 0.0]), np.zeros((2, 2)),
+                                      np.full((2, 2), shift), description=band)
+              for band, shift in (("A", 8.0), ("B", 1.0))}
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _record(f, rslc, freq, *args, registration=None, **kwargs):
+        seen[freq] = registration
+        if freq == "B":                                      # the last band: nothing further to see
+            raise _Stop
+        return {}
+
+    monkeypatch.setattr(gslc_geocode, "_geocode_frequency", _record)
+    with pytest.raises(_Stop):
+        geocode_rslc(rslc, tmp_path / "out.h5", dem, registration=fields, solid_earth_tides=False)
+    assert seen == fields
+    seen.clear()
+    with pytest.raises(_Stop):                              # one band, one field
+        geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["B"], registration=fields["B"],
+                     solid_earth_tides=False)
+    assert seen == {"B": fields["B"]}
