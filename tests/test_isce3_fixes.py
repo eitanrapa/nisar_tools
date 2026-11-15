@@ -90,13 +90,8 @@ def test_clamped_corrections_apply_outside_their_table():
     assert abs(g0[0] - 32.0) < 1e-6 and abs(g1[0] - 34.0) < 1e-6
 
 
-def test_doppler_table_re_indexed_to_zero_doppler(tmp_path):
-    orbit = rs.orbit()
-    grid = rs.radar_grid(length=300, width=200)
-    t_axis = np.linspace(grid.sensing_start - 8, grid.sensing_stop + 8, 9)
-    r_axis = np.linspace(grid.starting_range - 2000, grid.end_range + 2000, 5)
-    data = 900.0 + 5.0 * (t_axis - t_axis[0])[:, None] + 0.0 * r_axis[None, :]   # 5 Hz per second along track
-    path = tmp_path / "rslc.h5"
+def _doppler_rslc(path, grid, orbit, t_axis, r_axis, data, description=None):
+    """A minimal RSLC holding a Doppler centroid table (and its description, if given)."""
     epoch = radar.epoch_units(rs.EPOCH)
     with h5py.File(path, "w") as f:
         ident = f.create_group("science/LSAR/identification")
@@ -117,7 +112,26 @@ def test_doppler_table_re_indexed_to_zero_doppler(tmp_path):
         par = root.create_group("metadata/processingInformation/parameters")
         par["zeroDopplerTime"], par["slantRange"] = t_axis, r_axis
         par["frequencyA/dopplerCentroid"] = data
+        if description is not None:
+            par["frequencyA/dopplerCentroid"].attrs["description"] = np.bytes_(description)
+    return path
+
+
+def _doppler_case():
+    orbit = rs.orbit()
+    grid = rs.radar_grid(length=300, width=200)
+    t_axis = np.linspace(grid.sensing_start - 8, grid.sensing_stop + 8, 9)
+    r_axis = np.linspace(grid.starting_range - 2000, grid.end_range + 2000, 5)
+    data = 900.0 + 5.0 * (t_axis - t_axis[0])[:, None] + 0.0 * r_axis[None, :]   # 5 Hz per second along track
+    return orbit, grid, t_axis, r_axis, data
+
+
+def test_doppler_table_re_indexed_to_zero_doppler(tmp_path):
+    orbit, grid, t_axis, r_axis, data = _doppler_case()
+    path = _doppler_rslc(tmp_path / "rslc.h5", grid, orbit, t_axis, r_axis, data,
+                         "2D LUT of Doppler centroid for frequency A")
     with RSLC(path) as r:
+        assert r.doppler_indexing("A") == "native"
         native = r.doppler_centroid("A")
         zero = r.doppler_centroid("A", zero_doppler=True)
         # one interior node, done by hand: its target, then where the beam centre crosses it
@@ -128,6 +142,24 @@ def test_doppler_table_re_indexed_to_zero_doppler(tmp_path):
         assert 1.0 < t0 - tn[0] < 3.5                     # the beam centre leads by ~2 s
         assert zero.eval(np.array([t0]), np.array([r0]))[0] == pytest.approx(native.eval(tn, rn)[0], abs=1e-6)
         assert zero.eval(np.array([t0]), np.array([r0]))[0] < native.eval(np.array([t0]), np.array([r0]))[0]
+
+
+def test_zero_doppler_indexed_table_is_not_re_indexed_twice(tmp_path):
+    """A product of the fork's I1-16 fix stores the zero-Doppler-indexed table and says so: asking for that
+    indexing returns it as stored, and the native table comes back from it."""
+    orbit, grid, t_axis, r_axis, data = _doppler_case()
+    with RSLC(_doppler_rslc(tmp_path / "isce3.h5", grid, orbit, t_axis, r_axis, data)) as r:
+        native = r.doppler_centroid("A")
+        zero = r.doppler_centroid("A", zero_doppler=True)
+    fork = ("2D LUT of Doppler centroid for frequency A as a function of zero Doppler time and slant range "
+            "(the Doppler centroid of the target at those zero Doppler coordinates)")
+    with RSLC(_doppler_rslc(tmp_path / "fork.h5", grid, orbit, t_axis, r_axis, zero.data, fork)) as r:
+        assert r.doppler_indexing("A") == "zero"
+        assert np.array_equal(r.doppler_centroid("A", zero_doppler=True).data, zero.data)
+        back = r.doppler_centroid("A")
+    # interior nodes (the beam centre leads by ~2 s and the targets of the first range column lie nearer than
+    # the table, so the edge rows and that column read clamped values in either direction)
+    assert np.max(np.abs(back.data[1:-2, 1:] - native.data[1:-2, 1:])) < 1e-4
 
 
 def test_cube_rdr2geo_tolerance_keeps_ground_velocity():

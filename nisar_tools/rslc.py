@@ -195,31 +195,66 @@ class RSLC:
             ref_epoch=self.ref_epoch,
         )
 
-    def doppler_centroid(self, frequency, zero_doppler=False):
-        """The native Doppler centroid LUT (Hz), bilinear, bounds-checked.
+    def doppler_indexing(self, frequency):
+        """How the stored Doppler centroid LUT is indexed: `"native"` or `"zero"`.
 
-        ISCE3 writes it over the times and ranges at which the beam centre
-        crosses each target, though it labels them `zeroDopplerTime`, and
-        geocoding reads it at the pixel's zero-Doppler time -- about 2 s off
-        across NISAR's ~0.9 deg squint. `zero_doppler=True` re-indexes it: each
-        node of the same axes gets the value of the target whose zero-Doppler
-        time and range it is.
+        Every ISCE3 release writes it over the times and ranges at which the
+        beam centre crosses each target (`"native"`), though it labels them
+        `zeroDopplerTime`. ISCE3 built from the fork's `nisar_tools` branch
+        (since its I1-16 fix) re-indexes it onto zero-Doppler coordinates
+        (`"zero"`) and says so in the dataset's description.
+        """
+        group = self._root[f"metadata/processingInformation/parameters/frequency{frequency}"]
+        text = _decode(group["dopplerCentroid"].attrs.get("description", b""))
+        return "zero" if "function of zero Doppler time and slant range" in text else "native"
+
+    def doppler_centroid(self, frequency, zero_doppler=False):
+        """The Doppler centroid LUT (Hz), bilinear, bounds-checked.
+
+        Native-indexed by default: each node holds the Doppler centroid of the
+        target whose beam-centre (native-Doppler) time and range it is, as
+        geo2rdr with a Doppler LUT expects. Geocoding reads it at a pixel's
+        zero-Doppler time, about 2 s later across NISAR's ~0.9 deg squint;
+        `zero_doppler=True` gives it indexed that way: each node of the same
+        axes holds the value of the target whose zero-Doppler time and range
+        it is. Either is returned whichever the product stores
+        (`doppler_indexing`), so a product is never re-indexed twice.
         """
         group = self._root[f"metadata/processingInformation/parameters/frequency{frequency}"]
         parent = self._root["metadata/processingInformation/parameters"]
         t = group["zeroDopplerTime"][()] if "zeroDopplerTime" in group else parent["zeroDopplerTime"][()]
         r = group["slantRange"][()] if "slantRange" in group else parent["slantRange"][()]
         lut = radar.LUT2d.from_coords(r, t, group["dopplerCentroid"][()])
-        if not zero_doppler:
+        stored = self.doppler_indexing(frequency)
+        if stored == ("zero" if zero_doppler else "native"):
             return lut
         grid = self.radar_grid(frequency)
         T, R = np.meshgrid(t, r, indexing="ij")
+        loose = radar.LUT2d(lut.x_start, lut.y_start, lut.dx, lut.dy, lut.data, lut.method, bounds_error=False)
+        values = lut.data.ravel().astype(float).copy()
+        if stored == "zero":
+            # Native from zero: the target whose beam centre crosses at node (t, r) has the native Doppler
+            # the stored LUT gives at its zero-Doppler coordinates; iterate on that Doppler.
+            fd = values.copy()
+            good = np.ones(fd.size, dtype=bool)
+            for _ in range(6):
+                llh, ok = radar.rdr2geo(T.ravel(), R.ravel(), self.orbit, height=0.0, doppler_hz=fd,
+                                        wavelength=grid.wavelength, look_side=grid.look_side, threshold=1e-5)
+                tz, rz, ok2 = radar.geo2rdr(llh, self.orbit, None, grid.wavelength, grid.look_side,
+                                            t0=T.ravel())
+                good = ok & ok2
+                new = fd.copy()
+                new[good] = loose.eval(tz[good], rz[good])
+                step = np.max(np.abs(new - fd)) if fd.size else 0.0
+                fd = new
+                if step < 1e-6:
+                    break
+            values[good] = fd[good]
+            return radar.LUT2d.from_coords(r, t, values.reshape(T.shape))
         llh, ok = radar.rdr2geo(T.ravel(), R.ravel(), self.orbit, height=0.0, wavelength=grid.wavelength,
                                 look_side=grid.look_side, threshold=1e-5)
-        loose = radar.LUT2d(lut.x_start, lut.y_start, lut.dx, lut.dy, lut.data, lut.method, bounds_error=False)
         tn, rn, ok2 = radar.geo2rdr(llh, self.orbit, loose, grid.wavelength, grid.look_side, t0=T.ravel())
         good = ok & ok2
-        values = lut.data.ravel().astype(float).copy()
         values[good] = loose.eval(tn[good], rn[good])
         return radar.LUT2d.from_coords(r, t, values.reshape(T.shape))
 
