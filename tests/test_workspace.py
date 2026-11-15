@@ -308,3 +308,29 @@ def test_every_stage_class_restores_the_crs_from_zarr(tmp_path):
     for cls in (GSLCStack, InterferogramStack, UnwrappedStack, LOSStack):
         stack = cls.from_zarr(ws.path("s"))
         assert stack.ds["slc"].rio.crs.to_epsg() == 32611, cls.__name__
+
+
+def test_store_refuses_the_same_parameters_on_other_coordinates(tmp_path):
+    """A crop, or other dates, persisted under the same name and parameters is another input."""
+    from nisar_tools.interferogram import InterferogramStack
+
+    ws = Workspace(tmp_path)
+    ny, nx = 40, 50
+    y = 4_000_000.0 - 100.0 * np.arange(ny)
+    x = 400_000.0 + 100.0 * np.arange(nx)
+    coords = {"pair": [0], "y": y, "x": x,
+              "ref_time": ("pair", np.array(["2025-01-01"], "datetime64[ns]")),
+              "sec_time": ("pair", np.array(["2025-01-13"], "datetime64[ns]"))}
+    ig = InterferogramStack(xr.Dataset(
+        {"igram": (("pair", "y", "x"), np.ones((1, ny, nx), np.complex64)),
+         "coherence": (("pair", "y", "x"), np.ones((1, ny, nx), np.float32))},
+        coords=coords, attrs={"epsg": 32617, "looks": 5, "pairs": [[0, 1]]}).rio.write_crs("EPSG:32617"))
+    stored = ig.persist(ws, "igrams")
+    assert ig.persist(ws, "igrams").sizes == stored.sizes                      # the same input resumes
+    cropped = InterferogramStack(ig.ds.isel(y=slice(10, 30), x=slice(10, 30)))
+    with pytest.raises(WorkspaceError, match="different input .it differs in y, x"):
+        cropped.persist(ws, "igrams")
+    later = InterferogramStack(ig.ds.assign_coords(sec_time=("pair", np.array(["2025-01-25"], "datetime64[ns]"))))
+    with pytest.raises(WorkspaceError, match="differs in sec_time"):
+        later.persist(ws, "igrams")
+    assert cropped.persist(ws, "igrams", overwrite=True).sizes["x"] == 20

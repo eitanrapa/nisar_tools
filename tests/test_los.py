@@ -95,6 +95,37 @@ def test_to_los_with_dem_sets_height(gslc_factory):
     np.testing.assert_allclose(los.ds["height"].values, 600.0, atol=1e-2)
 
 
+def test_los_persist_refuses_a_store_made_from_another_input(gslc_factory, tmp_path):
+    """Another DEM, granule, mask or pair under the same name raises instead of returning the stored LOS."""
+    import shutil
+    from pathlib import Path
+
+    from nisar_tools.workspace import WorkspaceError
+
+    p = gslc_factory(ny=40, nx=40, dx=20.0, dy=20.0, write_geometry=True)
+    other = tmp_path / "another_granule.h5"
+    shutil.copy(p, other)
+    unw_stack, _, x, y, epsg = _synthetic_unwrapped(p)
+    days = np.array(["2025-11-10", "2025-11-11", "2025-11-12"], "datetime64[ns]")
+    first = UnwrappedStack(unw_stack.ds.assign_coords(ref_time=("pair", days[:2]), sec_time=("pair", days[1:])))
+    later = UnwrappedStack(unw_stack.ds.assign_coords(ref_time=("pair", days[1:]), sec_time=("pair", days[1:] + 1)))
+    ws = Workspace(tmp_path / "ws")
+    stored = first.to_los(p).persist(ws, "los")
+    np.testing.assert_array_equal(first.to_los(p).persist(ws, "los").ds["los"].values,
+                                  stored.ds["los"].values)                       # the same input resumes
+    dem = xr.DataArray(np.full((len(y), len(x)), 600.0, np.float32), coords={"y": y, "x": x},
+                       dims=("y", "x")).rio.write_crs(f"EPSG:{epsg}")
+    for stack, kwargs, differs in ((first, dict(dem=dem), "dem"), (first, dict(gslc=other), "granules"),
+                                   (first, dict(mask_geometry=False), "mask_geometry"),
+                                   (later, {}, "ref_time, sec_time")):
+        with pytest.raises(WorkspaceError, match=f"different input .it differs in {differs}"):
+            stack.to_los(**{"gslc": p, **kwargs}).persist(ws, "los")
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    shutil.copy(p, moved)
+    first.to_los(str(moved / Path(p).name)).persist(ws, "los")                   # a granule by its name
+
+
 def test_los_persist_roundtrip(gslc_factory, tmp_path):
     p = gslc_factory(ny=40, nx=40, write_geometry=True)
     unw_stack, *_ = _synthetic_unwrapped(p)

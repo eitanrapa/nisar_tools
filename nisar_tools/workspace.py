@@ -24,6 +24,17 @@ import numpy as np
 import xarray as xr
 
 
+def _same_values(a, b):
+    """Equal shapes and values, NaN and NaT equal to themselves."""
+    a, b = np.asarray(a), np.asarray(b)
+    if a.shape != b.shape:
+        return False
+    try:
+        return bool(np.array_equal(a, b, equal_nan=True))
+    except TypeError:                                       # strings and objects have no NaN
+        return bool(np.array_equal(a, b))
+
+
 def _atomic_write_text(path, text):
     """Replace `path`'s contents in one step, never leaving it half-written."""
     path = Path(path)
@@ -356,16 +367,24 @@ class Workspace:
         return not _missing_chunks(self.path(name))
 
     # -- whole-dataset store / load ---------------------------------------
-    def store(self, name, ds, params, overwrite=False):
+    def store(self, name, ds, params, overwrite=False, provenance=None):
         """Write `ds` to the stage store and return the reopened lazy dataset.
 
         Reopening from Zarr (rather than returning `ds`) severs any upstream
         dependency, e.g. open HDF5 file handles, and gives downstream stages
         well-chunked local reads.
+
+        An existing store with the same `params` is returned, unless it was made
+        from another input: other coordinates (other dates, another crop) or,
+        when `provenance` is given, another record of the input, which is kept
+        beside the parameters and outside their hash. Those raise `WorkspaceError`,
+        as different `params` do, unless `overwrite`.
         """
         target = self.path(name)
         if target.exists():
             same = self.stored_params_hash(name) == hash_params(params)
+            if same and not overwrite:
+                self._check_input(name, ds, provenance)
             missing = _missing_chunks(target) if same and not overwrite else {}
             if same and not overwrite and not missing:
                 return self.load(name)
@@ -384,6 +403,9 @@ class Workspace:
             shutil.rmtree(target)
 
         ds = ds.copy()
+        if provenance is not None:
+            ds.attrs["provenance"] = json.dumps(provenance, default=_json_default)
+            ds.attrs["provenance_hash"] = hash_params(provenance)
         ds.attrs["params"] = json.dumps(params, default=_json_default)
         ds.attrs["params_hash"] = hash_params(params)
         encoding = _encoding_for(ds)
@@ -451,28 +473,7 @@ class Workspace:
         if target.exists():
             same = self.stored_params_hash(name) == hash_params(params)
             if same and not overwrite:
-                if provenance is not None:
-                    stored = self._stored_attr(name, "provenance_hash")
-                    if stored is None:
-                        import warnings
-
-                        warnings.warn(f"Stage '{name}' does not record the input it was made from, so it is "
-                                      "reused as it is; pass overwrite=True if that input has changed.",
-                                      stacklevel=3)
-                    elif stored != hash_params(provenance):
-                        old = json.loads(self._stored_attr(name, "provenance") or "{}")
-                        new = json.loads(json.dumps(provenance, default=_json_default))
-                        keys = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
-                        raise WorkspaceError(
-                            f"Stage '{name}' was made from a different input (it differs in "
-                            f"{', '.join(keys) or 'its record'}). Pass overwrite=True or use another name."
-                        )
-                keys = self._input_differs(name, template, source)
-                if keys:
-                    raise WorkspaceError(
-                        f"Stage '{name}' was made from a different input (it differs in {', '.join(keys)}). "
-                        "Pass overwrite=True or use another name."
-                    )
+                self._check_input(name, template, provenance, source)
                 return
             if not same and not overwrite:
                 raise WorkspaceError(
@@ -505,20 +506,41 @@ class Workspace:
         self.consolidate(name)
         self._done_path(name).write_text(json.dumps({"pairs_done": []}))
 
-    def _input_differs(self, name, template, source):
-        """What of an existing store's input differs from `template` and `source`: the coordinates both carry,
-        and the stored store `source` was read from, if both record it."""
-        ds = xr.open_zarr(self.path(name))
+    def _check_input(self, name, ds, provenance=None, source=None):
+        """Raise `WorkspaceError` if stage `name`'s store was made from another input than `ds`.
+
+        Compared: `provenance`, the record of the input kept beside the parameters (a store that predates it is
+        kept, with a warning); the 1-D coordinates both carry (a stack's dates, say); and the `params_hash` of the
+        store `source` was read from, when both record one.
+        """
+        stored = xr.open_zarr(self.path(name))
         try:
-            keys = [k for k in template.coords
-                    if k in ds.coords and not np.array_equal(ds[k].values, template[k].values)]
-            stored = ds.attrs.get("source_params_hash")
-            new = None if source is None else source.attrs.get("params_hash")
-            if stored is not None and new is not None and stored != new:
+            keys = []
+            if provenance is not None:
+                recorded = stored.attrs.get("provenance_hash")
+                if recorded is None:
+                    import warnings
+
+                    warnings.warn(f"Stage '{name}' does not record the input it was made from, so it is "
+                                  "reused as it is; pass overwrite=True if that input has changed.",
+                                  stacklevel=4)
+                elif recorded != hash_params(provenance):
+                    old = json.loads(stored.attrs.get("provenance") or "{}")
+                    new = json.loads(json.dumps(provenance, default=_json_default))
+                    keys += sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k)) or ["its record"]
+            keys += [k for k, c in ds.coords.items()
+                     if c.ndim <= 1 and k in stored.coords and not _same_values(stored[k].values, c.values)]
+            before = stored.attrs.get("source_params_hash")
+            now = None if source is None else source.attrs.get("params_hash")
+            if before is not None and now is not None and before != now:
                 keys.append("the store it was read from")
-            return keys
         finally:
-            ds.close()
+            stored.close()
+        if keys:
+            raise WorkspaceError(
+                f"Stage '{name}' was made from a different input (it differs in {', '.join(keys)}). "
+                "Pass overwrite=True or use another name."
+            )
 
     def write_region(self, name, ds, region):
         """Write a slice of `ds` into an initialised store at `region`."""

@@ -20,7 +20,9 @@ the look (off-nadir) angle is measured at the spacecraft, against the ellipsoid
 normal there. Earth curvature makes the look angle the smaller of the two.
 """
 
+import hashlib
 import os
+from pathlib import Path
 
 import numpy as np
 import rioxarray  # noqa: F401
@@ -34,6 +36,9 @@ _GEOM_2D = ("incidence_angle", "look_angle", "los_east", "los_north",
 #: Multiplier taking a displacement grid to metres, which is what everything
 #: downstream -- `rms_min`, `exclude_within`, the Green's functions -- assumes.
 _LOS_UNITS = {"m": 1.0, "cm": 0.01, "mm": 0.001}
+
+#: What an LOS stack is made from, beyond its parameters: `persist` records these attrs, when set.
+_INPUT_ATTRS = ("source", "kind", "granules", "product", "dem", "mask_geometry", "units")
 
 
 def _as_granule_list(gslc):
@@ -206,6 +211,11 @@ class LOSStack(RasterStackMixin):
             look_direction=look_direction,
             granules=[str(p) for p in granules],
             pairs=du.attrs.get("pairs"),
+            product=product,
+            mask_geometry=bool(mask_geometry),
+            # the heights sampled on the grid, which a path or an array alone would not pin down
+            dem=None if dem is None else "sha1:" + hashlib.sha1(
+                np.ascontiguousarray(heights, np.float32).tobytes()).hexdigest()[:16],
         )
         return cls(ds)
 
@@ -357,7 +367,13 @@ class LOSStack(RasterStackMixin):
             "pairs": self.ds.attrs.get("pairs"),
             **params,
         }
-        reopened = workspace.store(name, ds, full, overwrite=overwrite)
+        # The inputs, recorded beside the parameters (so every existing store keeps its hash): a store made from
+        # other granules, another DEM or other units raises instead of coming back. Granules by name, so a moved
+        # folder still resumes.
+        provenance = {k: self.ds.attrs[k] for k in _INPUT_ATTRS if self.ds.attrs.get(k) is not None}
+        if "granules" in provenance:
+            provenance["granules"] = [Path(str(g)).name for g in provenance["granules"]]
+        reopened = workspace.store(name, ds, full, overwrite=overwrite, provenance=provenance)
         return LOSStack(reopened)
 
     # -- export -----------------------------------------------------------

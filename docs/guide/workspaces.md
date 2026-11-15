@@ -34,6 +34,9 @@ from disk. Reopening cuts the link to whatever the stage was computed from, such
   how a rerun of a script resumes.
 - If it exists with different parameters, `persist` raises `WorkspaceError` rather than replacing the results. Pass
   `overwrite=True` to rebuild it, or use another stage name.
+- It raises the same way when the store has the same parameters but was made from another input: other coordinates
+  (other dates, another crop) or, for an LOS stack, other granules, another DEM, a different `mask_geometry` or other
+  units. Granules are compared by file name, so a moved folder still resumes.
 - A store left incomplete by an interrupted write is recomputed, with a warning. Stores are written beside their
   target and renamed into place only once complete.
 - Persisting a stage over the store it is being read from raises.

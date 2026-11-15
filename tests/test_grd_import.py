@@ -165,6 +165,17 @@ def test_units_and_sign_are_applied_on_load(alos_scenes):
     assert np.nanstd(los) * 100.0 / np.nanstd(raw) == pytest.approx(1.0, rel=0.2)
 
 
+def test_an_import_in_other_units_does_not_return_the_stored_one(alos_scenes, tmp_path):
+    from nisar_tools import Workspace
+    from nisar_tools.workspace import WorkspaceError
+
+    *_, scenes = alos_scenes
+    ws = Workspace(tmp_path / "ws")
+    _load(scenes["desc"], units="mm").persist(ws, "los")
+    with pytest.raises(WorkspaceError, match="differs in units"):
+        _load(scenes["desc"]).persist(ws, "los")
+
+
 def test_units_and_sign_are_exactly_the_declared_factors(alos_scenes):
     """Nothing in a `.grd` records units or sign, so a wrong declaration is
     silent -- the load succeeds and only the recovered slip gives it away.
