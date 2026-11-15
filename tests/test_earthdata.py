@@ -9,6 +9,7 @@ import base64
 import http.server
 import os
 import threading
+import time
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -53,6 +54,14 @@ class _Server:
                 if outer.accepted.get(url.path, 0) > 0:
                     outer.accepted[url.path] -= 1
                     return self._empty(202)
+                if url.path == "/data/stall.bin":           # a transfer that stops partway
+                    self.send_response(200)
+                    self.send_header("Content-Length", "1000000")
+                    self.end_headers()
+                    self.wfile.write(b"x" * 1000)
+                    self.wfile.flush()
+                    time.sleep(3.0)
+                    return
                 if url.path in PAGES:                    # a 200 that is a web page, not the file
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -149,3 +158,12 @@ def test_a_web_page_is_not_saved_as_the_file(server, tmp_path):
         with pytest.raises(RuntimeError, match="web page instead of the file"):
             _get(server, tmp_path, "page.h5")
         assert not (tmp_path / "page.h5").exists() and not list(tmp_path.glob("*.part"))
+
+
+def test_a_stalled_transfer_times_out(server, tmp_path, monkeypatch):
+    """A server that stops sending is a failed download after TIMEOUT seconds, not a hang."""
+    monkeypatch.setattr(_earthdata, "TIMEOUT", 0.5)
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="timed out"):
+        _get(server, tmp_path, "stall.bin")
+    assert time.monotonic() - start < 2.5 and not (tmp_path / "stall.bin").exists()

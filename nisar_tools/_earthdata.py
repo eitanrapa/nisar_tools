@@ -27,6 +27,8 @@ ACCEPTED_WAIT = 5.0
 ACCEPTED_TRIES = 120
 
 _CHUNK = 1 << 20
+#: Seconds a connection may sit silent (connecting, or between reads) before it counts as failed.
+TIMEOUT = 120.0
 
 
 def credentials():
@@ -127,7 +129,7 @@ class RangeFile(io.RawIOBase):
             username, password = credentials()
         self._open_url = opener(username, password).open
         request = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
-        with self._open_url(request) as response:
+        with self._open_url(request, timeout=TIMEOUT) as response:
             self.url = response.geturl()
             self.size = int(response.headers["Content-Range"].rsplit("/", 1)[1])
         self.block, self.max_blocks = int(block), int(max_blocks)
@@ -153,7 +155,7 @@ class RangeFile(io.RawIOBase):
         if k not in self._cache:
             first, last = k * self.block, min((k + 1) * self.block, self.size) - 1
             request = urllib.request.Request(self.url, headers={"Range": f"bytes={first}-{last}"})
-            with self._open_url(request) as response:
+            with self._open_url(request, timeout=TIMEOUT) as response:
                 self._cache[k] = response.read()
             self.requests += 1
             if len(self._cache) > self.max_blocks:
@@ -176,7 +178,7 @@ class RangeFile(io.RawIOBase):
 def _open(open_url, url):
     """Open `url`, waiting while the server answers 202 (still preparing the file)."""
     for _ in range(ACCEPTED_TRIES):
-        response = open_url(urllib.request.Request(url))
+        response = open_url(urllib.request.Request(url), timeout=TIMEOUT)
         if response.status != 202:
             return response
         response.close()
