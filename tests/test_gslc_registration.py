@@ -319,3 +319,29 @@ def test_only_the_pixel_fixes_clamp_the_timing_corrections(tmp_path, monkeypatch
         geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["A"], solid_earth_tides=False,
                      isce3_compatible=mode, workers=1)
     assert seen and set(seen) == {clamped}
+
+
+@pytest.mark.parametrize("epsg, mode, cube, lut", [(None, "pixels", 500.0, 1000.0), (4326, "pixels", 0.005, 0.01),
+                                                   (4326, True, 0.01, 0.01)])
+def test_the_metadata_grids_are_posted_in_the_output_crs_units(tmp_path, monkeypatch, epsg, mode, cube, lut):
+    """Metres on a projected grid, degrees on a geographic one (ISCE3's defaults, and its 0.01 cubes when asked)."""
+    from nisar_tools import geocode_rslc, gslc_geocode
+    rslc, dem = _two_band_rslc(tmp_path)
+    seen = []
+    real = gslc_geocode.metadata_geogrid
+
+    class _Stop(Exception):
+        pass
+
+    def _record(grid, spacing, cube=False):
+        seen.append((float(spacing), cube))
+        if len(seen) == 2:
+            raise _Stop
+        return real(grid, spacing, cube=cube)
+
+    monkeypatch.setattr(gslc_geocode, "metadata_geogrid", _record)
+    kwargs = {} if epsg is None else dict(epsg=epsg, posting=(5e-5, 5e-5), snap=None)
+    with pytest.raises(_Stop):
+        geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["A"], solid_earth_tides=False,
+                     isce3_compatible=mode, **kwargs)
+    assert seen == [(cube, True), (lut, False)]

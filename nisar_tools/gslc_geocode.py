@@ -435,8 +435,12 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         raise ValueError(f"isce3_compatible must be True, False or 'pixels', not {isce3_compatible!r}")
     fix_metadata, fix_pixels = isce3_compatible is not True, isce3_compatible is False
     grids = _product_grids(rslc, freq_pols, epsg, bounds, posting, snap)
-    cube_grid = metadata_geogrid(grids[first], 500.0, cube=True)
-    lut_grid = metadata_geogrid(grids[first], 1000.0)
+    # ISCE3's metadata postings (RunConfig.prep_geocode_metadata): 500 m cubes and 1 km LUTs, or on a geographic
+    # grid 0.005 and 0.01 degrees, where a missing elif gives ISCE3's cubes 0.01 too
+    geographic = epsg == 4326
+    cube_spacing = (0.005 if fix_metadata else 0.01) if geographic else 500.0
+    cube_grid = metadata_geogrid(grids[first], cube_spacing, cube=True)
+    lut_grid = metadata_geogrid(grids[first], 0.01 if geographic else 1000.0)
     dem_interp = DEMInterpolator(dem, centered=fix_pixels)
     for f_, g in grids.items():
         log(f"frequency {f_}: {g.length} x {g.width} px at {g.spacing_x:g} x {-g.spacing_y:g} m, "
