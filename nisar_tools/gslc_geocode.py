@@ -383,15 +383,16 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         - `"pixels"` (default): pixels identical to ISCE3's, so this GSLC
           pairs with ASF's; masks and metadata fixed. The mask tests every row
           of the interpolation chip (ISCE3: its corners), lines that drop out
-          of `validSamplesSubSwath` are repaired, timing corrections are
-          clamped at their table's edge (ISCE3: skipped), band B's
+          of `validSamplesSubSwath` are repaired, band B's
           `inputDataExceptionMask` is on B's own grid, the cube's
           ground-track velocity uses a proper `rdr2geo` tolerance, and the
           real and imaginary statistics of complex LUTs are real numbers.
         - `True`: ISCE3's masks and metadata too.
         - `False`: also fixes the pixels: a centred DEM spline window (ISCE3's
           is one node off, ~0.4 rad of flattening phase per cm of height it
-          gets wrong), the Doppler table read at zero-Doppler coordinates, and
+          gets wrong), the Doppler table read at zero-Doppler coordinates,
+          timing corrections clamped at their table's edge (ISCE3 skips them
+          there, leaving pixels near the swath edge uncorrected or NaN), and
           the total TEC alone where the TEC file flags a topside sample over
           the frame (ISCE3 v0.25.16 subtracts it unchecked).
           Geocode both dates of a pair this way, never with an ASF GSLC.
@@ -687,7 +688,7 @@ def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
         lon, lat, h, az, rg, rng, mask = pixel_radar_indices(
             X.ravel(), Y.ravel(), geogrid.epsg, dem, grid, orbit, doppler, valid,
             corr, registration, range_shift=range_shift, azimuth_shift=azimuth_shift,
-            chip_rows=fix_metadata, clamp_corrections=fix_metadata)
+            chip_rows=fix_metadata, clamp_corrections=fix_pixels)
         shape = (row1 - row0, col1 - col0)
         ok = np.isfinite(az)
         if ok.any():

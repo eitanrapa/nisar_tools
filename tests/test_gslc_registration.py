@@ -297,3 +297,25 @@ def test_each_band_is_registered_with_its_own_field(tmp_path, monkeypatch):
         geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["B"], registration=fields["B"],
                      solid_earth_tides=False)
     assert seen == {"B": fields["B"]}
+
+
+@pytest.mark.parametrize("mode, clamped", [("pixels", False), (True, False), (False, True)])
+def test_only_the_pixel_fixes_clamp_the_timing_corrections(tmp_path, monkeypatch, mode, clamped):
+    """A correction applied outside its table moves pixels near the swath edge, so the default, which keeps
+    ISCE3's pixels, skips it there as ISCE3 does."""
+    from nisar_tools import geocode_rslc, gslc_geocode
+    rslc, dem = _two_band_rslc(tmp_path)
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def _record(*args, clamp_corrections=None, **kwargs):
+        seen.append(clamp_corrections)
+        raise _Stop
+
+    monkeypatch.setattr(gslc_geocode, "pixel_radar_indices", _record)
+    with pytest.raises(_Stop):
+        geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["A"], solid_earth_tides=False,
+                     isce3_compatible=mode, workers=1)
+    assert seen and set(seen) == {clamped}
