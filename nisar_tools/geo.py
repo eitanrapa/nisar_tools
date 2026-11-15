@@ -51,6 +51,10 @@ def bbox_to_native(lon_min, lon_max, lat_min, lat_max, epsg_code):
     transverse Mercator and lies furthest from them where it crosses the
     central meridian.
     """
+    if not (-90.0 <= lat_min < lat_max <= 90.0) or not lon_min < lon_max:
+        raise ValueError(
+            f"bbox ({lon_min}, {lon_max}, {lat_min}, {lat_max}) is not (lon_min, lon_max, lat_min, lat_max): "
+            "the order is west, east, south, north (a box across the antimeridian takes east + 360)")
     transformer = Transformer.from_crs("EPSG:4326", as_crs(epsg_code), always_xy=True)
     x_min, y_min, x_max, y_max = transformer.transform_bounds(lon_min, lat_min, lon_max, lat_max, densify_pts=1001)
     return x_min, x_max, y_min, y_max

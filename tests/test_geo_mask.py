@@ -365,3 +365,14 @@ def test_the_water_mask_is_registered_to_the_pixel_centres(monkeypatch):
         clear = np.abs(lat - coast) > 2 * step
         assert 0.02 < land.mean() < 0.98                     # both land and water
         np.testing.assert_array_equal(land[clear], (lat > coast)[clear])
+
+
+@pytest.mark.parametrize("box", [(-118.0, 36.0, -117.9, 36.1),          # (W, S, E, N) by mistake
+                                 (-117.9, -118.0, 36.0, 36.1),          # west and east swapped
+                                 (-118.0, -117.9, 36.1, 36.0),          # south and north swapped
+                                 (-118.0, -117.9, 36.0, 95.0)])         # a latitude past the pole
+def test_a_box_out_of_order_is_refused(box):
+    from nisar_tools import geo
+
+    with pytest.raises(ValueError, match="west, east, south, north"):
+        geo.bbox_to_native(*box, 32611)
