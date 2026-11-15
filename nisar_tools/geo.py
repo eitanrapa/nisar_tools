@@ -212,6 +212,23 @@ def utm_epsg(lon, lat):
     return (32600 if lat >= 0 else 32700) + zone
 
 
+def _cf_decoded(raw, attrs):
+    """A variable's values as CF defines them: `_FillValue` and `missing_value` NaN, then `scale_factor` and
+    `add_offset` applied (GMT writes both for a packed grid, such as `out.grd=ns+s0.01`)."""
+    missing = np.zeros(raw.shape, bool)
+    for key in ("_FillValue", "missing_value"):
+        if key in attrs:
+            value = np.asarray(attrs[key]).ravel()[0]
+            missing |= np.isnan(raw) if (raw.dtype.kind == "f" and np.isnan(value)) else raw == value
+    scale, offset = attrs.get("scale_factor"), attrs.get("add_offset")
+    packed = scale is not None or offset is not None
+    data = raw.astype(np.float64) if packed or raw.dtype.kind != "f" else raw
+    if packed:
+        data = data * float(np.asarray(1.0 if scale is None else scale).ravel()[0]) \
+            + float(np.asarray(0.0 if offset is None else offset).ravel()[0])
+    return np.where(missing, np.nan, data) if missing.any() else data
+
+
 def _read_grd_hdf5(path):
     """Read a NetCDF-4 (HDF5-backed) `.grd` with `h5py`.
 
@@ -245,10 +262,7 @@ def _read_grd_hdf5(path):
                 for n in var.shape
             ]
 
-        data = np.asarray(var)
-        fill = var.attrs.get("_FillValue")
-        if fill is not None and np.issubdtype(data.dtype, np.floating):
-            data = np.where(data == np.asarray(fill).ravel()[0], np.nan, data)
+        data = _cf_decoded(np.asarray(var), var.attrs)
 
         da = xr.DataArray(
             data, dims=names,

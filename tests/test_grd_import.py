@@ -137,6 +137,30 @@ def test_read_grd_round_trips_write_grd(tmp_path):
     assert da.rio.crs.is_geographic
 
 
+@pytest.mark.parametrize("dtype, scale, offset, fill", [(np.int16, 1e-4, 0.0, -32768), (np.float32, 100.0, 0.5, np.nan)])
+def test_a_packed_netcdf4_grid_is_decoded(tmp_path, dtype, scale, offset, fill):
+    """GMT writes NetCDF-4 grids above a size, packed when asked (`=ns+s...`): scale, offset and fill apply."""
+    import h5py
+
+    x, y = np.linspace(-70.0, -69.0, 11), np.linspace(10.0, 10.5, 6)
+    want = np.full((y.size, x.size), 0.1234)
+    want[2, 3] = np.nan
+    stored = (want - offset) / scale
+    stored = np.where(np.isnan(want), fill, np.round(stored) if np.dtype(dtype).kind == "i" else stored)
+    path = tmp_path / "packed.grd"
+    with h5py.File(path, "w") as f:
+        fx, fy = f.create_dataset("lon", data=x), f.create_dataset("lat", data=y)
+        fx.make_scale("lon")
+        fy.make_scale("lat")
+        z = f.create_dataset("z", data=stored.astype(dtype))
+        z.attrs.update(scale_factor=scale, add_offset=offset, _FillValue=np.asarray(fill, dtype=dtype))
+        z.dims[0].attach_scale(fy)
+        z.dims[1].attach_scale(fx)
+    got = read_grd(path).values
+    assert np.isnan(got[2, 3]) and np.isnan(got).sum() == 1
+    np.testing.assert_allclose(got[~np.isnan(got)], 0.1234, atol=1e-4)
+
+
 def test_utm_epsg_picks_the_containing_zone():
     assert utm_epsg(-67.5, 10.5) == 32619        # zone 19, north
     assert utm_epsg(-67.5, -10.5) == 32719       # same zone, south
