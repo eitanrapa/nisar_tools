@@ -411,3 +411,26 @@ def test_a_slip_through_either_end_of_the_l0b_is_still_a_slip(tmp_path, table):
     pt = l0b.pulse_timing(_write_l0b(tmp_path / "ends.h5", utc, table), echoes=False)
     assert [(s["code"], s["first"], s["count"]) for s in pt.segments()] == [(l0b.EARLY, 0, 3000), (l0b.LATE, 29600, 400)]
     assert np.max(np.abs(pt.corrected - true)) < 1e-9
+
+
+def test_the_aperture_goes_with_the_platform_and_ground_speeds(tmp_path):
+    """B lambda R / (2 V_s V_g), the azimuth FM rate's, with V_g the ground track's: not V_s squared."""
+    from nisar_tools import roff
+    from nisar_tools.rslc import RSLC
+
+    class _Flat:
+        def heights(self, lon, lat):
+            return np.zeros(np.shape(lon))
+
+    orbit = rs.orbit()
+    grid = rs.radar_grid(length=2000, width=400, sensing_start=rs.T0 + 60.0)
+    path = _write_rslc(tmp_path / "rslc.h5", grid, orbit, 1909.6, "NISAR_L0_PR_RRSD_TEST")
+    with RSLC(path) as r:
+        _, aperture = l0b._beam_geometry(r, "A")
+        g = r.radar_grid("A")
+        far = g.starting_range + 0.98 * (g.width - 1) * g.range_pixel_spacing
+        _, vel = r.orbit.interpolate(np.array([g.sensing_mid]))
+        vs = float(np.linalg.norm(vel))
+        vg = float(roff.ground_track_velocity(r, _Flat(), [g.sensing_mid], [far])[0])
+    assert vg < 0.95 * vs
+    assert aperture == pytest.approx(1262.0 * g.wavelength * far / (2 * vs * vg), rel=1e-3)

@@ -844,11 +844,18 @@ def _beam_geometry(rslc, frequency):
     t_beam, _, ok = radar.geo2rdr(llh, orbit, rslc.doppler_centroid(frequency), grid.wavelength,
                                   grid.look_side, t0=t_mid)
     lead = (t_mid - t_beam)[ok]
-    _, vel = orbit.interpolate(np.array([grid.sensing_mid]))
-    speed = float(np.linalg.norm(vel))
+    # The azimuth FM rate is 2 V_s V_g / (lambda R), so a processed bandwidth B takes B lambda R / (2 V_s V_g):
+    # the platform's speed times the ground track's (ISCE3's get_sar_duration), at far range where it is longest.
+    sat, vel = orbit.interpolate(t_mid)
+    target = radar.lonlat_to_xyz(llh[:, 0], llh[:, 1], llh[:, 2])
+    rt, rp = np.linalg.norm(target, axis=1), np.linalg.norm(sat, axis=1)
+    cos_a = (rt * rt + rp * rp - np.linalg.norm(target - sat, axis=1) ** 2) / (2.0 * rt * rp)
+    speed = np.linalg.norm(vel, axis=1)
+    ground = cos_a * rt * speed / rp
+    far = int(np.argmax(ranges))
     sw = rslc.swath(frequency)
     bandwidth = float(sw["processedAzimuthBandwidth"][()]) if "processedAzimuthBandwidth" in sw else grid.prf
-    aperture = bandwidth * grid.wavelength * float(ranges.max()) / (2.0 * speed ** 2)
+    aperture = bandwidth * grid.wavelength * float(ranges[far]) / (2.0 * float(speed[far]) * float(ground[far]))
     return (float(lead.min()), float(lead.max())), aperture
 
 
