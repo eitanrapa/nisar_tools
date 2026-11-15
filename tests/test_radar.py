@@ -271,3 +271,12 @@ def test_geo_bounding_box_encloses_the_swath_at_both_heights():
     lon, lat = np.degrees(corners[:, 0]), np.degrees(corners[:, 1])
     assert ok.all()
     assert (x0 <= lon).all() and (lon <= x1).all() and (y0 <= lat).all() and (lat <= y1).all()
+
+
+def test_epoch_units_refuses_to_drop_a_fraction_of_a_second():
+    """Times are written against the epoch, so truncating it would shift them all; ISCE3 refuses it too."""
+    whole = radar.parse_epoch("seconds since 2026-06-22T00:00:00.000000")
+    assert radar.epoch_units(whole) == "seconds since 2026-06-22T00:00:00"
+    assert radar.parse_epoch(radar.epoch_units(whole)) == whole
+    with pytest.raises(ValueError, match="fractional second"):
+        radar.epoch_units(radar.parse_epoch("seconds since 2026-06-22T00:00:00.500000"))

@@ -53,13 +53,17 @@ def parse_epoch(units):
 
 
 def epoch_units(epoch):
-    """The inverse of `parse_epoch`, at whole-second precision.
+    """The inverse of `parse_epoch`, for a whole-second epoch.
 
-    NISAR product specs require an integer-second epoch; ISCE3 writes it without
-    a fractional part, which is what this reproduces.
+    NISAR product specs require an integer-second epoch, and ISCE3 writes it
+    without a fractional part; a fractional one raises, as in ISCE3, since
+    dropping the fraction would shift every time written against it.
     """
-    epoch = np.datetime64(epoch, "s")
-    return f"seconds since {epoch.astype(str)}"
+    exact = np.datetime64(epoch, "ns")
+    whole = exact.astype("datetime64[s]")
+    if whole != exact:
+        raise ValueError(f"the epoch {exact} has a fractional second; NISAR products need a whole-second epoch")
+    return f"seconds since {whole.astype(str)}"
 
 
 def seconds_since(epoch, when):
