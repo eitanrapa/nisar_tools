@@ -557,9 +557,12 @@ def pulse_timing(source, frequency="A", tolerance=TOLERANCE, anchor="latest", mi
             need = min_anchor * table.size / table.sum()          # a second of them, not a chance match
             edges = np.flatnonzero(np.diff(np.r_[0, follows.astype(np.int8), 0]))
             for a, b in zip(edges[::2], edges[1::2]):
-                if b - a >= need:
-                    run = kind[a:b]
-                    run[run == INCONSISTENT] = RELABELLED
+                run = kind[a:b]
+                relabelled = run == INCONSISTENT
+                # a run explained already (a slip that covers most of the L0B follows the table a pulse off) is
+                # not relabelled, and gives no tag_shift
+                if b - a >= need and relabelled.any():
+                    run[relabelled] = RELABELLED
                     tag_shift = (phase - own) % table.size
                     tag_shift -= table.size if tag_shift > table.size // 2 else 0
     return PulseTiming(granule=name, frequency=frequency, epoch=epoch, utc=utc, line_index=line_index, model=model,

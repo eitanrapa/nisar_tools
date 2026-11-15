@@ -434,3 +434,36 @@ def test_the_aperture_goes_with_the_platform_and_ground_speeds(tmp_path):
         vg = float(roff.ground_track_velocity(r, _Flat(), [g.sensing_mid], [far])[0])
     assert vg < 0.95 * vs
     assert aperture == pytest.approx(1262.0 * g.wavelength * far / (2 * vs * vg), rel=1e-3)
+
+
+def _gap_limits(path, n_echo, table, phase):
+    """Sub-swath limits whose transmit gaps follow the table at `phase`."""
+    r0, dr, n_samples = 888836.24, 3.1228381041437387, 53067
+    fs, tau0 = 299792458.0 / (2 * dr), 2 * r0 / 299792458.0
+    cum = np.concatenate([[0.0], np.cumsum(np.tile(table, n_echo // table.size + 40))])
+    sub = np.full((5, n_echo, 2), np.iinfo(np.uint32).max, np.uint32)
+    for kk in range(n_echo):
+        g = np.round((cum[kk + phase + np.arange(1, 20)] - cum[kk + phase] - tau0) * fs - 14.5)
+        g = g[(g > 600) & (g < n_samples - 2000)]
+        edges = [509] + [v for e in g for v in (e, e + 1849)] + [n_samples]
+        for i in range(len(edges) // 2):
+            sub[i, kk] = edges[2 * i], edges[2 * i + 1]
+    with h5py.File(path, "r+") as f:
+        tx = f["science/LSAR/RRSD/swaths/frequencyA/txH"]
+        tx["numberOfSubSwaths"] = 5
+        for i in range(5):
+            tx[f"validSamplesSubSwath{i + 1}"] = sub[i]
+        tx["slantRange"] = r0 + dr * np.arange(n_samples)
+    return path
+
+
+def test_a_slip_over_most_of_the_l0b_is_not_a_tag_shift(tmp_path, table):
+    """Most echoes tagged with the previous pulse's time: they are early, not relabelled, and nothing is off."""
+    true = _true_times(8000, 1000.0, table, phase=37, drift=0.0)
+    utc = true.copy()
+    utc[3000:] = true[2999:-1]
+    pt = l0b.pulse_timing(_gap_limits(_write_l0b(tmp_path / "majority.h5", utc, table, first_line=0), 8000, table, 37))
+    assert pt.phase_source == "sub-swaths" and pt.table_phase == 37
+    assert [(s["code"], s["first"], s["count"]) for s in pt.segments()] == [(l0b.EARLY, 3000, 5000)]
+    assert pt.tag_shift == 0 and "pulses off the radar's sequence" not in pt.summary()
+    assert np.max(np.abs(pt.corrected - true)) < 1e-9
