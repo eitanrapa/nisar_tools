@@ -153,6 +153,7 @@ class DEMInterpolator:
         if self.dx <= 0:
             raise ValueError("DEM x spacing must be positive")
         self._to_dem = None
+        self._warned_outside = False
         if self.epsg != 4326:
             from pyproj import Transformer
             self._to_dem = Transformer.from_crs("EPSG:4326", f"EPSG:{self.epsg}",
@@ -244,7 +245,8 @@ class DEMInterpolator:
         """Interpolated heights at geodetic points (radians), float64.
 
         Loads just the window the points need (plus the margin) and evaluates
-        ISCE3's spline in float32. Points off the DEM get the reference height.
+        ISCE3's spline in float32. Points off the DEM get the reference height,
+        with a warning the first time (ISCE3 logs one).
         """
         lon_rad = np.asarray(lon_rad, float)
         lat_rad = np.asarray(lat_rad, float)
@@ -255,6 +257,15 @@ class DEMInterpolator:
         finite = np.isfinite(x) & np.isfinite(y)
         if not finite.any():
             return out
+        if not self._warned_outside:
+            xf, yf = self.x0 + self.width * self.dx, self.y0 + self.length * self.dy
+            outside = finite & ((x < self.x0) | (x > xf) | (y < min(yf, self.y0)) | (y > max(yf, self.y0)))
+            if outside.any():
+                import warnings
+
+                self._warned_outside = True
+                warnings.warn(f"{self.path}: part of the area is outside the DEM; it is geocoded at the reference "
+                              f"height, {self.ref_height:g} m", stacklevel=2)
         arr, xstart, ystart = self.load(np.nanmin(x[finite]), np.nanmax(x[finite]),
                                         np.nanmin(y[finite]), np.nanmax(y[finite]))
         if arr is None:

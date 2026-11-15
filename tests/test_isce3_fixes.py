@@ -139,3 +139,30 @@ def test_cube_rdr2geo_tolerance_keeps_ground_velocity():
     fixed = radar.radar_grid_cube_layer(lon, lat, 0.0, grid, orbit, doppler, rdr2geo_threshold=1e-5)
     v0, v1 = isce3["groundTrackVelocity"], fixed["groundTrackVelocity"]
     assert np.all(np.isfinite(v1)) and np.allclose(v0, v1, rtol=1e-3)
+
+
+def test_points_beyond_the_dem_take_the_reference_height_with_a_warning(tmp_path):
+    """As ISCE3, which logs it: once per DEM, not per block."""
+    import warnings
+
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from nisar_tools.dem import DEMInterpolator
+
+    path = tmp_path / "dem.tif"
+    with rasterio.open(path, "w", driver="GTiff", width=40, height=30, count=1, dtype="float32", crs="EPSG:4326",
+                       transform=from_origin(-81.0, 9.0, 0.01, 0.01)) as dst:
+        dst.write(np.full((1, 30, 40), 800.0, np.float32))
+    dem = DEMInterpolator(path)
+    inside = np.deg2rad(np.array([-80.8, -80.75])), np.deg2rad(np.array([8.85, 8.8]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        np.testing.assert_allclose(dem.heights(*inside), 800.0, atol=1e-3)
+    beyond = np.deg2rad(np.array([-80.8, -79.0])), np.deg2rad(np.array([8.85, 8.85]))
+    with pytest.warns(UserWarning, match="outside the DEM.*0 m"):
+        h = dem.heights(*beyond)
+    np.testing.assert_allclose(h, [800.0, 0.0], atol=1e-3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        dem.heights(*beyond)                                 # once
