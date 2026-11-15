@@ -315,6 +315,10 @@ def dual_frequency_screen(
     a decorrelated patch is filled in from its neighbours rather than smeared
     over them.
 
+    `reference_frequency` expresses the screen at another carrier instead
+    (the dispersive phase goes as one over the frequency); only a screen at
+    `stack`'s own carrier is the one to subtract from `stack`.
+
     `remove_offset` subtracts each pair's median. Every unwrapped phase carries
     an arbitrary constant, and the screen inherits ~12x band A's and ~12x band
     B's, so its absolute level is meaningless and would otherwise land in the

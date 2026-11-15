@@ -668,7 +668,8 @@ class UnwrappedStack(RasterStackMixin):
         columns) is for.
 
         Arguments beyond `other` are
-        `nisar_tools.ionosphere.dual_frequency_screen`'s; `scale` is the
+        `nisar_tools.ionosphere.dual_frequency_screen`'s, except that
+        `reference_frequency`, if given, must be this stack's carrier; `scale` is the
         one to know about, since the raw estimate amplifies phase noise ~17x and
         the default low-pass is what makes the correction an improvement rather
         than a degradation.
@@ -693,6 +694,14 @@ class UnwrappedStack(RasterStackMixin):
                 "A phase screen has already been removed from this stack; "
                 "correcting again would subtract a second one."
             )
+        if reference_frequency is not None:
+            f_self = ionosphere._carrier(self, frequency, "first")
+            if not np.isclose(float(reference_frequency), f_self, rtol=1e-12, atol=0.0):
+                raise ValueError(
+                    f"The screen is subtracted from this stack's phase, so it is the dispersive phase at this "
+                    f"stack's carrier ({f_self:.6g} Hz); at reference_frequency={float(reference_frequency):.6g} "
+                    f"it would leave {1 - f_self / float(reference_frequency):+.1%} of the ionosphere. For a screen "
+                    "at another carrier, use ionosphere.dual_frequency_screen(reference_frequency=).")
 
         screen = ionosphere.dual_frequency_screen(
             self, other, frequency=frequency, other_frequency=other_frequency,

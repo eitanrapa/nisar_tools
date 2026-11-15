@@ -573,3 +573,28 @@ def test_a_screen_removed_before_unwrapping_is_not_removed_again(gslc_factory, t
     older = UnwrappedStack(unw.ds.assign_attrs(phase_screen_removed=False, ionosphere=None))
     with pytest.raises(ValueError, match="already been removed"):
         older.correct_ionosphere(other, scale=0)
+
+
+def test_correct_ionosphere_refers_its_screen_to_the_stacks_own_carrier():
+    """Subtracting a screen referred to another carrier would leave 1 - f_A/f of the ionosphere."""
+    fa, fb = 1.239e9, 1.2935e9
+    ny, nx = 20, 30
+    y, x = 4e6 - 80.0 * np.arange(ny), 4e5 + 80.0 * np.arange(nx)
+    Y, X = np.meshgrid(y, x, indexing="ij")
+    psi = 0.002 * (X - x[0])                                 # non-dispersive, rad at f_A
+    d = 3.0 + 0.004 * (Y - y[0])                             # ionosphere at f_A
+
+    def stack(phase, f):
+        return UnwrappedStack(xr.Dataset(
+            {"unw": (("pair", "y", "x"), phase[None].astype(np.float32)),
+             "coherence": (("pair", "y", "x"), np.ones((1, ny, nx), np.float32))},
+            coords={"pair": [0], "y": y, "x": x, "ref_time": ("pair", np.array(["2025-01-01"], "datetime64[ns]")),
+                    "sec_time": ("pair", np.array(["2025-01-13"], "datetime64[ns]"))},
+            attrs={"epsg": 32611, "center_frequency": f, "source": "snaphu"}))
+
+    a, b = stack(psi + d, fa), stack((fb / fa) * psi + (fa / fb) * d, fb)
+    for reference in (None, fa):
+        out = a.correct_ionosphere(b, scale=0, remove_offset=False, reference_frequency=reference)
+        np.testing.assert_allclose(out.ds["unw"].values[0], psi, atol=1e-4)
+    with pytest.raises(ValueError, match="leave \\+4.2% of the ionosphere"):
+        a.correct_ionosphere(b, scale=0, remove_offset=False, reference_frequency=fb)
