@@ -352,7 +352,11 @@ def tx_gap_phase(source, frequency="A", count=519, tolerance=3.0, tx=None):
 
 @dataclasses.dataclass
 class LeakagePhase:
-    """`tx_leakage_phase`'s answer: the PRI table's phase the radar flew, read from its echoes."""
+    """`tx_leakage_phase`'s answer: the PRI table's phase the radar flew, read from its echoes.
+
+    `ratio` is the mean amplitude in the windows the table predicts at `phase` over the echoes' mean amplitude;
+    `runner_up` is the best other phase's.
+    """
 
     granule: str
     phase: int
@@ -374,7 +378,7 @@ class LeakagePhase:
     def summary(self):
         """One line, for logs."""
         return (f"{self.granule}: the transmit leakage in {self.pulses} echoes follows the PRI table at phase "
-                f"{self.phase} (power ratio {self.ratio:.2f}, next {self.runner_up:.2f}; offset {self.offset:+.0f} "
+                f"{self.phase} (amplitude ratio {self.ratio:.2f}, next {self.runner_up:.2f}; offset {self.offset:+.0f} "
                 f"samples), counted from line {self.first_line}")
 
 
