@@ -85,6 +85,18 @@ def test_pulse_timing_finds_each_defect_and_restores_the_times(defective, table)
     assert not pt.ok and "next pulse" in pt.summary()
 
 
+def test_a_tag_microseconds_off_does_not_pull_the_fitted_sequence(tmp_path, table):
+    # as delivered: the echo before a slip tagged 4.5 us early, inside the tolerance, so it counts as consistent
+    true = _true_times(6000, 1000.0, table)
+    utc = true.copy()
+    utc[4000:] = true[3999:-1]
+    utc[3999] -= 4.5e-6
+    pt = l0b.pulse_timing(_write_l0b(tmp_path / "l0b.h5", utc, table))
+    assert pt.kind[3999] == l0b.CONSISTENT and pt.kind[4000] == l0b.EARLY
+    assert np.max(np.abs(pt.model - true)) < 1e-9
+    assert abs(pt.drift - 0.12e-6) < 1e-11
+
+
 def test_a_clean_l0b_is_consistent_with_any_table_phase(tmp_path, table):
     true = _true_times(5000, 50.0, table, phase=101)
     pt = l0b.pulse_timing(_write_l0b(tmp_path / "clean.h5", true, table))

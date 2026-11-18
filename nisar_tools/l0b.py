@@ -35,6 +35,9 @@ from . import radar
 RRSD = "science/LSAR/RRSD"
 #: A tag this close (s) to its fitted table time counts as consistent.
 TOLERANCE = 10e-6
+#: Only tags this close (s) to the first fit refine it: a consistent tag can still be microseconds off (the echo
+#: before a slip, on delivered L0Bs), where tags that are right follow the table to about a nanosecond.
+REFIT_TOLERANCE = 1e-6
 
 CONSISTENT, EARLY, LATE, INCONSISTENT, RELABELLED = 0, -1, 1, 2, 3
 KIND_NAMES = {CONSISTENT: "consistent", EARLY: "previous pulse's time",
@@ -90,7 +93,8 @@ def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min
     `"majority"` the longest stretch's. Without any such stretch (`anchored`
     False) the constant comes from the latest pair of neighbouring tags, so a
     lone stray tag cannot set it. The clock drift is fitted on the agreeing
-    tags when they span `min_anchor` seconds.
+    tags when they span `min_anchor` seconds, then refitted on those within
+    `REFIT_TOLERANCE` of that fit.
     """
     if anchor not in ("latest", "majority"):
         raise ValueError(f"anchor must be 'latest' or 'majority', not {anchor!r}")
@@ -134,8 +138,8 @@ def _fit_table(utc, line_index, table, tolerance=TOLERANCE, anchor="latest", min
         level = float(np.nanmax(np.fmin(lag[:-1], lag[1:])))
     seq = _table_times(k, table, phase)
     model, drift = seq + level, 0.0
-    for _ in range(2):
-        near = np.abs(utc - model) < tolerance
+    for limit in (tolerance, min(tolerance, REFIT_TOLERANCE)):
+        near = np.abs(utc - model) < limit
         if near.sum() < 2 or np.ptp(seq[near]) < min_anchor:
             break
         x = seq - seq[near][0]
