@@ -46,12 +46,13 @@ def _true_utc():
     return 36640.0 + cum[k]
 
 
-def _write_l0b(path, slip_at=None):
+def _write_l0b(path, slip_at=None, early=0.0):
     table = _table()
     k = np.arange(6000)
     utc = _true_utc()
     if slip_at is not None:
         utc[slip_at:] = utc[slip_at - 1:-1].copy()         # tagged with the previous pulse's time
+        utc[slip_at - 1] -= early                           # and the echo before it a little early, as delivered
     with h5py.File(path, "w") as f:
         f["science/LSAR/identification/granuleId"] = np.bytes_(path.stem)
         tx = f.create_group("science/LSAR/RRSD/swaths/frequencyA/txH")
@@ -97,15 +98,19 @@ def rslc(tmp_path):
     return path
 
 
-@pytest.fixture
-def inputs(tmp_path):
+def _inputs(tmp_path, early=0.0):
     l0b_dir, anc = tmp_path / "l0b", tmp_path / "anc"
     l0b_dir.mkdir()
     anc.mkdir()
-    _write_l0b(l0b_dir / L0B, slip_at=4000)
+    _write_l0b(l0b_dir / L0B, slip_at=4000, early=early)
     for name in CAL:
         (anc / name).write_text("")
     return l0b_dir, anc
+
+
+@pytest.fixture
+def inputs(tmp_path):
+    return _inputs(tmp_path)
 
 
 def test_runconfig_is_production_with_local_inputs(rslc, inputs, tmp_path):
@@ -136,6 +141,15 @@ def test_runconfig_is_production_with_local_inputs(rslc, inputs, tmp_path):
     repaired = np.load(work / "pulse_times.npz")
     assert list(repaired) == [f"{L0B}__A__txH"]
     np.testing.assert_allclose(repaired[f"{L0B}__A__txH"], _true_utc(), rtol=0, atol=1e-9)
+
+
+def test_every_echo_gets_its_time_from_the_fitted_sequence(rslc, tmp_path):
+    # the echo before the slip 4.5 us early: inside the tolerance, so consistent, and re-timed all the same
+    l0b_dir, anc = _inputs(tmp_path, early=4.5e-6)
+    focus.focus_inputs(rslc, tmp_path / "work", l0b_dir=l0b_dir, ancillary_dir=anc, dem=tmp_path / "dem.tif",
+                       download=False, window={"start_time": "2026-08-20T10:10:52", "end_range": 1040000})
+    repaired = np.load(tmp_path / "work" / "pulse_times.npz")[f"{L0B}__A__txH"]
+    np.testing.assert_allclose(repaired, _true_utc(), rtol=0, atol=1e-9)
 
 
 def test_unknown_window_keys_are_refused(rslc, inputs, tmp_path):

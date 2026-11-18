@@ -37,8 +37,8 @@ v0.25.16 reproduces production, defects included.
 - production's own run configuration with these paths, CPU processing and a
   local output;
 - `pulse_times.npz`, the repaired times of every L0B's bands and transmit
-  polarizations, and `pulse_timing.txt`, what `nisar_tools.l0b.pulse_timing`
-  finds in them.
+  polarizations (every echo's time from the pulse sequence fitted to its tags),
+  and `pulse_timing.txt`, what `nisar_tools.l0b.pulse_timing` finds in them.
 """
 
 import datetime as _dt
@@ -276,14 +276,18 @@ def _frame_bbox(config, rslc):
 
 
 def _repair_pulse_times(l0bs, workdir):
-    """Write every L0B's repaired pulse times to `pulse_times.npz` and the findings to `pulse_timing.txt`."""
+    """Write every L0B's repaired pulse times to `pulse_times.npz` and the findings to `pulse_timing.txt`.
+
+    Every echo gets the time of the pulse sequence fitted to its tags (`PulseTiming.model`), not only the echoes
+    that disagree with it: a tag inside the tolerance can still be microseconds off.
+    """
     from .l0b import UnanchoredTags, pulse_timings
 
     times, lines = {}, []
     for path in l0bs:
         try:
             for (frequency, tx), pt in pulse_timings(path).items():
-                times[f"{Path(path).name}__{frequency}__{tx}"] = pt.corrected
+                times[f"{Path(path).name}__{frequency}__{tx}"] = pt.model
                 lines.append(pt.summary())
         except UnanchoredTags as error:
             lines.append(f"{Path(path).stem}: {error}; its tags are focused as stored")

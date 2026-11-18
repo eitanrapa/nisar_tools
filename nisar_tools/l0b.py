@@ -213,7 +213,10 @@ class PulseTiming:
 
     @property
     def corrected(self):
-        """The tags, with every one that is not consistent replaced by its table time."""
+        """The tags, with every one that is not consistent replaced by its table time.
+
+        A consistent tag is kept as stored, even microseconds off; `model` re-times every echo.
+        """
         return np.where(self.kind == CONSISTENT, self.utc, self.model)
 
     @property

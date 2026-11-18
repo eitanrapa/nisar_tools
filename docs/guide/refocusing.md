@@ -34,8 +34,9 @@ environment that has it (`python=`, or the `NISAR_TOOLS_ISCE3_PYTHON` variable).
 does; v0.25.16 is the release that focused the provisional products.
 
 ISCE3 focuses an L0B's pulse tags as stored. `focus_inputs` repairs them instead (see [Checking an RSLC before
-use](checking-rslcs.md)) and writes the repaired times beside the run configuration; `run_focus` hands them to ISCE3's
-L0B reader as it runs, so the repair needs no patched ISCE3.
+use](checking-rslcs.md)) and writes the repaired times beside the run configuration: every echo's time from the pulse
+sequence fitted to its tags, since a tag the check counts as consistent can still be microseconds off. `run_focus`
+hands them to ISCE3's L0B reader as it runs, so the repair needs no patched ISCE3.
 
 It patches in, the same way, the focusing fixes ISCE3's development branch has made since v0.25.16, each only where
 the ISCE3 it runs still has the old code:
