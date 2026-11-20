@@ -144,7 +144,10 @@ report = timing_report(rslc)       # the L0B's pulse times, read remotely
 gslc = geocode_rslc(rslc, "data/", dem, range_shift={"B": offset.shift}, azimuth_shift=report)
 ```
 
-`range_shift` aligns band B's ground with A's, which split-spectrum ionosphere screens need; `azimuth_shift` moves
+`range_shift` aligns band B's ground with A's, which split-spectrum ionosphere screens need. The offset measured on the
+RSLC also holds B's dispersive delay against A (B, the higher band, is delayed 0.0217 m less per slant TECU), and a
+`tec_file` removes each band's own delay; given both, the geocoding takes that dispersive part out of the offset, so B
+does not lose it twice. A plain callable is applied as given. `azimuth_shift` moves
 spans tagged a pulse early or late back by a pulse, sets the mask to 0 where a slip's edge mixes good and bad echoes,
 and restores the start of a datatake that ISCE3 left out of `validSamplesSubSwath`. Do not pass `azimuth_shift` together with a `registration` measured on the same RSLC, which already holds the
 shift.

@@ -50,6 +50,7 @@ from . import _gslc_metadata, gslc_product as gp, radar
 from ._geocode_kernels import interpolate_slc, radar_indices, truncate_mantissa
 from .corrections import compute_timing_corrections
 from .dem import DEMInterpolator
+from .qa import BandOffset
 from .rslc import RSLC, geogrid_from_bounds, metadata_geogrid
 
 SOFTWARE_VERSION = "nisar_tools 0.1.0 (port of the ISCE3 0.25.16 GSLC workflow)"
@@ -342,6 +343,49 @@ def _timing_hooks(azimuth_shift):
     return azimuth_shift, None
 
 
+def _measured_band_offset(range_shift):
+    """The `qa.BandOffset` a `range_shift` value is, given as itself or as its `shift`; else None."""
+    if isinstance(range_shift, BandOffset):
+        return range_shift
+    owner = getattr(range_shift, "__self__", None)
+    if isinstance(owner, BandOffset) and getattr(range_shift, "__func__", None) is BandOffset.shift:
+        return owner
+    return None
+
+
+def _range_shift_hook(range_shift, corrections, rslc, freq, clamp=False):
+    """The `range_shift(t, r)` that geocodes band `freq`.
+
+    A `qa.BandOffset` was measured on the RSLC, so besides band B's own offset
+    it holds B's dispersive delay against A: B, the higher band, is delayed
+    less, 0.0217 m per slant TECU. The timing corrections remove each band's
+    own delay at its own centre frequency, so wherever they apply the TEC part
+    (everywhere with `clamp`, as `radar_indices`), that part is taken out of
+    the shift here; left in, B would lose it twice. Any other callable is
+    returned as given: an offset of the band's own, such as k x 3.1228 m +
+    0.98 m.
+    """
+    offset = _measured_band_offset(range_shift)
+    if offset is None:
+        return range_shift
+    ionosphere = getattr(corrections, "ionosphere_range", None)
+    if ionosphere is None:
+        return offset.shift
+    table = corrections.slant_range
+    # the TEC delay goes as 1/f^2: tau_X - tau_A = tau_X (1 - f_X^2 / f_A^2)
+    ratio = 1.0 - (rslc.center_frequency(freq) / rslc.center_frequency("A")) ** 2
+
+    def shift(t, r):
+        t, r = np.asarray(t, float), np.asarray(r, float)
+        inside = np.isfinite(t) & np.isfinite(r)
+        if not clamp:
+            inside &= table.contains(np.where(inside, t, table.y_start), np.where(inside, r, table.x_start))
+        delay = ionosphere.eval(np.where(inside, t, ionosphere.y_start), np.where(inside, r, ionosphere.x_start))
+        return np.asarray(offset.shift(t, r), float) - np.where(inside, ratio * delay, 0.0)
+
+    return shift
+
+
 def pixel_radar_indices(x, y, epsg, dem, grid, orbit, doppler, valid, corrections=None,
                         registration=None, range_shift=None, azimuth_shift=None,
                         chip_rows=False, clamp_corrections=False):
@@ -471,10 +515,16 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
     range_shift : dict, optional
         `{frequency: f(t, r)}`, metres to add to that band's slant range at
         zero-Doppler time `t` and range `r`: corrects the band's own range
-        error. `nisar_tools.qa.band_offset(rslc).shift` is band B's offset
-        against A (whole periods of the 48 MHz clock, constant per data
-        window), which otherwise leaks deformation into split-spectrum screens.
-        The flattening range is not changed.
+        error. The flattening range is not changed. For band B pass
+        `nisar_tools.qa.band_offset(rslc)` or its `shift`: B's offset against
+        A (whole periods of the 48 MHz clock, constant per data window, plus
+        B's calibration), which otherwise leaks deformation into
+        split-spectrum screens. Measured on the RSLC, it also holds B's
+        dispersive delay against A, which a `tec_file` removes on its own
+        (each band's at its own frequency): that part is then taken out of the
+        offset wherever the TEC correction applies, or B would lose it twice
+        and land 0.0217 m per slant TECU off A. Any other callable is applied
+        as given.
     azimuth_shift : callable or `nisar_tools.l0b.TimingReport`, optional
         `f(t)`, seconds to add to zero-Doppler time `t` in every band: corrects
         pulses tagged with the wrong transmit time. A `TimingReport` shifts by
@@ -574,7 +624,9 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             stats.update(_geocode_frequency(
                 f, rslc, freq, pols, grids[freq], grid, orbit, dem_interp,
                 corrections[freq], flatten, block_size, workers, log, bands,
-                registration=(registration or {}).get(freq), range_shift=(range_shift or {}).get(freq),
+                registration=(registration or {}).get(freq),
+                range_shift=_range_shift_hook((range_shift or {}).get(freq), corrections[freq], rslc, freq,
+                                              clamp=fix_pixels),
                 azimuth_shift=azimuth_shift, fix_metadata=fix_metadata, fix_pixels=fix_pixels))
         for (freq, pol), st in stats.items():
             st.write(f[f"{gp.PRODUCT}/grids/frequency{freq}/{pol}"])
@@ -590,7 +642,9 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             registration=None if not registration else {
                 k: _registration_label(v) for k, v in registration.items() if k in freq_pols},
             range_shift=None if not range_shift else {
-                k: _describe(v) for k, v in range_shift.items() if k in freq_pols},
+                k: _describe(v) + ("; its dispersive delay against band A taken out where the TEC correction applies"
+                                   if tec_file is not None and _measured_band_offset(v) is not None else "")
+                for k, v in range_shift.items() if k in freq_pols},
             azimuth_shift=None if azimuth_shift is None else _describe(azimuth_shift),
             isce3_compatible=isce3_compatible,
             frequencies=dict(freq_pols), epsg=epsg, bounds=bounds,

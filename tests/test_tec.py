@@ -177,3 +177,20 @@ def test_download_tec_refuses_a_login_page(tmp_path, monkeypatch, fake_cmr):
     monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(Session=Session))
     with pytest.raises(IOError, match="did not return JSON"):
         download.download_tec(tmp_path / "tec.json", "2026-06-22T22:54:16")
+
+
+def test_the_ionospheric_part_of_the_range_correction_is_kept_apart(tmp_path):
+    """`ionosphere_range` is the TEC part of `slant_range` alone, with or without the tides added to it."""
+    from nisar_tools.corrections import compute_timing_corrections
+
+    orbit, grid = rs.orbit(), rs.radar_grid()
+    path = _tec_file(tmp_path, lambda k: 10.0)
+    assert compute_timing_corrections(grid, orbit, FREQ, solid_earth_tides=False).ionosphere_range is None
+    plain = compute_timing_corrections(grid, orbit, FREQ, tec_file=path, solid_earth_tides=False)
+    assert plain.ionosphere_range is plain.slant_range
+    pytest.importorskip("pysolid")
+    tides = compute_timing_corrections(grid, orbit, FREQ, tec_file=path, solid_earth_tides=True)
+    np.testing.assert_allclose(tides.ionosphere_range.data,
+                               tides.slant_range.data - tides.arrays["slantRangeSolidEarthTides"], atol=1e-12)
+    t, r = grid.sensing_mid, 0.5 * (grid.starting_range + grid.end_range)
+    assert tides.ionosphere_range.eval(t, r) == pytest.approx(plain.slant_range.eval(t, r), rel=1e-4)

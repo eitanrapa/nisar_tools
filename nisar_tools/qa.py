@@ -9,7 +9,8 @@
   sampling clock (3.12 m each), constant within a ~10 s data window and the same
   on most dates of a track. It misplaces B against A, which turns the
   deformation's range gradient into split-spectrum screen error; the offset it
-  measures is what `geocode_rslc(range_shift=)` corrects B with.
+  measures is what `geocode_rslc(range_shift=)` corrects B with (less B's
+  dispersive delay against A where a TEC correction already removes it).
 
 The pulse timing behind an RSLC is checked by `nisar_tools.l0b.timing_report`.
 """
@@ -250,8 +251,11 @@ class BandOffset:
     the same window, else the nearest, where nothing was measured: `measured`
     says which). `k` is that offset in whole clock periods after B's
     `calibration` and a typical ionosphere, for diagnosis: the correction
-    (`shift`) uses the measured offset itself, which also takes out the
-    calibration and the dispersive delay.
+    (`shift`) is the measured offset itself, which also takes out the
+    calibration and B's dispersive delay against A (B, the higher band, is
+    delayed less, 0.0217 m per slant TECU). Pass this object or its `shift` to
+    `geocode_rslc(range_shift=)`: with a `tec_file`, which removes each band's
+    own delay, the geocoding takes that dispersive part back out.
     """
 
     granule: str

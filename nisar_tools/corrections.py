@@ -225,6 +225,9 @@ class TimingCorrections:
 
     `azimuth` (seconds) and `slant_range` (metres) are `None` when no
     correction of that kind was computed -- ISCE3's empty LUT.
+    `ionosphere_range` is the TEC part of `slant_range` alone, over the same
+    table (`None` without a TEC file): the band's own dispersive delay, which
+    a band offset measured on the RSLC also holds.
     """
 
     grid: radar.RadarGrid
@@ -234,6 +237,7 @@ class TimingCorrections:
     tec_file: str = None
     solid_earth_tides: bool = False
     total_tec_only: bool = False
+    ionosphere_range: radar.LUT2d = None
 
     @property
     def az_vec(self):
@@ -289,6 +293,7 @@ def compute_timing_corrections(radar_grid, orbit, center_frequency, dem=None,
         az_tec, rg_tec = tec_luts(tec_file, center_frequency, orbit, radar_grid, total_only=out.total_tec_only)
         if set_rg is None:
             out.azimuth, out.slant_range = az_tec, rg_tec
+            out.ionosphere_range = rg_tec
             out.arrays["azimuthIonosphere"] = az_tec.data
             out.arrays["slantRangeIonosphere"] = rg_tec.data
             return out
@@ -300,6 +305,7 @@ def compute_timing_corrections(radar_grid, orbit, center_frequency, dem=None,
         out.arrays["slantRangeSolidEarthTides"] = set_rg
         out.azimuth = _lut(tec_az)
         out.slant_range = _lut(set_rg + tec_rg)
+        out.ionosphere_range = _lut(tec_rg)
         return out
 
     out.arrays["slantRangeSolidEarthTides"] = set_rg

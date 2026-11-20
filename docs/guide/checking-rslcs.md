@@ -76,3 +76,10 @@ range. On a pair it does not misregister B against itself, but it misplaces B ag
 then mistakes the deformation's range gradient for ionosphere (about 12 times the offset times the gradient).
 `band_offset` measures the offset per data window and range bin by cross-correlating the two bands' amplitudes;
 `geocode_rslc(range_shift={"B": band_offset(rslc).shift})` removes it.
+
+The measured offset also holds the ionosphere: B, the higher band, is delayed 0.0217 m less per slant TECU, so dusk
+passes (35-55 slant TECU) read about a metre below the clock-period levels. With a `tec_file`, which removes each band's
+own delay, `geocode_rslc` takes that part out of the measured offset; a plain callable, such as the level k x 3.1228 m
++ 0.98 m, is applied as given. The amplitudes of two bands that do not overlap in frequency correlate only through the
+scene's texture, so a whole frame can read between levels. Where it matters, check the change between two dates
+instead: dense offsets of each band, date 1 against date 2, differ only by B's change against A.

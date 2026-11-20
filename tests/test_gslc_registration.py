@@ -201,8 +201,10 @@ def test_geocoding_repairs_the_mask_unless_isce3s_masks_are_kept():
     assert _valid_samples(Rslc(), "A", False, Report())[0][4].tolist() == [0, 10]
 
 
-def _two_band_rslc(tmp_path):
-    """A small two-band RSLC (band B's range samples 8 times A's) and a flat DEM covering it."""
+def _two_band_rslc(tmp_path, centres=None):
+    """A small two-band RSLC (band B's range samples 8 times A's) and a flat DEM covering it.
+
+    `centres` gives each band's centre frequency (default: both the grid's)."""
     import h5py
     import rasterio
     from rasterio.transform import from_origin
@@ -231,7 +233,7 @@ def _two_band_rslc(tmp_path):
             fb = sw.create_group(f"frequency{band}")
             fb["listOfPolarizations"] = np.array([b"HH"])
             fb["slantRange"] = grid.starting_range + np.arange(width) * grid.range_pixel_spacing * factor
-            fb["processedCenterFrequency"] = radar.SPEED_OF_LIGHT / grid.wavelength
+            fb["processedCenterFrequency"] = (centres or {}).get(band, radar.SPEED_OF_LIGHT / grid.wavelength)
             fb["processedRangeBandwidth"] = bandwidth
             fb["numberOfSubSwaths"] = 1
             fb["validSamplesSubSwath1"] = np.column_stack(
@@ -481,3 +483,96 @@ def test_geocoding_hands_the_geometric_lines_to_the_interpolator(tmp_path, monke
     want = -2 * np.pi * 950.0 / grid.prf * 0.4
     np.testing.assert_allclose(np.angle(geometric[ok] * np.conj(shifted[ok])), want, atol=1e-5)
     np.testing.assert_allclose(np.abs(geometric[ok]), np.abs(shifted[ok]), rtol=1e-5)
+
+
+# -- band B's measured range offset and the TEC correction ------------------------------------
+def _band_offset(value=4.1):
+    """A `BandOffset` of one cell: band B `value` m beyond A everywhere."""
+    from nisar_tools import qa
+    return qa.BandOffset(granule="g", blocks=[], times=np.array([0.0, 1e6]), ranges=np.array([0.0, 1e7]),
+                         offset=np.array([[value]]), measured=np.array([[True]]))
+
+
+class _Centres:
+    """An RSLC's centre frequencies, as the 40 + 5 MHz modes have them."""
+
+    def center_frequency(self, freq):
+        return {"A": 1239e6, "B": 1293.5e6}[freq]
+
+
+def _tec_json(tmp_path, sub_tec, start=82_300.0, n=41, spacing=10.0):
+    """An IMAGEN-style TEC JSON with a constant sub-orbital TEC (TECU), as `test_tec` builds them."""
+    import json
+    t = start + spacing * np.arange(n)
+    doc = {"utc": [str(rs.EPOCH + np.timedelta64(int(s), "s")) for s in t],
+           "totTecNr": [sub_tec + 3.0] * n, "topTecNr": [3.0] * n,
+           "totTecFr": [sub_tec + 3.5] * n, "topTecFr": [3.5] * n}
+    path = tmp_path / "NISAR_ANC_TEC_test.json"
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def test_a_measured_band_offset_loses_its_dispersive_part_where_the_tec_correction_applies():
+    """Measured on the RSLC, band B's offset holds B's dispersive delay against A, which the TEC correction removes
+    on its own: taken out where the correction applies (ISCE3 skips it outside its table, `clamp` does not)."""
+    from nisar_tools.corrections import TimingCorrections
+    from nisar_tools.gslc_geocode import _range_shift_hook
+
+    tec = radar.LUT2d.from_coords([800e3, 900e3], [100.0, 200.0], np.full((2, 2), 10.0))   # B's own delay, m
+    corr = TimingCorrections(grid=None, slant_range=tec, ionosphere_range=tec)
+    offset = _band_offset()
+    expected = 4.1 + 10.0 * ((1293.5 / 1239.0) ** 2 - 1)          # A is delayed 0.90 m more than B: 5.0 m
+    t = np.array([150.0, 150.0, 300.0, np.nan])                  # inside, beyond in range, beyond in time, no pixel
+    r = np.array([850e3, 950e3, 850e3, np.nan])
+    for given in (offset, offset.shift):
+        np.testing.assert_allclose(_range_shift_hook(given, corr, _Centres(), "B")(t, r), [expected, 4.1, 4.1, 4.1])
+        np.testing.assert_allclose(_range_shift_hook(given, corr, _Centres(), "B", clamp=True)(t, r)[:3], expected)
+    no_tec = TimingCorrections(grid=None, slant_range=radar.LUT2d())
+    np.testing.assert_allclose(_range_shift_hook(offset, no_tec, _Centres(), "B")(t, r), 4.1)
+    level = lambda t, r: np.full(np.shape(t), 4.1)                # noqa: E731 -- an offset of B's own, as given
+    assert _range_shift_hook(level, corr, _Centres(), "B") is level
+    assert _range_shift_hook(None, corr, _Centres(), "B") is None
+
+
+def test_geocoding_takes_the_tec_delay_out_of_a_measured_band_offset(tmp_path, monkeypatch):
+    """With a TEC file, band B's measured offset loses B's dispersive delay against A at the two bands' own
+    frequencies, and the run configuration says so; without one it is used as measured."""
+    from nisar_tools import geocode_rslc, gslc_geocode
+    from nisar_tools.corrections import tec_luts
+
+    centres = {"A": 1239e6, "B": 1293.5e6}
+    rslc, dem = _two_band_rslc(tmp_path, centres)
+    tec = _tec_json(tmp_path, 40.0)                               # a dusk pass
+    offset = _band_offset()
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _record(f, rslc_, freq, pols, geogrid, grid, *args, range_shift=None, **kwargs):
+        seen["grid"], seen["shift"] = grid, range_shift
+        return {}
+
+    def _run_config(**kwargs):
+        seen["label"] = kwargs["range_shift"]
+        raise _Stop
+
+    monkeypatch.setattr(gslc_geocode, "_geocode_frequency", _record)
+    monkeypatch.setattr(gslc_geocode, "_write_cubes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gslc_geocode._gslc_metadata, "describe_run", _run_config)
+    with pytest.raises(_Stop):
+        geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["B"], tec_file=tec, solid_earth_tides=False,
+                     range_shift={"B": offset.shift}, workers=1)
+    grid = seen["grid"]
+    t = np.array([grid.sensing_start + 0.3 * (grid.sensing_stop - grid.sensing_start)])
+    r = np.array([grid.starting_range + 0.6 * (grid.end_range - grid.starting_range)])
+    tau = {band: tec_luts(tec, f0, rs.orbit(), grid)[1].eval(t, r) for band, f0 in centres.items()}
+    assert 0.8 < (tau["A"] - tau["B"])[0] < 1.4                   # ~0.0217 m per slant TECU
+    np.testing.assert_allclose(seen["shift"](t, r), 4.1 + (tau["A"] - tau["B"]), rtol=1e-9)
+    assert seen["label"]["B"].startswith("BandOffset of g;") and "TEC correction" in seen["label"]["B"]
+    seen.clear()
+    with pytest.raises(_Stop):
+        geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["B"], solid_earth_tides=False,
+                     range_shift={"B": offset}, workers=1)
+    np.testing.assert_allclose(seen["shift"](t, r), 4.1)
+    assert seen["label"]["B"] == "BandOffset of g"
