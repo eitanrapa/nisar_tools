@@ -35,12 +35,12 @@ rupture in it, most of these steps reduce to the [Getting started](getting-start
 
 **The problem.** ASF's GSLCs each apply their own ionospheric and solid Earth tide geolocation correction. Between two
 dates these can differ by about a resolution cell in both range and azimuth, which costs a large part of the pair's
-coherence. Because NISAR keeps the Doppler carrier in its SLCs, an along-track misregistration \(\Delta t\) also biases
-the phase, by \(-2\pi f_\mathrm{dc}\,\Delta t\).
+coherence.
 
 **What is done.** The first date's ASF GSLC is kept. The second date's RSLC is geocoded with `geocode_rslc` (the port of
 ISCE3's GSLC workflow) onto the first date's grid (`like=`), with `tec_file=None`, `solid_earth_tides=False` and a
-`RegistrationField` that holds the first date's own TEC and tide shifts plus the measured offsets between the two dates.
+registration made of two `RegistrationField`s added together: the measured offsets between the two dates, and the first
+date's own TEC and tide shifts with `carrier="shifted"`.
 
 - **The offsets** come from the package's ROFF (`roff.dense_offsets`, a numpy port of ISCE3's offsets workflow, whose
   correlator is otherwise GPU-only), densely near the rupture and on a coarse lattice elsewhere. Far from the rupture a
@@ -50,11 +50,16 @@ ISCE3's GSLC workflow) onto the first date's grid (`like=`), with `tec_file=None
   geolocation shift scales as \((f_A/f_B)^2\); a tide shift does not).
 - **Mixing a corrected GSLC with an uncorrected one is safe**: the corrections only move where pixels are sampled, and
   both ISCE3 and the port flatten the phase with the uncorrected range.
-- **The carrier term.** When the field follows an along-track shift, the Doppler carrier is re-ramped at the shifted
-  position, as ISCE3's resampler also does. That is right for motion and geolocation. For the part of the shift caused
-  by the ionosphere it leaves \(-2\pi f_\mathrm{dc}\,s/V_g\) in the phase (\(s\) the shift on the ground, \(V_g\) the
-  ground-track velocity), about 17 mm of LOS per metre of shift. It scales with frequency, so no split-spectrum screen
-  removes it; the screen's along-track gradient predicts it.
+- **The carrier.** NISAR keeps the Doppler carrier in its SLCs, so moving where a pixel is sampled by \(s\) along track
+  changes its phase by \(2\pi f_\mathrm{dc}\,s/V_g\) (\(V_g\) the ground-track velocity), about 17 mm of LOS per metre.
+  The measured offsets take the carrier at the position before their shift (`carrier="geometric"`, the default), so the
+  pair's phase is the unregistered pair's: motion projects on the GSLC cube's look vector (the native Doppler look)
+  everywhere, and the ionosphere's along-track shift, which the offsets also follow, leaves nothing in the phase. The
+  first date's own shifts take it at the shifted position, as in that date's ASF GSLC. With the carrier at the shifted
+  position for the measured offsets too, as ISCE3's resampler does, the phase would project the motion the offsets
+  follow on the zero-Doppler look, and keep \(-2\pi f_\mathrm{dc}\,s/V_g\) for the ionospheric part, which scales with
+  frequency, so no split-spectrum screen removes it. Within kilometres of a rupture, where the offsets are dense, that
+  term can reach centimetres.
 
 **The GUNW** coregisters the two RSLCs in radar geometry and geocodes the result. A "rubbersheet" refines the geometry;
 in the solid-earth PR products this is one quadratic per frame and offset component, fitted to dense offsets with
@@ -223,6 +228,7 @@ agree closely. The GUNW's `unwrappedPhase` is not corrected for the ionosphere: 
   GUNW drops them.
 - **The filter's own uncertainty** (ISCE3's output sigma) is larger than most small-scale residuals, so it cannot say
   whether a feature is noise.
-- **The carrier term** (step 1) stays in the phase wherever the registration follows an ionospheric along-track shift.
-  Its long-wavelength part is absorbed by the ramps an inversion solves for; within kilometres of the trace, where the
-  field follows the ROFF, its size has not been established.
+- **Relative timing errors** between the two RSLCs that the measured offsets hold stay in the phase (step 1), as in
+  an unregistered pair, at about 17 mm of LOS per metre of along-track shift. Correct a known one with `azimuth_shift`.
+  Pairs registered before the `carrier` option (the carrier at the shifted position throughout) convert with
+  `RegistrationField.carrier_phase` from their saved fields.

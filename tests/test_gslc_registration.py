@@ -345,3 +345,139 @@ def test_the_metadata_grids_are_posted_in_the_output_crs_units(tmp_path, monkeyp
         geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["A"], solid_earth_tides=False,
                      isce3_compatible=mode, **kwargs)
     assert seen == [(cube, True), (lut, False)]
+
+
+# -- the carrier convention ---------------------------------------------------------------
+def _target(fd_over_prf, line, sample, n=96):
+    """A band-limited point target at fractional (`line`, `sample`) whose azimuth spectrum sits
+    on the Doppler carrier `fd_over_prf` (cycles per line); real and positive at its peak."""
+    fa = fd_over_prf + np.linspace(-0.35, 0.35, 15)
+    fr = np.linspace(-0.35, 0.35, 15)
+    lines, samples = np.mgrid[0:n, 0:n].astype(float)
+    az = np.exp(2j * np.pi * fa[:, None, None] * (lines - line)).sum(0)
+    rg = np.exp(2j * np.pi * fr[:, None, None] * (samples - sample)).sum(0)
+    return (az * rg).astype(np.complex64)
+
+
+def test_a_geometric_carrier_is_taken_before_the_shift():
+    """The signal at the shifted position, with the carrier re-applied `carrier_lines` earlier."""
+    grid = rs.radar_grid(length=96, width=96)
+    fd = 950.0
+    doppler = rs.constant_doppler(grid, fd)
+    rng = np.random.default_rng(2)
+    freqs = [((rng.uniform(-0.3, 0.3) + fd / grid.prf), rng.uniform(-0.3, 0.3)) for _ in range(6)]
+    amps = rng.normal(size=6) + 1j * rng.normal(size=6)
+    signal = lambda l, m: sum(a * np.exp(2j * np.pi * (fa * l + fr * m))  # noqa: E731
+                              for (fa, fr), a in zip(freqs, amps))
+    lines, samples = np.mgrid[0:96, 0:96].astype(float)
+    block = signal(lines, samples).astype(np.complex64)
+    az = np.array([40.2, 47.9, 55.5]) + 1.37
+    rg = np.array([38.6, 50.3, 57.1])
+    zero = np.zeros(3)
+    got = interpolate_slc(block, 0, 0, az, rg, zero, grid, doppler, flatten=False,
+                          carrier_lines=np.full(3, 1.37))
+    want = signal(az, rg) * np.exp(-2j * np.pi * fd / grid.prf * 1.37)
+    np.testing.assert_allclose(got, want, atol=0.03 * np.abs(want).max())
+
+
+def test_a_field_that_follows_motion_keeps_the_unregistered_phase():
+    """A target moved 0.6 line along track in the secondary. Sampled where it was, its phase carries the
+    carrier term (the native-Doppler look); registered with the default carrier it keeps that phase at the
+    full amplitude; registered with the carrier at the shifted position it loses the term."""
+    grid = rs.radar_grid(length=96, width=96)
+    fd = 950.0
+    doppler = rs.constant_doppler(grid, fd)
+    moved = 0.6
+    block = _target(fd / grid.prf, 48.0 + moved, 47.3)
+    one, zero = np.ones(1), np.zeros(1)
+    kw = dict(flatten=False)
+    unregistered = interpolate_slc(block, 0, 0, 48.0 * one, 47.3 * one, zero, grid, doppler, **kw)[0]
+    geometric = interpolate_slc(block, 0, 0, (48.0 + moved) * one, 47.3 * one, zero, grid, doppler,
+                                carrier_lines=moved * one, **kw)[0]
+    shifted = interpolate_slc(block, 0, 0, (48.0 + moved) * one, 47.3 * one, zero, grid, doppler, **kw)[0]
+    term = 2 * np.pi * fd / grid.prf * moved
+    assert np.angle(unregistered) == pytest.approx(-term, abs=0.02)
+    assert np.angle(geometric * np.conj(unregistered)) == pytest.approx(0.0, abs=0.02)
+    assert abs(geometric) > 1.2 * abs(unregistered)
+    assert np.angle(shifted) == pytest.approx(0.0, abs=0.02)
+
+
+def test_fields_add_and_each_part_keeps_its_carrier():
+    x = np.array([0.0, 10.0]); y = np.array([10.0, 0.0])
+    measured = RegistrationField(x, y, np.full((2, 2), 0.4), np.full((2, 2), 1.0), description="measured")
+    reference = RegistrationField(x, y, np.full((2, 2), 0.25), np.full((2, 2), -2.0), description="reference",
+                                  carrier="shifted")
+    plain = lambda xx, yy: (np.full(np.shape(xx), 0.1), np.zeros(np.shape(xx)))  # noqa: E731
+    total = measured + reference + plain
+    lines, samples = total(np.array([5.0]), np.array([5.0]))
+    assert lines[0] == pytest.approx(0.75) and samples[0] == pytest.approx(-1.0)
+    assert total.carrier_lines(np.array([5.0]), np.array([5.0]))[0] == pytest.approx(0.4)
+    assert len(total.parts) == 3
+    left = plain + measured
+    assert left(np.array([5.0]), np.array([5.0]))[0][0] == pytest.approx(0.5)
+    assert left.carrier_lines(np.array([5.0]), np.array([5.0]))[0] == pytest.approx(0.4)
+    assert "measured (carrier geometric)" in total.description
+    assert "reference (carrier shifted)" in total.description
+    assert reference.carrier_lines(np.array([5.0]), np.array([5.0]))[0] == 0.0
+    with pytest.raises(ValueError, match="carrier"):
+        RegistrationField(x, y, np.zeros((2, 2)), np.zeros((2, 2)), carrier="zero-doppler")
+
+
+def test_carrier_phase_turns_a_shifted_pair_into_a_geometric_one():
+    """With the field on the secondary, `reference * conj(secondary)` gains `carrier_phase`."""
+    grid = rs.radar_grid(length=96, width=96)
+    fd = 950.0
+    doppler = rs.constant_doppler(grid, fd)
+    block = _target(fd / grid.prf, 48.0, 47.3)
+    x = np.array([0.0, 10.0]); y = np.array([10.0, 0.0])
+    field = RegistrationField(x, y, np.full((2, 2), 0.83), np.zeros((2, 2)))
+    one, zero = np.ones(1), np.zeros(1)
+    az = (47.5 + 0.83) * one
+    shifted = interpolate_slc(block, 0, 0, az, 47.3 * one, zero, grid, doppler, flatten=False)[0]
+    geometric = interpolate_slc(block, 0, 0, az, 47.3 * one, zero, grid, doppler, flatten=False,
+                                carrier_lines=0.83 * one)[0]
+    ref = 1.0 + 0.0j
+    gained = np.angle((ref * np.conj(geometric)) * np.conj(ref * np.conj(shifted)))
+    phase = field.carrier_phase(np.array([5.0]), np.array([5.0]), fd, grid.prf)[0]
+    assert np.angle(np.exp(1j * (gained - phase))) == pytest.approx(0.0, abs=1e-4)
+
+
+@pytest.mark.parametrize("carrier, carried", [("geometric", 0.4), ("shifted", None)])
+def test_geocoding_hands_the_geometric_lines_to_the_interpolator(tmp_path, monkeypatch, carrier, carried):
+    """End to end: the same RSLC geocoded with each convention differs by exactly the carrier phase."""
+    from nisar_tools import geocode_rslc, gslc_geocode
+    rslc, dem = _two_band_rslc(tmp_path)
+    real = gslc_geocode.interpolate_slc
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def _record(*args, carrier_lines=None, **kwargs):
+        seen.append((carrier_lines, real(*args, carrier_lines=carrier_lines, **kwargs)))
+        raise _Stop
+
+    monkeypatch.setattr(gslc_geocode, "interpolate_slc", _record)
+    field = RegistrationField(np.array([0.0, 1.0]), np.array([1.0, 0.0]), np.full((2, 2), 0.4),
+                              np.full((2, 2), 0.3), carrier=carrier)     # constant: beyond its grid, the edge
+    with pytest.raises(_Stop):
+        geocode_rslc(rslc, tmp_path / "out.h5", dem, frequencies=["A"], registration=field,
+                     solid_earth_tides=False, workers=1)
+    lines, values = seen[0]
+    if carried is None:
+        assert lines is None
+    else:
+        np.testing.assert_allclose(lines, carried)
+    other = "shifted" if carrier == "geometric" else "geometric"
+    seen.clear()
+    with pytest.raises(_Stop):
+        geocode_rslc(rslc, tmp_path / "out2.h5", dem, frequencies=["A"], solid_earth_tides=False, workers=1,
+                     registration=RegistrationField(field.x, field.y, field.lines, field.samples, carrier=other))
+    _, values_other = seen[0]
+    geometric, shifted = (values[0], values_other[0]) if carrier == "geometric" else (values_other[0], values[0])
+    ok = np.isfinite(geometric) & np.isfinite(shifted) & (np.abs(shifted) > 0)
+    assert ok.sum() > 100
+    grid = rs.radar_grid(length=120, width=160)
+    want = -2 * np.pi * 950.0 / grid.prf * 0.4
+    np.testing.assert_allclose(np.angle(geometric[ok] * np.conj(shifted[ok])), want, atol=1e-5)
+    np.testing.assert_allclose(np.abs(geometric[ok]), np.abs(shifted[ok]), rtol=1e-5)

@@ -42,10 +42,9 @@ dem, **kwargs)` is the same call.
 
 Two GSLCs geocoded independently are registered only as well as their geolocation agrees. ASF's per-date ionospheric
 geolocation corrections, computed from a global TEC model, can disagree between two dates by about a resolution cell,
-which costs coherence. Because NISAR keeps the Doppler carrier in its SLCs, an along-track misregistration `dt` also
-biases the interferometric phase by \(-2\pi f_\mathrm{dc}\,dt\), about 1.7 cm of LOS per metre at L-band.
+which costs coherence.
 
-`geocode_rslc(registration=...)` fixes both: it geocodes the secondary at its geometric position plus measured offsets,
+`geocode_rslc(registration=...)` fixes this: it geocodes the secondary at its geometric position plus measured offsets,
 while the phase is still flattened by the geometric range. That is the GSLC counterpart of the "rubbersheeting" that
 ISCE3 applies when it makes a GUNW.
 
@@ -73,16 +72,33 @@ secondary = geocode_rslc("data/<date 2 RSLC>.h5", "data/", dem,
   bilinearly, and beyond its grid it takes the nearest edge node. Fill gaps before building one.
 - The offsets usually come from [`roff.dense_offsets`](offsets.md#nisars-roff-from-two-rslcs) between the two RSLCs,
   or from a GUNW's `pixelOffsets` layer.
-- The registration is added after the timing corrections and before interpolation. When the field already holds
+- The registration is added after the timing corrections and before interpolation. When the field also carries
   the reference date's own corrections, pass `tec_file=None` and `solid_earth_tides=False` so they are not applied
-  twice.
+  twice, and build that part as its own field with `carrier="shifted"` (below), added to the measured one:
+  `registration={"A": measured_a + reference_a, ...}`.
 - Mixing a corrected GSLC with an uncorrected one in one pair is safe: the corrections only move where pixels are
   sampled, and both are flattened with the uncorrected range.
 
-!!! warning "The carrier term"
-    The Doppler carrier is re-ramped at the shifted position, which is right for geolocation, timing and motion. For the
-    part of the field that follows the ionosphere's along-track shift, it leaves \(-2\pi f_\mathrm{dc}\,dt\) in the
-    phase, as it does in the GUNW. This term scales with frequency, so no split-spectrum screen removes it.
+### The carrier, and which look vector the phase follows
+
+NISAR keeps the Doppler carrier in its SLCs, so sampling a pixel \(\Delta t\) further along track changes its phase by
+\(2\pi f_\mathrm{dc}\,\Delta t\), about 1.7 cm of LOS per metre of shift at L-band. `RegistrationField(carrier=)` says
+where that phase is taken:
+
+- `"geometric"` (the default) takes it at the position *before* the field's shift. The pair keeps the coherence the
+  registration buys, and its phase is the unregistered pair's. Ground motion projects on the look vector of the GSLC's
+  `radarGrid` cube (the look at the native Doppler centroid) whether the field follows it or not, and an ionospheric
+  along-track shift that the field follows leaves nothing in the phase. A relative timing error between the two RSLCs
+  that the offsets hold stays in the phase, as in an unregistered pair: correct it with `azimuth_shift` instead.
+- `"shifted"` takes it at the sampled position, as ISCE3's resampler does for the GUNW. It suits a shift that moves the
+  image but not the ground, such as the reference date's own TEC and tide shifts. Where such a field follows ground
+  motion, the phase projects that motion on the zero-Doppler look rather than the cube's, about 1.5° away in azimuth.
+  Where it follows the ionosphere's along-track shift, it keeps \(-2\pi f_\mathrm{dc}\,\Delta t\), which scales with
+  frequency, so no split-spectrum screen removes it.
+
+Fields add, and each part keeps its own carrier. A plain callable passed as `registration` keeps ISCE3's convention.
+`RegistrationField.carrier_phase(x, y, doppler_hz, line_rate)` is the interferogram phase by which the two conventions
+differ: add it to `reference * conj(secondary)` to convert a pair geocoded with `"shifted"` without geocoding again.
 
 The [InSAR pipeline](../insar_pipeline.md#1-registration) page describes how registration fits into a coseismic
 workflow.

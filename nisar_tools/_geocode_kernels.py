@@ -166,7 +166,7 @@ def _mul_cf(ar, ai, br, bi):
 
 def interpolate_slc(block, first_line, first_sample, az_index, rg_index,
                     flatten_range, radar_grid, native_doppler, flatten=True,
-                    batch=16384):
+                    batch=16384, carrier_lines=None):
     """Steps 6-7: sinc-interpolate a radar block at fractional indices.
 
     `block` is the complex RSLC window whose `[0, 0]` sample is
@@ -184,6 +184,12 @@ def interpolate_slc(block, first_line, first_sample, az_index, rg_index,
     fractional line and the flattening phase multiplied back on. A float32 sum
     is not associative, so evaluating the same weights separably (a range pass
     then an azimuth pass) changes ~0.1% of pixels after mantissa truncation.
+
+    `carrier_lines` (per pixel, like `az_index`) re-applies the Doppler phase
+    that many lines *before* the sampled position: the part of a registration
+    shift whose carrier stays at the unshifted position
+    (`RegistrationField(carrier="geometric")`). ISCE3 has no such step; the
+    Doppler is evaluated at the sampled position.
     """
     single = not isinstance(block, (list, tuple))
     blocks = [np.asarray(block)] if single else [np.asarray(b) for b in block]
@@ -219,7 +225,7 @@ def interpolate_slc(block, first_line, first_sample, az_index, rg_index,
         s = sel[start:stop]
         shared = _chip_geometry(s, az_rel, rg_rel, int_az, int_rg, W,
                                 t_full[start:stop], r_full[start:stop], flatten_range,
-                                radar_grid, native_doppler, flatten)
+                                radar_grid, native_doppler, flatten, carrier_lines)
         for (block_re, block_im), (res_re, res_im) in zip(parts, results):
             res_re[start:stop], res_im[start:stop] = _sinc_chips(block_re, block_im, shared)
     for out, (res_re, res_im) in zip(outs, results):
@@ -229,7 +235,7 @@ def interpolate_slc(block, first_line, first_sample, az_index, rg_index,
 
 
 def _chip_geometry(s, az_rel, rg_rel, int_az, int_rg, W, t_full, r_full,
-                   flatten_range, radar_grid, native_doppler, flatten):
+                   flatten_range, radar_grid, native_doppler, flatten, carrier_lines=None):
     """Everything about a batch of pixels that does not depend on the image."""
     f32 = np.float32
     kernel = _kernel_columns()
@@ -257,7 +263,7 @@ def _chip_geometry(s, az_rel, rg_rel, int_az, int_rg, W, t_full, r_full,
         # chip = sample * complex<float>(cos(k dop), -sin(k dop))
         rows.append((base + (k * W + offsets[:, None]),
                      cos[abs(k)], -sin[k] if k >= 0 else sin[-k]))
-    back = dop * frac_az
+    back = dop * frac_az if carrier_lines is None else dop * (frac_az - carrier_lines[s])
     ramps = [(np.cos(back).astype(f32), np.sin(back).astype(f32))]
     if flatten:
         phi = 4.0 * (np.pi / radar_grid.wavelength) * flatten_range[s]

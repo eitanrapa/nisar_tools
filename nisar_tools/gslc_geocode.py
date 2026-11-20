@@ -165,23 +165,42 @@ class RegistrationField:
     as well as their geolocation agrees, and ASF's per-date ionospheric
     geolocation correction (from the global TEC map) can disagree with the
     radar by metres -- about a resolution cell, which halves the pair's
-    coherence. Because NISAR keeps the ~950 Hz Doppler carrier in its SLCs,
-    an along-track misregistration of `dt` also biases the interferogram's
-    phase by `-2 pi f_dc dt`, ~1.7 cm of LOS per metre at L-band. The GUNW
-    avoids both by resampling its secondary to offsets ("rubbersheeting": a
-    dense field, or, in the solid-earth PR products, one quadratic per frame
+    coherence. The GUNW resamples its secondary to offsets ("rubbersheeting":
+    a dense field, or, in the solid-earth PR products, one quadratic per frame
     fitted to the dense offsets); this is the same thing for a GSLC: geocode
     the secondary at its geometric position plus the measured offsets, while
     the phase is still flattened by the geometric range.
 
-    The carrier is re-ramped at the shifted position. That avoids the bias for
-    geolocation, timing and motion, but not for the ionosphere's along-track
-    shift: the part of the field that follows it leaves `-2 pi f_dc dt` in
-    the phase, as it does in the GUNW (Joughin's "carrier error"). The term
-    scales with frequency, so no split-spectrum screen removes it.
+    **The carrier.** NISAR keeps the ~950 Hz Doppler carrier in its SLCs, so
+    sampling a pixel `dt` further along track changes its phase by
+    `2 pi f_dc dt`, ~1.7 cm of LOS per metre of shift at L-band. `carrier`
+    says where that phase is taken:
+
+    - ``"geometric"`` (default): at the position *before* this field's shift.
+      The pair keeps the coherence the registration buys, but its phase is the
+      unregistered pair's: ground motion projects on the look at the native
+      Doppler centroid -- the `radarGrid` cube's `losUnitVector` -- wherever
+      the field follows it or not, and an ionospheric along-track shift that
+      the field follows leaves no carrier term. A relative timing error
+      between the two RSLCs that the offsets hold stays in the phase, as in an
+      unregistered pair: correct it with `geocode_rslc(azimuth_shift=)`.
+    - ``"shifted"``: at the sampled position, as ISCE3's resampler does (the
+      GUNW). Right for a shift that moves the image but not the ground, such
+      as the reference date's own TEC and tide shifts carried by the
+      secondary. Where such a field follows ground motion, the phase projects
+      that motion on the zero-Doppler look instead, and where it follows the
+      ionosphere's along-track shift it keeps `-2 pi f_dc dt` (Joughin's
+      "carrier error"), which scales with frequency, so no split-spectrum
+      screen removes it.
+
+    Fields add (`measured + reference_shift`), each part keeping its own
+    `carrier`. `carrier_phase` converts a pair already geocoded with one
+    convention to the other without geocoding again.
     """
 
-    def __init__(self, x, y, lines, samples, description=None):
+    CARRIERS = ("geometric", "shifted")
+
+    def __init__(self, x, y, lines, samples, description=None, carrier="geometric"):
         x = np.asarray(x, dtype=np.float64)
         y = np.asarray(y, dtype=np.float64)
         lines = np.asarray(lines, dtype=np.float64)
@@ -196,13 +215,16 @@ class RegistrationField:
         dx, dy = np.diff(x), np.diff(y)
         if not (np.allclose(dx, dx[0]) and np.allclose(dy, dy[0])):
             raise ValueError("a registration field needs a regular grid")
+        if carrier not in self.CARRIERS:
+            raise ValueError(f"carrier must be one of {self.CARRIERS}, not {carrier!r}")
         self.x, self.y = x, y
         self.lines, self.samples = lines, samples
         self.description = description or "registration field"
+        self.carrier = carrier
 
     @classmethod
     def from_offsets(cls, x, y, along_track, slant_range, along_track_spacing,
-                     range_spacing, description=None):
+                     range_spacing, description=None, carrier="geometric"):
         """A field from offsets in metres, e.g. a GUNW's `pixelOffsets`.
 
         `along_track / along_track_spacing` lines and `slant_range / range_spacing`
@@ -210,7 +232,34 @@ class RegistrationField:
         """
         return cls(x, y, np.asarray(along_track, dtype=np.float64) / along_track_spacing,
                    np.asarray(slant_range, dtype=np.float64) / range_spacing,
-                   description=description)
+                   description=description, carrier=carrier)
+
+    def carrier_lines(self, x, y):
+        """The lines of this field whose carrier stays at the unshifted position:
+        all of them for ``carrier="geometric"``, none for ``"shifted"``."""
+        lines, _ = self(x, y)
+        return lines if self.carrier == "geometric" else np.zeros_like(lines)
+
+    def carrier_phase(self, x, y, doppler_hz, line_rate):
+        """Interferogram phase (rad) that ``"geometric"`` adds to ``"shifted"`` at map `x`, `y`.
+
+        `2 pi f_dc lines / line_rate`, with `doppler_hz` the band's Doppler
+        centroid there and `line_rate` the RSLC's lines per second
+        (`1 / zeroDopplerTimeSpacing`). With this field on the secondary, add
+        it to the phase of `reference * conj(secondary)` to turn a pair geocoded
+        with ``"shifted"`` into the ``"geometric"`` one, or subtract it for the
+        reverse. It is the same fraction of every band's phase, so a
+        split-spectrum screen does not see it and the whole of it goes to the
+        non-dispersive phase.
+        """
+        lines, _ = self(x, y)
+        return 2.0 * np.pi * np.asarray(doppler_hz, dtype=np.float64) * lines / float(line_rate)
+
+    def __add__(self, other):
+        return RegistrationSum(self, other)
+
+    def __radd__(self, other):
+        return RegistrationSum(other, self)
 
     def __call__(self, x, y):
         from scipy.ndimage import map_coordinates
@@ -226,7 +275,62 @@ class RegistrationField:
     def __repr__(self):
         return (f"RegistrationField({self.description!r}, {self.y.size} x {self.x.size} nodes, "
                 f"lines {np.min(self.lines):+.3f}..{np.max(self.lines):+.3f}, "
-                f"samples {np.min(self.samples):+.3f}..{np.max(self.samples):+.3f})")
+                f"samples {np.min(self.samples):+.3f}..{np.max(self.samples):+.3f}, "
+                f"carrier {self.carrier})")
+
+
+class RegistrationSum:
+    """Registration fields added together (`field_a + field_b`); each part keeps its own `carrier`."""
+
+    def __init__(self, *parts):
+        flat = []
+        for part in parts:
+            flat.extend(part.parts if isinstance(part, RegistrationSum) else [part])
+        if not flat:
+            raise ValueError("a registration sum needs at least one field")
+        self.parts = tuple(flat)
+        self.description = " + ".join(_registration_label(p) for p in self.parts)
+
+    def __call__(self, x, y):
+        lines = samples = 0.0
+        for part in self.parts:
+            dl, ds = part(x, y)
+            lines, samples = lines + np.asarray(dl, float), samples + np.asarray(ds, float)
+        return lines, samples
+
+    def carrier_lines(self, x, y):
+        """The sum of the parts' `carrier_lines`; a plain callable part contributes none."""
+        total = np.zeros(np.shape(x))
+        for part in self.parts:
+            lines = _carrier_lines(part, x, y)
+            if lines is not None:
+                total = total + lines
+        return total
+
+    def __add__(self, other):
+        return RegistrationSum(self, other)
+
+    def __radd__(self, other):
+        return RegistrationSum(other, self)
+
+    def __repr__(self):
+        return f"RegistrationSum({self.description})"
+
+
+def _carrier_lines(registration, x, y):
+    """Lines whose carrier stays at the unshifted position, or None for a plain callable (whose
+    shifts keep ISCE3's carrier at the sampled position)."""
+    fn = getattr(registration, "carrier_lines", None)
+    return None if fn is None else np.asarray(fn(x, y), dtype=np.float64)
+
+
+def _registration_label(registration):
+    """How a registration is recorded in `runConfigurationContents`."""
+    if isinstance(registration, RegistrationSum):
+        return registration.description
+    label = getattr(registration, "description", type(registration).__name__)
+    carrier = getattr(registration, "carrier", None)
+    return label if carrier is None else f"{label} (carrier {carrier})"
 
 
 def _timing_hooks(azimuth_shift):
@@ -361,7 +465,9 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
         flattening range is not changed. Usually a `RegistrationField`
         built from dense offsets, to make this GSLC the coregistered
         secondary of a reference GSLC -- see that class for why ASF's GSLCs
-        need it. Recorded in `runConfigurationContents`.
+        need it, and for its `carrier` convention (a plain callable keeps
+        ISCE3's, the carrier at the shifted position). Recorded in
+        `runConfigurationContents`.
     range_shift : dict, optional
         `{frequency: f(t, r)}`, metres to add to that band's slant range at
         zero-Doppler time `t` and range `r`: corrects the band's own range
@@ -482,7 +588,7 @@ def geocode_rslc(rslc, output, dem, *, frequencies=None, polarizations=None,
             dem_file=dem, orbit_file=orbit_file, tec_file=tec_file,
             solid_earth_tides=solid_earth_tides, flatten=flatten,
             registration=None if not registration else {
-                k: getattr(v, "description", type(v).__name__) for k, v in registration.items() if k in freq_pols},
+                k: _registration_label(v) for k, v in registration.items() if k in freq_pols},
             range_shift=None if not range_shift else {
                 k: _describe(v) for k, v in range_shift.items() if k in freq_pols},
             azimuth_shift=None if azimuth_shift is None else _describe(azimuth_shift),
@@ -701,8 +807,11 @@ def _geocode_frequency(f, rslc, freq, pols, geogrid, grid, orbit, dem, corr,
             s0 = max(int(np.floor(np.nanmin(rg))) - 5, 0)
             s1 = min(int(np.ceil(np.nanmax(rg))) + 5, grid.width - 1)
             windows = [np.asarray(readers[pol][l0:l1 + 1, s0:s1 + 1]) for pol in pols]
+            carrier = None if registration is None else _carrier_lines(registration, X.ravel(), Y.ravel())
+            if carrier is not None and not np.any(carrier):
+                carrier = None                       # all "shifted": ISCE3's arithmetic exactly
             interpolated = interpolate_slc(windows, l0, s0, az, rg, rng, grid, doppler,
-                                           flatten=flatten)
+                                           flatten=flatten, carrier_lines=carrier)
             for pol, values in zip(pols, interpolated):
                 values = values.reshape(shape)
                 truncate_mantissa(values)
